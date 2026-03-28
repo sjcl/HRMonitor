@@ -27,7 +27,7 @@ async fn main() {
         .init();
 
     let database_url =
-        std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:///data/app.db".into());
+        std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:data/app.db".into());
 
     let pool = db::init_pool(&database_url).await.expect("Failed to initialize database");
 

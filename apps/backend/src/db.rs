@@ -36,6 +36,17 @@ CREATE INDEX IF NOT EXISTS idx_hr_user_time
 ";
 
 pub async fn init_pool(database_url: &str) -> sqlx::Result<SqlitePool> {
+    if let Some(path) = database_url
+        .strip_prefix("sqlite://")
+        .or_else(|| database_url.strip_prefix("sqlite:"))
+    {
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).ok();
+            }
+        }
+    }
+
     let options = SqliteConnectOptions::from_str(database_url)?
         .create_if_missing(true);
 
