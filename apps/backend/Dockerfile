@@ -14,8 +14,8 @@ RUN apt-get update && apt-get install -y libssl3 ca-certificates && rm -rf /var/
 
 RUN mkdir -p /data
 
-COPY --from=builder /app/target/release/hrmonitor-backend /usr/local/bin/hrmonitor-backend
+COPY --from=builder /app/target/release/hrmonitor_backend /usr/local/bin/hrmonitor_backend
 
 EXPOSE 3001
 
-CMD ["hrmonitor-backend"]
+CMD ["hrmonitor_backend"]
