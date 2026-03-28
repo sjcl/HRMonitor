@@ -83,7 +83,10 @@ async fn handle_message(
     }
 
     let now = chrono_now();
-    let recorded_at = msg.measured_at.filter(|&t| t > 0).unwrap_or(now);
+    let recorded_at = msg.measured_at
+        .filter(|&t| t > 0)
+        .map(|t| t / 1000)
+        .unwrap_or(now);
 
     sqlx::query(
         "INSERT INTO heart_rate_records (user_id, pulsoid_token_id, recorded_at, bpm, received_at) VALUES (?, ?, ?, ?, ?)"
