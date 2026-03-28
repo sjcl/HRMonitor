@@ -95,6 +95,20 @@ export function deleteToken(tokenId: string) {
   });
 }
 
+export interface DailyStats {
+  day: number;
+  avg_bpm: number;
+  min_bpm: number;
+  max_bpm: number;
+  count: number;
+}
+
+export function getDailyStats(userId: string, from: number, to: number) {
+  return fetchJson<DailyStats[]>(
+    `/api/users/${userId}/heart-rates/daily-stats?from=${from}&to=${to}`
+  );
+}
+
 export function getHeartRates(
   userId: string,
   params?: { from?: number; to?: number; limit?: number }

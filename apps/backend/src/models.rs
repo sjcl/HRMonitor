@@ -66,6 +66,12 @@ pub struct HeartRateQuery {
     pub limit: Option<i64>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct DailyStatsQuery {
+    pub from: i64,
+    pub to: i64,
+}
+
 // --- Response DTOs ---
 
 #[derive(Debug, FromRow, Serialize)]
@@ -108,6 +114,15 @@ impl From<PulsoidToken> for TokenResponse {
 pub struct HeartRateResponse {
     pub bpm: i32,
     pub timestamp: i64,
+}
+
+#[derive(Debug, FromRow, Serialize)]
+pub struct DailyStatsResponse {
+    pub day: i64,
+    pub avg_bpm: f64,
+    pub min_bpm: i32,
+    pub max_bpm: i32,
+    pub count: i64,
 }
 
 // --- Pulsoid WebSocket message ---

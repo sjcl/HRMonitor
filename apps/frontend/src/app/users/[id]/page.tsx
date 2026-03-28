@@ -3,6 +3,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { getLatestHeartRate, getUsers } from "@/lib/api";
 import { HeartRateChart } from "@/components/heart-rate-chart";
+import { DailyStats } from "@/components/daily-stats";
 import { TokenList } from "@/components/token-list";
 import { AddTokenForm } from "@/components/add-token-form";
 import { use } from "react";
@@ -46,6 +47,11 @@ export default function UserDetailPage({
       <section className="mb-8">
         <h2 className="text-lg font-semibold mb-3">Heart Rate</h2>
         <HeartRateChart userId={id} />
+      </section>
+
+      <section className="mb-8">
+        <h2 className="text-lg font-semibold mb-3">Daily Statistics</h2>
+        <DailyStats userId={id} />
       </section>
 
       <section>

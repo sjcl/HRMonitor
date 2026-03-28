@@ -3,7 +3,7 @@ use axum::Json;
 use std::sync::Arc;
 
 use crate::error::AppError;
-use crate::models::{HeartRateQuery, HeartRateResponse};
+use crate::models::{DailyStatsQuery, DailyStatsResponse, HeartRateQuery, HeartRateResponse};
 use crate::AppState;
 
 pub async fn list_heart_rates(
@@ -55,6 +55,35 @@ pub async fn list_heart_rates(
             .await?
         }
     };
+
+    Ok(Json(records))
+}
+
+pub async fn daily_stats(
+    State(state): State<Arc<AppState>>,
+    Path(user_id): Path<String>,
+    Query(params): Query<DailyStatsQuery>,
+) -> Result<Json<Vec<DailyStatsResponse>>, AppError> {
+    let records: Vec<DailyStatsResponse> = sqlx::query_as(
+        "SELECT
+            (? + ((recorded_at - ?) / 86400) * 86400) as day,
+            ROUND(AVG(bpm), 1) as avg_bpm,
+            MIN(bpm) as min_bpm,
+            MAX(bpm) as max_bpm,
+            COUNT(*) as count
+         FROM heart_rate_records
+         WHERE user_id = ? AND recorded_at >= ? AND recorded_at < ?
+         GROUP BY (recorded_at - ?) / 86400
+         ORDER BY day ASC",
+    )
+    .bind(params.from)
+    .bind(params.from)
+    .bind(&user_id)
+    .bind(params.from)
+    .bind(params.to)
+    .bind(params.from)
+    .fetch_all(&state.db)
+    .await?;
 
     Ok(Json(records))
 }
