@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { getUsers, createUser } from "@/lib/api";
 import { useState } from "react";
 import Link from "next/link";
+import { AllUsersHeartRateChart } from "@/components/all-users-heart-rate-chart";
 
 export default function UsersPage() {
   const queryClient = useQueryClient();
@@ -62,6 +63,8 @@ export default function UsersPage() {
           </button>
         </form>
       )}
+
+      <AllUsersHeartRateChart />
 
       {isLoading ? (
         <p className="text-gray-400">Loading...</p>
