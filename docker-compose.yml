@@ -1,0 +1,33 @@
+services:
+  backend:
+    build: ./apps/backend
+    volumes:
+      - db-data:/data
+    environment:
+      - DATABASE_URL=sqlite:///data/app.db
+      - RUST_LOG=hrmonitor_backend=info
+    expose:
+      - "3001"
+    restart: unless-stopped
+
+  frontend:
+    build: ./apps/frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - BACKEND_URL=http://backend:3001
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel run
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      - frontend
+    restart: unless-stopped
+
+volumes:
+  db-data:

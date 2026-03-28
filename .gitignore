@@ -1,2 +1,15 @@
-docs/*
 .idea
+
+# Backend
+target/
+
+# Frontend
+node_modules/
+.next/
+
+# Data
+/data/
+*.db
+
+# Environment
+.env
