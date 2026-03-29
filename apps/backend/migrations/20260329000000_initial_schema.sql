@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS heart_rate_records (
     received_at TIMESTAMPTZ NOT NULL
 );
 
-SELECT create_hypertable('heart_rate_records', by_range('recorded_at'), if_not_exists => TRUE);
+SELECT create_hypertable('heart_rate_records', by_range('recorded_at', INTERVAL '1 day'), if_not_exists => TRUE);
 
 CREATE INDEX IF NOT EXISTS idx_hr_user_time
     ON heart_rate_records(user_id, recorded_at DESC);
