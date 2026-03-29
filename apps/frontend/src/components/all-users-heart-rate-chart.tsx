@@ -77,6 +77,13 @@ export function AllUsersHeartRateChart() {
 
   const useShortFormat = range.kind === "preset" && range.seconds <= 10800;
 
+  const formatTimestamp = (tsMs: number): string => {
+    const d = new Date(tsMs);
+    return useShortFormat
+      ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+      : d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  };
+
   const BUCKET_SIZE = 5;
   const bucketMap = new Map<number, Record<string, unknown>>();
   const userMeta: { id: string; name: string }[] = [];
@@ -98,18 +105,7 @@ export function AllUsersHeartRateChart() {
     .sort((a, b) => (a._ts as number) - (b._ts as number))
     .map((row) => ({
       ...row,
-      time: useShortFormat
-        ? new Date((row._ts as number) * 1000).toLocaleTimeString([], {
-            hour: "2-digit",
-            minute: "2-digit",
-            second: "2-digit",
-          })
-        : new Date((row._ts as number) * 1000).toLocaleString([], {
-            month: "short",
-            day: "numeric",
-            hour: "2-digit",
-            minute: "2-digit",
-          }),
+      timestamp: (row._ts as number) * 1000,
     }));
 
   const applyCustomRange = () => {
@@ -194,9 +190,18 @@ export function AllUsersHeartRateChart() {
         <ResponsiveContainer width="100%" height={300}>
           <LineChart data={chartData}>
             <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-            <XAxis dataKey="time" stroke="#9CA3AF" fontSize={12} />
+            <XAxis
+              dataKey="timestamp"
+              type="number"
+              scale="time"
+              domain={['dataMin', 'dataMax']}
+              tickFormatter={formatTimestamp}
+              stroke="#9CA3AF"
+              fontSize={12}
+            />
             <YAxis domain={[40, 200]} stroke="#9CA3AF" fontSize={12} />
             <Tooltip
+              labelFormatter={(value) => formatTimestamp(value as number)}
               contentStyle={{
                 backgroundColor: "#1F2937",
                 border: "1px solid #374151",
@@ -213,7 +218,6 @@ export function AllUsersHeartRateChart() {
                 stroke={USER_COLORS[i % USER_COLORS.length]}
                 strokeWidth={2}
                 dot={false}
-                connectNulls
               />
             ))}
           </LineChart>

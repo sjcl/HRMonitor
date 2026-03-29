@@ -55,22 +55,18 @@ export function HeartRateChart({ userId }: { userId: string }) {
   const useShortFormat =
     range.kind === "preset" && range.seconds <= 10800;
 
+  const formatTimestamp = (tsMs: number): string => {
+    const d = new Date(tsMs);
+    return useShortFormat
+      ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+      : d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  };
+
   const chartData = (records ?? [])
     .slice()
     .sort((a, b) => a.timestamp - b.timestamp)
     .map((r) => ({
-      time: useShortFormat
-        ? new Date(r.timestamp * 1000).toLocaleTimeString([], {
-            hour: "2-digit",
-            minute: "2-digit",
-            second: "2-digit",
-          })
-        : new Date(r.timestamp * 1000).toLocaleString([], {
-            month: "short",
-            day: "numeric",
-            hour: "2-digit",
-            minute: "2-digit",
-          }),
+      timestamp: r.timestamp * 1000,
       bpm: r.bpm,
     }));
 
@@ -153,9 +149,18 @@ export function HeartRateChart({ userId }: { userId: string }) {
         <ResponsiveContainer width="100%" height={300}>
           <LineChart data={chartData}>
             <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-            <XAxis dataKey="time" stroke="#9CA3AF" fontSize={12} />
+            <XAxis
+              dataKey="timestamp"
+              type="number"
+              scale="time"
+              domain={['dataMin', 'dataMax']}
+              tickFormatter={formatTimestamp}
+              stroke="#9CA3AF"
+              fontSize={12}
+            />
             <YAxis domain={[40, 200]} stroke="#9CA3AF" fontSize={12} />
             <Tooltip
+              labelFormatter={(value) => formatTimestamp(value as number)}
               contentStyle={{
                 backgroundColor: "#1F2937",
                 border: "1px solid #374151",
