@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
-use crate::models::PulsoidToken;
+use crate::models::UserRow;
 use crate::worker::run_worker;
 
 pub struct WorkerManager {
@@ -21,44 +21,44 @@ impl WorkerManager {
     }
 
     pub async fn start_all_active(&self) {
-        let tokens: Vec<PulsoidToken> = sqlx::query_as(
-            "SELECT id, user_id, label, access_token, is_active,
-                    EXTRACT(EPOCH FROM last_connected_at)::BIGINT as last_connected_at,
-                    last_error,
+        let users: Vec<UserRow> = sqlx::query_as(
+            "SELECT id, name, pulsoid_access_token,
+                    EXTRACT(EPOCH FROM pulsoid_last_connected_at)::BIGINT as pulsoid_last_connected_at,
+                    pulsoid_last_error,
                     EXTRACT(EPOCH FROM created_at)::BIGINT as created_at,
                     EXTRACT(EPOCH FROM updated_at)::BIGINT as updated_at
-             FROM pulsoid_tokens WHERE is_active = true",
+             FROM users WHERE pulsoid_access_token IS NOT NULL",
         )
         .fetch_all(&self.db)
         .await
         .unwrap_or_default();
 
-        tracing::info!("Starting {} active workers", tokens.len());
+        tracing::info!("Starting {} active workers", users.len());
 
-        for token in tokens {
-            self.start(token).await;
+        for user in users {
+            self.start(user).await;
         }
     }
 
-    pub async fn start(&self, token: PulsoidToken) {
+    pub async fn start(&self, user: UserRow) {
         let mut workers = self.workers.lock().await;
 
         // Stop existing worker if any
-        if let Some(handle) = workers.remove(&token.id) {
+        if let Some(handle) = workers.remove(&user.id) {
             handle.abort();
         }
 
         let db = self.db.clone();
-        let token_id = token.id.clone();
-        let handle = tokio::spawn(run_worker(db, token));
-        workers.insert(token_id, handle);
+        let user_id = user.id.clone();
+        let handle = tokio::spawn(run_worker(db, user));
+        workers.insert(user_id, handle);
     }
 
-    pub async fn stop(&self, token_id: &str) {
+    pub async fn stop(&self, user_id: &str) {
         let mut workers = self.workers.lock().await;
-        if let Some(handle) = workers.remove(token_id) {
+        if let Some(handle) = workers.remove(user_id) {
             handle.abort();
-            tracing::info!(token_id, "Worker stopped");
+            tracing::info!(user_id, "Worker stopped");
         }
     }
 }

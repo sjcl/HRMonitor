@@ -4,7 +4,7 @@ use axum::Json;
 use std::sync::Arc;
 
 use crate::error::AppError;
-use crate::models::{CreateUserRequest, UpdateUserRequest, User, UserListItem};
+use crate::models::{CreateUserRequest, UpdateUserRequest, User, UserListItem, UserRow};
 use crate::AppState;
 
 pub async fn list_users(
@@ -16,7 +16,7 @@ pub async fn list_users(
             u.name,
             EXTRACT(EPOCH FROM u.created_at)::BIGINT as created_at,
             (SELECT hr.bpm FROM heart_rate_records hr WHERE hr.user_id = u.id ORDER BY hr.recorded_at DESC LIMIT 1) as latest_bpm,
-            (SELECT COUNT(*) FROM pulsoid_tokens pt WHERE pt.user_id = u.id) as token_count
+            (u.pulsoid_access_token IS NOT NULL) as has_pulsoid_token
         FROM users u
         ORDER BY u.created_at DESC"
     )
@@ -77,14 +77,19 @@ pub async fn update_user(
         return Err(AppError::NotFound("User not found".into()));
     }
 
-    let user: User = sqlx::query_as(
-        "SELECT id, name, EXTRACT(EPOCH FROM created_at)::BIGINT as created_at, EXTRACT(EPOCH FROM updated_at)::BIGINT as updated_at FROM users WHERE id = $1"
+    let row: UserRow = sqlx::query_as(
+        "SELECT id, name, pulsoid_access_token,
+                EXTRACT(EPOCH FROM pulsoid_last_connected_at)::BIGINT as pulsoid_last_connected_at,
+                pulsoid_last_error,
+                EXTRACT(EPOCH FROM created_at)::BIGINT as created_at,
+                EXTRACT(EPOCH FROM updated_at)::BIGINT as updated_at
+         FROM users WHERE id = $1"
     )
     .bind(&id)
     .fetch_one(&state.db)
     .await?;
 
-    Ok(Json(user))
+    Ok(Json(User::from(row)))
 }
 
 fn now_unix() -> i64 {

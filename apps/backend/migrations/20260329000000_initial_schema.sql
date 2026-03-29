@@ -3,18 +3,9 @@ CREATE EXTENSION IF NOT EXISTS timescaledb;
 CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE TABLE IF NOT EXISTS pulsoid_tokens (
-    id TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    label TEXT,
-    access_token TEXT NOT NULL,
-    is_active BOOLEAN NOT NULL DEFAULT true,
-    last_connected_at TIMESTAMPTZ,
-    last_error TEXT,
+    pulsoid_access_token TEXT,
+    pulsoid_last_connected_at TIMESTAMPTZ,
+    pulsoid_last_error TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -22,7 +13,6 @@ CREATE TABLE IF NOT EXISTS pulsoid_tokens (
 CREATE TABLE IF NOT EXISTS heart_rate_records (
     id BIGINT GENERATED ALWAYS AS IDENTITY,
     user_id TEXT NOT NULL,
-    pulsoid_token_id TEXT NOT NULL,
     recorded_at TIMESTAMPTZ NOT NULL,
     bpm INTEGER NOT NULL,
     received_at TIMESTAMPTZ NOT NULL

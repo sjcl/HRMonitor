@@ -4,8 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { getLatestHeartRate, getUsers } from "@/lib/api";
 import { HeartRateChart } from "@/components/heart-rate-chart";
 import { DailyStats } from "@/components/daily-stats";
-import { TokenList } from "@/components/token-list";
-import { AddTokenForm } from "@/components/add-token-form";
+import { PulsoidToken } from "@/components/pulsoid-token";
 import { use } from "react";
 import Link from "next/link";
 
@@ -55,11 +54,8 @@ export default function UserDetailPage({
       </section>
 
       <section>
-        <h2 className="text-lg font-semibold mb-3">Pulsoid Tokens</h2>
-        <TokenList userId={id} />
-        <div className="mt-3">
-          <AddTokenForm userId={id} />
-        </div>
+        <h2 className="text-lg font-semibold mb-3">Pulsoid</h2>
+        <PulsoidToken userId={id} />
       </section>
     </div>
   );

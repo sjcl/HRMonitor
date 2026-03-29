@@ -43,12 +43,10 @@ async fn main() {
         .route("/api/users", get(handlers::users::list_users).post(handlers::users::create_user))
         .route("/api/users/{id}", patch(handlers::users::update_user))
         .route(
-            "/api/users/{id}/pulsoid-tokens",
-            get(handlers::tokens::list_tokens).post(handlers::tokens::create_token),
-        )
-        .route(
-            "/api/pulsoid-tokens/{id}",
-            patch(handlers::tokens::update_token).delete(handlers::tokens::delete_token),
+            "/api/users/{id}/pulsoid-token",
+            get(handlers::tokens::get_pulsoid_token)
+                .put(handlers::tokens::set_pulsoid_token)
+                .delete(handlers::tokens::delete_pulsoid_token),
         )
         .route("/api/users/{id}/heart-rates/daily-stats", get(handlers::heart_rates::daily_stats))
         .route("/api/users/{id}/heart-rates", get(handlers::heart_rates::list_heart_rates))

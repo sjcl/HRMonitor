@@ -4,7 +4,7 @@ export interface UserListItem {
   id: string;
   name: string;
   latest_bpm: number | null;
-  token_count: number;
+  has_pulsoid_token: boolean;
   created_at: number;
 }
 
@@ -15,15 +15,9 @@ export interface User {
   updated_at: number;
 }
 
-export interface Token {
-  id: string;
-  user_id: string;
-  label: string | null;
-  is_active: boolean;
+export interface PulsoidTokenStatus {
   last_connected_at: number | null;
   last_error: string | null;
-  created_at: number;
-  updated_at: number;
 }
 
 export interface HeartRateRecord {
@@ -63,34 +57,31 @@ export function updateUser(id: string, name: string) {
   });
 }
 
-export function getTokens(userId: string) {
-  return fetchJson<Token[]>(`/api/users/${userId}/pulsoid-tokens`);
+export async function getPulsoidToken(
+  userId: string
+): Promise<PulsoidTokenStatus | null> {
+  const res = await fetch(`/api/users/${userId}/pulsoid-token`);
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `HTTP ${res.status}`);
+  }
+  return res.json();
 }
 
-export function createToken(
-  userId: string,
-  data: { label?: string; access_token: string }
-) {
-  return fetchJson<Token>(`/api/users/${userId}/pulsoid-tokens`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(data),
-  });
+export function setPulsoidToken(userId: string, accessToken: string) {
+  return fetchJson<PulsoidTokenStatus>(
+    `/api/users/${userId}/pulsoid-token`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ access_token: accessToken }),
+    }
+  );
 }
 
-export function updateToken(
-  tokenId: string,
-  data: { label?: string; is_active?: boolean }
-) {
-  return fetchJson<Token>(`/api/pulsoid-tokens/${tokenId}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(data),
-  });
-}
-
-export function deleteToken(tokenId: string) {
-  return fetchJson<void>(`/api/pulsoid-tokens/${tokenId}`, {
+export function deletePulsoidToken(userId: string) {
+  return fetchJson<void>(`/api/users/${userId}/pulsoid-token`, {
     method: "DELETE",
   });
 }

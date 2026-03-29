@@ -75,7 +75,7 @@ export default function UsersPage() {
               <tr>
                 <th className="text-left px-4 py-3 text-sm text-gray-400">Name</th>
                 <th className="text-right px-4 py-3 text-sm text-gray-400">Latest BPM</th>
-                <th className="text-right px-4 py-3 text-sm text-gray-400">Tokens</th>
+                <th className="text-right px-4 py-3 text-sm text-gray-400">Pulsoid</th>
               </tr>
             </thead>
             <tbody>
@@ -95,8 +95,12 @@ export default function UsersPage() {
                   <td className="px-4 py-3 text-right">
                     <BpmBadge bpm={user.latest_bpm} />
                   </td>
-                  <td className="px-4 py-3 text-right text-gray-400">
-                    {user.token_count}
+                  <td className="px-4 py-3 text-right">
+                    {user.has_pulsoid_token ? (
+                      <span className="inline-block w-2 h-2 rounded-full bg-green-400" title="Connected" />
+                    ) : (
+                      <span className="text-gray-600">--</span>
+                    )}
                   </td>
                 </tr>
               ))}
