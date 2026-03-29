@@ -13,21 +13,35 @@ import {
   ResponsiveContainer,
 } from "recharts";
 
-function getDayBounds(date: Date): { from: number; to: number } {
-  const start = new Date(date.getFullYear(), date.getMonth(), date.getDate());
-  const end = new Date(
-    date.getFullYear(),
-    date.getMonth(),
-    date.getDate() + 1
-  );
-  return {
-    from: Math.floor(start.getTime() / 1000),
-    to: Math.floor(end.getTime() / 1000),
-  };
+function formatDateIso(date: Date, tz: string): string {
+  const parts = new Intl.DateTimeFormat("en", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const y = parts.find((p) => p.type === "year")!.value;
+  const m = parts.find((p) => p.type === "month")!.value;
+  const d = parts.find((p) => p.type === "day")!.value;
+  return `${y}-${m}-${d}`;
 }
 
-function formatDate(date: Date): string {
-  return date.toLocaleDateString(undefined, {
+function todayInTz(tz: string): string {
+  return formatDateIso(new Date(), tz);
+}
+
+function addDays(dateStr: string, days: number): string {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const date = new Date(y, m - 1, d + days);
+  const yy = date.getFullYear();
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  const dd = String(date.getDate()).padStart(2, "0");
+  return `${yy}-${mm}-${dd}`;
+}
+
+function formatDateDisplay(dateStr: string): string {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString(undefined, {
     weekday: "long",
     year: "numeric",
     month: "long",
@@ -35,44 +49,32 @@ function formatDate(date: Date): string {
   });
 }
 
-function toInputDate(date: Date): string {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, "0");
-  const d = String(date.getDate()).padStart(2, "0");
-  return `${y}-${m}-${d}`;
-}
+export function DailyStats({
+  userId,
+  timezone,
+}: {
+  userId: string;
+  timezone: string;
+}) {
+  const [selectedDate, setSelectedDate] = useState(() => todayInTz(timezone));
 
-function isToday(date: Date): boolean {
-  const now = new Date();
-  return (
-    date.getFullYear() === now.getFullYear() &&
-    date.getMonth() === now.getMonth() &&
-    date.getDate() === now.getDate()
-  );
-}
+  const statsFrom = addDays(selectedDate, -15);
+  const statsTo = addDays(selectedDate, 16);
 
-export function DailyStats({ userId }: { userId: string }) {
-  const [selectedDate, setSelectedDate] = useState(
-    () => new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate())
-  );
-
-  const { from, to } = getDayBounds(selectedDate);
-
-  // Fetch stats for 31-day window around selected date
-  const statsFrom = from - 15 * 86400;
-  const statsTo = to + 15 * 86400;
+  const today = todayInTz(timezone);
+  const isToday = selectedDate === today;
 
   const { data: dailyStats } = useQuery({
-    queryKey: ["daily-stats", userId, statsFrom, statsTo],
+    queryKey: ["daily-stats", userId, timezone, statsFrom, statsTo],
     queryFn: () => getDailyStats(userId, statsFrom, statsTo),
   });
 
   const { data: records } = useQuery({
-    queryKey: ["daily-heart-rates", userId, from, to],
-    queryFn: () => getHeartRates(userId, { from, to, limit: 2880 }),
+    queryKey: ["daily-heart-rates", userId, timezone, selectedDate],
+    queryFn: () => getHeartRates(userId, { date: selectedDate, limit: 2880 }),
   });
 
-  const todayStats = dailyStats?.find((s) => s.day === from);
+  const todayStats = dailyStats?.find((s) => s.day === selectedDate);
 
   const chartData = (records ?? [])
     .slice()
@@ -81,21 +83,18 @@ export function DailyStats({ userId }: { userId: string }) {
       time: new Date(r.timestamp * 1000).toLocaleTimeString([], {
         hour: "2-digit",
         minute: "2-digit",
+        timeZone: timezone,
       }),
       bpm: r.bpm,
     }));
 
   const goToPrevDay = () => {
-    setSelectedDate(
-      (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate() - 1)
-    );
+    setSelectedDate((d) => addDays(d, -1));
   };
 
   const goToNextDay = () => {
-    if (!isToday(selectedDate)) {
-      setSelectedDate(
-        (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1)
-      );
+    if (!isToday) {
+      setSelectedDate((d) => addDays(d, 1));
     }
   };
 
@@ -111,16 +110,15 @@ export function DailyStats({ userId }: { userId: string }) {
         </button>
         <div className="flex items-center gap-3">
           <span className="text-sm font-medium">
-            {formatDate(selectedDate)}
+            {formatDateDisplay(selectedDate)}
           </span>
           <input
             type="date"
-            value={toInputDate(selectedDate)}
-            max={toInputDate(new Date())}
+            value={selectedDate}
+            max={today}
             onChange={(e) => {
               if (e.target.value) {
-                const [y, m, d] = e.target.value.split("-").map(Number);
-                setSelectedDate(new Date(y, m - 1, d));
+                setSelectedDate(e.target.value);
               }
             }}
             className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-sm text-white [color-scheme:dark]"
@@ -128,9 +126,9 @@ export function DailyStats({ userId }: { userId: string }) {
         </div>
         <button
           onClick={goToNextDay}
-          disabled={isToday(selectedDate)}
+          disabled={isToday}
           className={`px-3 py-1.5 rounded ${
-            isToday(selectedDate)
+            isToday
               ? "bg-gray-900 text-gray-600 cursor-not-allowed"
               : "bg-gray-800 text-gray-400 hover:bg-gray-700"
           }`}

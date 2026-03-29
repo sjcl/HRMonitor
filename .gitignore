@@ -7,6 +7,7 @@ target/
 # Frontend
 node_modules/
 .next/
+tsconfig.tsbuildinfo
 
 # Data
 /data/

@@ -73,10 +73,12 @@ export default function UserDetailPage({
         <HeartRateChart userId={id} />
       </section>
 
-      <section className="mb-8">
-        <h2 className="text-lg font-semibold mb-3">Daily Statistics</h2>
-        <DailyStats userId={id} />
-      </section>
+      {user && (
+        <section className="mb-8">
+          <h2 className="text-lg font-semibold mb-3">Daily Statistics</h2>
+          <DailyStats userId={id} timezone={user.timezone} key={user.timezone} />
+        </section>
+      )}
 
       <section className="mb-8">
         <h2 className="text-lg font-semibold mb-3">Pulsoid</h2>

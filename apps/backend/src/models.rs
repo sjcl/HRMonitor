@@ -70,12 +70,13 @@ pub struct HeartRateQuery {
     pub from: Option<i64>,
     pub to: Option<i64>,
     pub limit: Option<i64>,
+    pub date: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct DailyStatsQuery {
-    pub from: i64,
-    pub to: i64,
+    pub from: String,
+    pub to: String,
 }
 
 // --- Response DTOs ---
@@ -103,7 +104,7 @@ pub struct HeartRateResponse {
 
 #[derive(Debug, FromRow, Serialize)]
 pub struct DailyStatsResponse {
-    pub day: i64,
+    pub day: String,
     pub avg_bpm: f64,
     pub min_bpm: i32,
     pub max_bpm: i32,

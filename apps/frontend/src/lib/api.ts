@@ -92,14 +92,14 @@ export function deletePulsoidToken(userId: string) {
 }
 
 export interface DailyStats {
-  day: number;
+  day: string;
   avg_bpm: number;
   min_bpm: number;
   max_bpm: number;
   count: number;
 }
 
-export function getDailyStats(userId: string, from: number, to: number) {
+export function getDailyStats(userId: string, from: string, to: string) {
   return fetchJson<DailyStats[]>(
     `/api/users/${userId}/heart-rates/daily-stats?from=${from}&to=${to}`
   );
@@ -107,11 +107,15 @@ export function getDailyStats(userId: string, from: number, to: number) {
 
 export function getHeartRates(
   userId: string,
-  params?: { from?: number; to?: number; limit?: number }
+  params?: { from?: number; to?: number; limit?: number; date?: string }
 ) {
   const query = new URLSearchParams();
-  if (params?.from) query.set("from", String(params.from));
-  if (params?.to) query.set("to", String(params.to));
+  if (params?.date) {
+    query.set("date", params.date);
+  } else {
+    if (params?.from) query.set("from", String(params.from));
+    if (params?.to) query.set("to", String(params.to));
+  }
   if (params?.limit) query.set("limit", String(params.limit));
   const qs = query.toString();
   return fetchJson<HeartRateRecord[]>(
