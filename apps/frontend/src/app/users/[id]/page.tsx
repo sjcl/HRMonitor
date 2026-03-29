@@ -58,13 +58,20 @@ export default function UserDetailPage({
 
       <div className="flex items-center gap-4 mt-4 mb-6">
         <h1 className="text-2xl font-bold">{user?.name ?? "Loading..."}</h1>
-        {user && (
-          <span className="text-sm text-gray-400">{user.timezone}</span>
-        )}
         {latestHr && (
-          <span className="text-3xl font-mono font-bold text-red-400">
-            {latestHr.bpm} BPM
-          </span>
+          <>
+            <span className="text-3xl font-mono font-bold text-red-400">
+              {latestHr.bpm} BPM
+            </span>
+            <span className="text-sm text-gray-400">
+              {new Date(latestHr.timestamp * 1000).toLocaleTimeString("ja-JP", {
+                timeZone: user?.timezone,
+                hour: "2-digit",
+                minute: "2-digit",
+                second: "2-digit",
+              })}
+            </span>
+          </>
         )}
       </div>
 
