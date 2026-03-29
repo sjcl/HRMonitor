@@ -8,7 +8,7 @@ use crate::models::{PulsoidTokenResponse, SetPulsoidTokenRequest, UserRow};
 use crate::AppState;
 
 const SELECT_USER_ROW: &str =
-    "SELECT id, name, pulsoid_access_token,
+    "SELECT id, name, timezone, pulsoid_access_token,
             EXTRACT(EPOCH FROM pulsoid_last_connected_at)::BIGINT as pulsoid_last_connected_at,
             pulsoid_last_error,
             EXTRACT(EPOCH FROM created_at)::BIGINT as created_at,
