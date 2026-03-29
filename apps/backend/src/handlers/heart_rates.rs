@@ -43,25 +43,20 @@ pub async fn list_heart_rates(
 
     if let Some(ref date) = params.date {
         parse_date(date)?;
-
-        let timezone: String = sqlx::query_scalar("SELECT timezone FROM users WHERE id = $1")
-            .bind(&user_id)
-            .fetch_optional(&state.db)
-            .await?
-            .ok_or_else(|| AppError::NotFound("User not found".into()))?;
+        check_user_exists(&state.db, &user_id).await?;
 
         let records: Vec<HeartRateResponse> = sqlx::query_as(
-            "SELECT bpm, EXTRACT(EPOCH FROM recorded_at)::BIGINT as timestamp
-             FROM heart_rate_records
+            "WITH tz AS (SELECT timezone FROM users WHERE id = $1)
+             SELECT bpm, EXTRACT(EPOCH FROM recorded_at)::BIGINT as timestamp
+             FROM heart_rate_records, tz
              WHERE user_id = $1
-               AND recorded_at >= ($2::date AT TIME ZONE $3)
-               AND recorded_at <  (($2::date + INTERVAL '1 day') AT TIME ZONE $3)
+               AND recorded_at >= ($2::date AT TIME ZONE tz.timezone)
+               AND recorded_at <  (($2::date + INTERVAL '1 day') AT TIME ZONE tz.timezone)
              ORDER BY recorded_at DESC
-             LIMIT $4",
+             LIMIT $3",
         )
         .bind(&user_id)
         .bind(date)
-        .bind(&timezone)
         .bind(limit)
         .fetch_all(&state.db)
         .await?;
