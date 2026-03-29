@@ -16,7 +16,7 @@ pub async fn list_heart_rates(
     let records: Vec<HeartRateResponse> = match (params.from, params.to) {
         (Some(from), Some(to)) => {
             sqlx::query_as(
-                "SELECT bpm, recorded_at as timestamp FROM heart_rate_records WHERE user_id = ? AND recorded_at >= ? AND recorded_at <= ? ORDER BY recorded_at DESC LIMIT ?"
+                "SELECT bpm, EXTRACT(EPOCH FROM recorded_at)::BIGINT as timestamp FROM heart_rate_records WHERE user_id = $1 AND recorded_at >= to_timestamp($2) AND recorded_at <= to_timestamp($3) ORDER BY recorded_at DESC LIMIT $4"
             )
             .bind(&user_id)
             .bind(from)
@@ -27,7 +27,7 @@ pub async fn list_heart_rates(
         }
         (Some(from), None) => {
             sqlx::query_as(
-                "SELECT bpm, recorded_at as timestamp FROM heart_rate_records WHERE user_id = ? AND recorded_at >= ? ORDER BY recorded_at DESC LIMIT ?"
+                "SELECT bpm, EXTRACT(EPOCH FROM recorded_at)::BIGINT as timestamp FROM heart_rate_records WHERE user_id = $1 AND recorded_at >= to_timestamp($2) ORDER BY recorded_at DESC LIMIT $3"
             )
             .bind(&user_id)
             .bind(from)
@@ -37,7 +37,7 @@ pub async fn list_heart_rates(
         }
         (None, Some(to)) => {
             sqlx::query_as(
-                "SELECT bpm, recorded_at as timestamp FROM heart_rate_records WHERE user_id = ? AND recorded_at <= ? ORDER BY recorded_at DESC LIMIT ?"
+                "SELECT bpm, EXTRACT(EPOCH FROM recorded_at)::BIGINT as timestamp FROM heart_rate_records WHERE user_id = $1 AND recorded_at <= to_timestamp($2) ORDER BY recorded_at DESC LIMIT $3"
             )
             .bind(&user_id)
             .bind(to)
@@ -47,7 +47,7 @@ pub async fn list_heart_rates(
         }
         (None, None) => {
             sqlx::query_as(
-                "SELECT bpm, recorded_at as timestamp FROM heart_rate_records WHERE user_id = ? ORDER BY recorded_at DESC LIMIT ?"
+                "SELECT bpm, EXTRACT(EPOCH FROM recorded_at)::BIGINT as timestamp FROM heart_rate_records WHERE user_id = $1 ORDER BY recorded_at DESC LIMIT $2"
             )
             .bind(&user_id)
             .bind(limit)
@@ -66,22 +66,19 @@ pub async fn daily_stats(
 ) -> Result<Json<Vec<DailyStatsResponse>>, AppError> {
     let records: Vec<DailyStatsResponse> = sqlx::query_as(
         "SELECT
-            (? + ((recorded_at - ?) / 86400) * 86400) as day,
-            ROUND(AVG(bpm), 1) as avg_bpm,
+            EXTRACT(EPOCH FROM date_trunc('day', recorded_at AT TIME ZONE 'UTC'))::BIGINT as day,
+            ROUND(AVG(bpm)::numeric, 1)::FLOAT8 as avg_bpm,
             MIN(bpm) as min_bpm,
             MAX(bpm) as max_bpm,
-            COUNT(*) as count
+            COUNT(*)::BIGINT as count
          FROM heart_rate_records
-         WHERE user_id = ? AND recorded_at >= ? AND recorded_at < ?
-         GROUP BY (recorded_at - ?) / 86400
+         WHERE user_id = $1 AND recorded_at >= to_timestamp($2) AND recorded_at < to_timestamp($3)
+         GROUP BY date_trunc('day', recorded_at AT TIME ZONE 'UTC')
          ORDER BY day ASC",
     )
-    .bind(params.from)
-    .bind(params.from)
     .bind(&user_id)
     .bind(params.from)
     .bind(params.to)
-    .bind(params.from)
     .fetch_all(&state.db)
     .await?;
 
@@ -93,7 +90,7 @@ pub async fn latest_heart_rate(
     Path(user_id): Path<String>,
 ) -> Result<Json<HeartRateResponse>, AppError> {
     let record: HeartRateResponse = sqlx::query_as(
-        "SELECT bpm, recorded_at as timestamp FROM heart_rate_records WHERE user_id = ? ORDER BY recorded_at DESC LIMIT 1"
+        "SELECT bpm, EXTRACT(EPOCH FROM recorded_at)::BIGINT as timestamp FROM heart_rate_records WHERE user_id = $1 ORDER BY recorded_at DESC LIMIT 1"
     )
     .bind(&user_id)
     .fetch_optional(&state.db)

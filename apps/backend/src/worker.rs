@@ -1,5 +1,5 @@
 use futures_util::StreamExt;
-use sqlx::SqlitePool;
+use sqlx::PgPool;
 use std::time::Duration;
 use tokio_tungstenite::connect_async;
 
@@ -7,7 +7,7 @@ use crate::models::{PulsoidMessage, PulsoidToken};
 
 const PULSOID_WS_URL: &str = "wss://dev.pulsoid.net/api/v1/data/real_time";
 
-pub async fn run_worker(db: SqlitePool, token: PulsoidToken) {
+pub async fn run_worker(db: PgPool, token: PulsoidToken) {
     let mut backoff = Duration::from_secs(1);
     let max_backoff = Duration::from_secs(60);
 
@@ -20,7 +20,7 @@ pub async fn run_worker(db: SqlitePool, token: PulsoidToken) {
                 backoff = Duration::from_secs(1);
 
                 let now = chrono_now();
-                let _ = sqlx::query("UPDATE pulsoid_tokens SET last_connected_at = ?, last_error = NULL, updated_at = ? WHERE id = ?")
+                let _ = sqlx::query("UPDATE pulsoid_tokens SET last_connected_at = to_timestamp($1), last_error = NULL, updated_at = to_timestamp($2) WHERE id = $3")
                     .bind(now)
                     .bind(now)
                     .bind(&token.id)
@@ -55,7 +55,7 @@ pub async fn run_worker(db: SqlitePool, token: PulsoidToken) {
                 tracing::warn!(token_id = %token.id, "Failed to connect: {error_msg}");
 
                 let now = chrono_now();
-                let _ = sqlx::query("UPDATE pulsoid_tokens SET last_error = ?, updated_at = ? WHERE id = ?")
+                let _ = sqlx::query("UPDATE pulsoid_tokens SET last_error = $1, updated_at = to_timestamp($2) WHERE id = $3")
                     .bind(&error_msg)
                     .bind(now)
                     .bind(&token.id)
@@ -71,7 +71,7 @@ pub async fn run_worker(db: SqlitePool, token: PulsoidToken) {
 }
 
 async fn handle_message(
-    db: &SqlitePool,
+    db: &PgPool,
     token: &PulsoidToken,
     text: &str,
 ) -> Result<(), String> {
@@ -89,7 +89,7 @@ async fn handle_message(
         .unwrap_or(now);
 
     sqlx::query(
-        "INSERT INTO heart_rate_records (user_id, pulsoid_token_id, recorded_at, bpm, received_at) VALUES (?, ?, ?, ?, ?)"
+        "INSERT INTO heart_rate_records (user_id, pulsoid_token_id, recorded_at, bpm, received_at) VALUES ($1, $2, to_timestamp($3), $4, to_timestamp($5))"
     )
     .bind(&token.user_id)
     .bind(&token.id)
