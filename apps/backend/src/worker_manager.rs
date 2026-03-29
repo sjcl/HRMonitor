@@ -21,8 +21,8 @@ impl WorkerManager {
     }
 
     pub async fn start_all_active(&self) {
-        let users: Vec<UserRow> = sqlx::query_as(
-            "SELECT id, name, pulsoid_access_token,
+        let users: Vec<UserRow> = match sqlx::query_as(
+            "SELECT id, name, timezone, pulsoid_access_token,
                     EXTRACT(EPOCH FROM pulsoid_last_connected_at)::BIGINT as pulsoid_last_connected_at,
                     pulsoid_last_error,
                     EXTRACT(EPOCH FROM created_at)::BIGINT as created_at,
@@ -31,7 +31,13 @@ impl WorkerManager {
         )
         .fetch_all(&self.db)
         .await
-        .unwrap_or_default();
+        {
+            Ok(users) => users,
+            Err(e) => {
+                tracing::error!("Failed to fetch active users: {e}");
+                return;
+            }
+        };
 
         tracing::info!("Starting {} active workers", users.len());
 
