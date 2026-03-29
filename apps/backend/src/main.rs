@@ -13,7 +13,7 @@ use tower_http::cors::CorsLayer;
 use worker_manager::WorkerManager;
 
 pub struct AppState {
-    pub db: sqlx::SqlitePool,
+    pub db: sqlx::PgPool,
     pub worker_manager: Arc<WorkerManager>,
 }
 
@@ -27,7 +27,7 @@ async fn main() {
         .init();
 
     let database_url =
-        std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:data/app.db".into());
+        std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://hrmonitor:hrmonitor@localhost:5432/hrmonitor".into());
 
     let pool = db::init_pool(&database_url).await.expect("Failed to initialize database");
 

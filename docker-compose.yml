@@ -1,13 +1,25 @@
 services:
+  timescaledb:
+    image: timescale/timescaledb:latest-pg17
+    environment:
+      - POSTGRES_USER=hrmonitor
+      - POSTGRES_PASSWORD=hrmonitor
+      - POSTGRES_DB=hrmonitor
+    volumes:
+      - ts-data:/var/lib/postgresql/data
+    expose:
+      - "5432"
+    restart: unless-stopped
+
   backend:
     build: ./apps/backend
-    volumes:
-      - db-data:/data
     environment:
-      - DATABASE_URL=sqlite:///data/app.db
+      - DATABASE_URL=postgres://hrmonitor:hrmonitor@timescaledb:5432/hrmonitor
       - RUST_LOG=hrmonitor_backend=info
     expose:
       - "3001"
+    depends_on:
+      - timescaledb
     restart: unless-stopped
 
   frontend:
@@ -32,4 +44,4 @@ services:
       - prod
 
 volumes:
-  db-data:
+  ts-data:

@@ -14,7 +14,7 @@ pub async fn list_users(
         "SELECT
             u.id,
             u.name,
-            u.created_at,
+            EXTRACT(EPOCH FROM u.created_at)::BIGINT as created_at,
             (SELECT hr.bpm FROM heart_rate_records hr WHERE hr.user_id = u.id ORDER BY hr.recorded_at DESC LIMIT 1) as latest_bpm,
             (SELECT COUNT(*) FROM pulsoid_tokens pt WHERE pt.user_id = u.id) as token_count
         FROM users u
@@ -37,7 +37,7 @@ pub async fn create_user(
     let id = uuid::Uuid::new_v4().to_string();
     let now = now_unix();
 
-    sqlx::query("INSERT INTO users (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)")
+    sqlx::query("INSERT INTO users (id, name, created_at, updated_at) VALUES ($1, $2, to_timestamp($3), to_timestamp($4))")
         .bind(&id)
         .bind(&body.name)
         .bind(now)
@@ -66,7 +66,7 @@ pub async fn update_user(
 
     let now = now_unix();
 
-    let result = sqlx::query("UPDATE users SET name = ?, updated_at = ? WHERE id = ?")
+    let result = sqlx::query("UPDATE users SET name = $1, updated_at = to_timestamp($2) WHERE id = $3")
         .bind(&body.name)
         .bind(now)
         .bind(&id)
@@ -77,10 +77,12 @@ pub async fn update_user(
         return Err(AppError::NotFound("User not found".into()));
     }
 
-    let user: User = sqlx::query_as("SELECT * FROM users WHERE id = ?")
-        .bind(&id)
-        .fetch_one(&state.db)
-        .await?;
+    let user: User = sqlx::query_as(
+        "SELECT id, name, EXTRACT(EPOCH FROM created_at)::BIGINT as created_at, EXTRACT(EPOCH FROM updated_at)::BIGINT as updated_at FROM users WHERE id = $1"
+    )
+    .bind(&id)
+    .fetch_one(&state.db)
+    .await?;
 
     Ok(Json(user))
 }
