@@ -4,7 +4,9 @@ use chrono::NaiveDate;
 use std::sync::Arc;
 
 use crate::error::AppError;
-use crate::models::{DailyStatsQuery, DailyStatsResponse, HeartRateQuery, HeartRateResponse};
+use crate::models::{
+    DailyStatsQuery, DailyStatsResponse, HeartRateByDateQuery, HeartRateQuery, HeartRateResponse,
+};
 use crate::AppState;
 
 fn parse_date(s: &str) -> Result<NaiveDate, AppError> {
@@ -27,96 +29,70 @@ async fn check_user_exists(
     Ok(())
 }
 
+fn parse_period(s: &str) -> Result<(i64, i64), AppError> {
+    match s {
+        "10m" => Ok((600, 600)),
+        "30m" => Ok((1800, 1800)),
+        "1h" => Ok((3600, 3600)),
+        "3h" => Ok((10800, 10800)),
+        "6h" => Ok((21600, 21600)),
+        "12h" => Ok((43200, 43200)),
+        "24h" => Ok((86400, 86400)),
+        _ => Err(AppError::BadRequest(format!(
+            "Invalid period: {s}. Allowed: 10m, 30m, 1h, 3h, 6h, 12h, 24h"
+        ))),
+    }
+}
+
 pub async fn list_heart_rates(
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<String>,
     Query(params): Query<HeartRateQuery>,
 ) -> Result<Json<Vec<HeartRateResponse>>, AppError> {
-    let limit = params.limit.unwrap_or(1000).min(10000);
-
-    // date and from/to are mutually exclusive
-    if params.date.is_some() && (params.from.is_some() || params.to.is_some()) {
-        return Err(AppError::BadRequest(
-            "Cannot specify both 'date' and 'from'/'to' parameters".into(),
-        ));
-    }
-
-    if let Some(ref date) = params.date {
-        parse_date(date)?;
-        check_user_exists(&state.db, &user_id).await?;
-
-        tracing::info!(
-            user_id = %user_id,
-            date = %date,
-            limit = %limit,
-            "Querying heart rates by date"
-        );
-
-        let records: Vec<HeartRateResponse> = sqlx::query_as(
-            "WITH tz AS (SELECT timezone FROM users WHERE id = $1)
-             SELECT bpm, EXTRACT(EPOCH FROM recorded_at)::BIGINT as timestamp
-             FROM heart_rate_records, tz
-             WHERE user_id = $1
-               AND recorded_at >= ($2::date::timestamp AT TIME ZONE tz.timezone)
-               AND recorded_at <  (($2::date + INTERVAL '1 day')::timestamp AT TIME ZONE tz.timezone)
-             ORDER BY recorded_at DESC
-             LIMIT $3",
-        )
-        .bind(&user_id)
-        .bind(date)
-        .bind(limit)
-        .fetch_all(&state.db)
-        .await?;
-
-        tracing::info!(count = records.len(), "Heart rates by date result");
-
-        return Ok(Json(records));
-    }
+    let (seconds, limit) = parse_period(&params.period)?;
+    let now = chrono::Utc::now().timestamp();
+    let from = now - seconds;
 
     check_user_exists(&state.db, &user_id).await?;
 
-    let records: Vec<HeartRateResponse> = match (params.from, params.to) {
-        (Some(from), Some(to)) => {
-            sqlx::query_as(
-                "SELECT bpm, EXTRACT(EPOCH FROM recorded_at)::BIGINT as timestamp FROM heart_rate_records WHERE user_id = $1 AND recorded_at >= to_timestamp($2) AND recorded_at <= to_timestamp($3) ORDER BY recorded_at DESC LIMIT $4"
-            )
-            .bind(&user_id)
-            .bind(from)
-            .bind(to)
-            .bind(limit)
-            .fetch_all(&state.db)
-            .await?
-        }
-        (Some(from), None) => {
-            sqlx::query_as(
-                "SELECT bpm, EXTRACT(EPOCH FROM recorded_at)::BIGINT as timestamp FROM heart_rate_records WHERE user_id = $1 AND recorded_at >= to_timestamp($2) ORDER BY recorded_at DESC LIMIT $3"
-            )
-            .bind(&user_id)
-            .bind(from)
-            .bind(limit)
-            .fetch_all(&state.db)
-            .await?
-        }
-        (None, Some(to)) => {
-            sqlx::query_as(
-                "SELECT bpm, EXTRACT(EPOCH FROM recorded_at)::BIGINT as timestamp FROM heart_rate_records WHERE user_id = $1 AND recorded_at <= to_timestamp($2) ORDER BY recorded_at DESC LIMIT $3"
-            )
-            .bind(&user_id)
-            .bind(to)
-            .bind(limit)
-            .fetch_all(&state.db)
-            .await?
-        }
-        (None, None) => {
-            sqlx::query_as(
-                "SELECT bpm, EXTRACT(EPOCH FROM recorded_at)::BIGINT as timestamp FROM heart_rate_records WHERE user_id = $1 ORDER BY recorded_at DESC LIMIT $2"
-            )
-            .bind(&user_id)
-            .bind(limit)
-            .fetch_all(&state.db)
-            .await?
-        }
-    };
+    let records: Vec<HeartRateResponse> = sqlx::query_as(
+        "SELECT bpm, EXTRACT(EPOCH FROM recorded_at)::BIGINT as timestamp
+         FROM heart_rate_records
+         WHERE user_id = $1 AND recorded_at >= to_timestamp($2)
+         ORDER BY recorded_at DESC
+         LIMIT $3",
+    )
+    .bind(&user_id)
+    .bind(from)
+    .bind(limit)
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(Json(records))
+}
+
+pub async fn heart_rates_by_date(
+    State(state): State<Arc<AppState>>,
+    Path(user_id): Path<String>,
+    Query(params): Query<HeartRateByDateQuery>,
+) -> Result<Json<Vec<HeartRateResponse>>, AppError> {
+    parse_date(&params.date)?;
+    check_user_exists(&state.db, &user_id).await?;
+
+    let records: Vec<HeartRateResponse> = sqlx::query_as(
+        "WITH tz AS (SELECT timezone FROM users WHERE id = $1)
+         SELECT bpm, EXTRACT(EPOCH FROM recorded_at)::BIGINT as timestamp
+         FROM heart_rate_records, tz
+         WHERE user_id = $1
+           AND recorded_at >= ($2::date::timestamp AT TIME ZONE tz.timezone)
+           AND recorded_at <  (($2::date + INTERVAL '1 day')::timestamp AT TIME ZONE tz.timezone)
+         ORDER BY recorded_at DESC
+         LIMIT 2880",
+    )
+    .bind(&user_id)
+    .bind(&params.date)
+    .fetch_all(&state.db)
+    .await?;
 
     Ok(Json(records))
 }

@@ -67,10 +67,12 @@ pub struct SetPulsoidTokenRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct HeartRateQuery {
-    pub from: Option<i64>,
-    pub to: Option<i64>,
-    pub limit: Option<i64>,
-    pub date: Option<String>,
+    pub period: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct HeartRateByDateQuery {
+    pub date: String,
 }
 
 #[derive(Debug, Deserialize)]

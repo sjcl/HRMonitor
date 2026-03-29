@@ -105,21 +105,15 @@ export function getDailyStats(userId: string, from: string, to: string) {
   );
 }
 
-export function getHeartRates(
-  userId: string,
-  params?: { from?: number; to?: number; limit?: number; date?: string }
-) {
-  const query = new URLSearchParams();
-  if (params?.date) {
-    query.set("date", params.date);
-  } else {
-    if (params?.from) query.set("from", String(params.from));
-    if (params?.to) query.set("to", String(params.to));
-  }
-  if (params?.limit) query.set("limit", String(params.limit));
-  const qs = query.toString();
+export function getHeartRates(userId: string, period: string) {
   return fetchJson<HeartRateRecord[]>(
-    `/api/users/${userId}/heart-rates${qs ? `?${qs}` : ""}`
+    `/api/users/${userId}/heart-rates?period=${period}`
+  );
+}
+
+export function getHeartRatesByDate(userId: string, date: string) {
+  return fetchJson<HeartRateRecord[]>(
+    `/api/users/${userId}/heart-rates/by-date?date=${date}`
   );
 }
 

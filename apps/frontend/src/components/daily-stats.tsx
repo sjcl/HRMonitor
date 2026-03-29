@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { getDailyStats, getHeartRates } from "@/lib/api";
+import { getDailyStats, getHeartRatesByDate } from "@/lib/api";
 import {
   LineChart,
   Line,
@@ -71,7 +71,7 @@ export function DailyStats({
 
   const { data: records, isLoading, isError, error } = useQuery({
     queryKey: ["daily-heart-rates", userId, timezone, selectedDate],
-    queryFn: () => getHeartRates(userId, { date: selectedDate, limit: 2880 }),
+    queryFn: () => getHeartRatesByDate(userId, selectedDate),
   });
 
   const todayStats = dailyStats?.find((s) => s.day === selectedDate);

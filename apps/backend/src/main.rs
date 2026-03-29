@@ -49,6 +49,7 @@ async fn main() {
                 .delete(handlers::tokens::delete_pulsoid_token),
         )
         .route("/api/users/{id}/heart-rates/daily-stats", get(handlers::heart_rates::daily_stats))
+        .route("/api/users/{id}/heart-rates/by-date", get(handlers::heart_rates::heart_rates_by_date))
         .route("/api/users/{id}/heart-rates", get(handlers::heart_rates::list_heart_rates))
         .route("/api/users/{id}/latest-heart-rate", get(handlers::heart_rates::latest_heart_rate))
         .layer(CorsLayer::permissive())

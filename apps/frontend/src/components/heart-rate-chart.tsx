@@ -23,37 +23,16 @@ const PRESETS = [
   { seconds: 86400, label: "24h" },
 ] as const;
 
-type TimeRange =
-  | { kind: "preset"; seconds: number; label: string }
-  | { kind: "custom"; from: number; to: number };
-
 export function HeartRateChart({ userId }: { userId: string }) {
-  const [range, setRange] = useState<TimeRange>({
-    kind: "preset",
-    seconds: 3600,
-    label: "1h",
-  });
-  const [showCustom, setShowCustom] = useState(false);
-  const [customFrom, setCustomFrom] = useState("");
-  const [customTo, setCustomTo] = useState("");
+  const [range, setRange] = useState<(typeof PRESETS)[number]>(PRESETS[2]);
 
   const { data: records } = useQuery({
-    queryKey: ["heart-rates", userId, range],
-    queryFn: () => {
-      const now = Math.floor(Date.now() / 1000);
-      const from = range.kind === "preset" ? now - range.seconds : range.from;
-      const to = range.kind === "custom" ? range.to : undefined;
-      const limit =
-        range.kind === "preset"
-          ? Math.min(2000, Math.max(500, Math.ceil(range.seconds / 3)))
-          : 2000;
-      return getHeartRates(userId, { from, to, limit });
-    },
+    queryKey: ["heart-rates", userId, range.label],
+    queryFn: () => getHeartRates(userId, range.label),
     refetchInterval: 5000,
   });
 
-  const useShortFormat =
-    range.kind === "preset" && range.seconds <= 10800;
+  const useShortFormat = range.seconds <= 10800;
 
   const formatTimestamp = (tsMs: number): string => {
     const d = new Date(tsMs);
@@ -70,29 +49,15 @@ export function HeartRateChart({ userId }: { userId: string }) {
       bpm: r.bpm,
     }));
 
-  const rangeLabel =
-    range.kind === "preset" ? `the last ${range.label}` : "the selected range";
-
-  const applyCustomRange = () => {
-    if (!customFrom || !customTo) return;
-    const from = Math.floor(new Date(customFrom).getTime() / 1000);
-    const to = Math.floor(new Date(customTo).getTime() / 1000);
-    if (from >= to) return;
-    setRange({ kind: "custom", from, to });
-  };
-
   return (
     <div className="border border-gray-800 rounded-lg p-4">
       <div className="flex flex-wrap items-center justify-end gap-2 mb-3">
         {PRESETS.map((p) => (
           <button
             key={p.label}
-            onClick={() => {
-              setRange({ kind: "preset", seconds: p.seconds, label: p.label });
-              setShowCustom(false);
-            }}
+            onClick={() => setRange(p)}
             className={`px-3 py-1 rounded text-sm ${
-              range.kind === "preset" && range.seconds === p.seconds
+              range.label === p.label
                 ? "bg-gray-600 text-white"
                 : "bg-gray-800 text-gray-400 hover:bg-gray-700"
             }`}
@@ -100,50 +65,11 @@ export function HeartRateChart({ userId }: { userId: string }) {
             {p.label}
           </button>
         ))}
-        <button
-          onClick={() => setShowCustom((v) => !v)}
-          className={`px-3 py-1 rounded text-sm ${
-            range.kind === "custom"
-              ? "bg-gray-600 text-white"
-              : "bg-gray-800 text-gray-400 hover:bg-gray-700"
-          }`}
-        >
-          Custom
-        </button>
       </div>
-
-      {showCustom && (
-        <div className="flex flex-wrap items-end justify-end gap-3 mb-3">
-          <label className="text-sm text-gray-400">
-            From
-            <input
-              type="datetime-local"
-              value={customFrom}
-              onChange={(e) => setCustomFrom(e.target.value)}
-              className="block mt-1 bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm text-white [color-scheme:dark]"
-            />
-          </label>
-          <label className="text-sm text-gray-400">
-            To
-            <input
-              type="datetime-local"
-              value={customTo}
-              onChange={(e) => setCustomTo(e.target.value)}
-              className="block mt-1 bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm text-white [color-scheme:dark]"
-            />
-          </label>
-          <button
-            onClick={applyCustomRange}
-            className="bg-green-600 hover:bg-green-700 px-4 py-1.5 rounded text-sm text-white"
-          >
-            Apply
-          </button>
-        </div>
-      )}
 
       {chartData.length === 0 ? (
         <div className="p-8 text-center text-gray-500">
-          No heart rate data in {rangeLabel}
+          No heart rate data in the last {range.label}
         </div>
       ) : (
         <ResponsiveContainer width="100%" height={300}>
