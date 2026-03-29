@@ -1,3 +1,7 @@
+-- NOTE: This file is for documentation reference only.
+-- The canonical schema lives in apps/backend/migrations/.
+-- Run `sqlx migrate add <name>` from apps/backend/ to create new migrations.
+
 CREATE TABLE users (
                        id TEXT PRIMARY KEY,
                        name TEXT NOT NULL,
