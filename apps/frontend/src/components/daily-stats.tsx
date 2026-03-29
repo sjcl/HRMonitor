@@ -69,7 +69,7 @@ export function DailyStats({
     queryFn: () => getDailyStats(userId, statsFrom, statsTo),
   });
 
-  const { data: records, isError, error } = useQuery({
+  const { data: records, isLoading, isError, error } = useQuery({
     queryKey: ["daily-heart-rates", userId, timezone, selectedDate],
     queryFn: () => getHeartRates(userId, { date: selectedDate, limit: 2880 }),
   });
@@ -168,7 +168,9 @@ export function DailyStats({
       )}
 
       {/* 24h chart */}
-      {isError ? (
+      {isLoading ? (
+        <div className="p-8 text-center text-gray-500">Loading...</div>
+      ) : isError ? (
         <div className="p-8 text-center text-red-400">
           Failed to load chart data: {(error as Error)?.message}
         </div>

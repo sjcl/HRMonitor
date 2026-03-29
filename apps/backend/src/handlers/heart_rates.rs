@@ -45,13 +45,20 @@ pub async fn list_heart_rates(
         parse_date(date)?;
         check_user_exists(&state.db, &user_id).await?;
 
+        tracing::info!(
+            user_id = %user_id,
+            date = %date,
+            limit = %limit,
+            "Querying heart rates by date"
+        );
+
         let records: Vec<HeartRateResponse> = sqlx::query_as(
             "WITH tz AS (SELECT timezone FROM users WHERE id = $1)
              SELECT bpm, EXTRACT(EPOCH FROM recorded_at)::BIGINT as timestamp
              FROM heart_rate_records, tz
              WHERE user_id = $1
-               AND recorded_at >= ($2::date AT TIME ZONE tz.timezone)
-               AND recorded_at <  (($2::date + INTERVAL '1 day') AT TIME ZONE tz.timezone)
+               AND recorded_at >= ($2::date::timestamp AT TIME ZONE tz.timezone)
+               AND recorded_at <  (($2::date + INTERVAL '1 day')::timestamp AT TIME ZONE tz.timezone)
              ORDER BY recorded_at DESC
              LIMIT $3",
         )
@@ -60,6 +67,8 @@ pub async fn list_heart_rates(
         .bind(limit)
         .fetch_all(&state.db)
         .await?;
+
+        tracing::info!(count = records.len(), "Heart rates by date result");
 
         return Ok(Json(records));
     }
@@ -133,8 +142,8 @@ pub async fn daily_stats(
              COUNT(*)::BIGINT AS count
          FROM heart_rate_records r, tz
          WHERE r.user_id = $1
-           AND r.recorded_at >= ($2::date AT TIME ZONE tz.timezone)
-           AND r.recorded_at <  ($3::date AT TIME ZONE tz.timezone)
+           AND r.recorded_at >= ($2::date::timestamp AT TIME ZONE tz.timezone)
+           AND r.recorded_at <  ($3::date::timestamp AT TIME ZONE tz.timezone)
          GROUP BY 1
          ORDER BY day ASC",
     )
