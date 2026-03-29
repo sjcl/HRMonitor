@@ -3,6 +3,7 @@ CREATE EXTENSION IF NOT EXISTS timescaledb;
 CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
+    timezone TEXT NOT NULL DEFAULT 'UTC',
     pulsoid_access_token TEXT,
     pulsoid_last_connected_at TIMESTAMPTZ,
     pulsoid_last_error TEXT,
@@ -18,7 +19,7 @@ CREATE TABLE IF NOT EXISTS heart_rate_records (
     received_at TIMESTAMPTZ NOT NULL
 );
 
-SELECT create_hypertable('heart_rate_records', 'recorded_at', if_not_exists => TRUE);
+SELECT create_hypertable('heart_rate_records', by_range('recorded_at'), if_not_exists => TRUE);
 
 CREATE INDEX IF NOT EXISTS idx_hr_user_time
     ON heart_rate_records(user_id, recorded_at DESC);

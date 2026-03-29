@@ -7,6 +7,7 @@ CREATE EXTENSION IF NOT EXISTS timescaledb;
 CREATE TABLE users (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
+    timezone TEXT NOT NULL DEFAULT 'UTC',
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -33,7 +34,7 @@ CREATE TABLE heart_rate_records (
 );
 
 -- TimescaleDB hypertable (partitioned by recorded_at)
-SELECT create_hypertable('heart_rate_records', 'recorded_at', if_not_exists => TRUE);
+SELECT create_hypertable('heart_rate_records', by_range('recorded_at'), if_not_exists => TRUE);
 
 CREATE INDEX idx_hr_user_time
     ON heart_rate_records(user_id, recorded_at DESC);

@@ -36,10 +36,12 @@ pub async fn create_user(
 
     let id = uuid::Uuid::new_v4().to_string();
     let now = now_unix();
+    let timezone = body.timezone.unwrap_or_else(|| "UTC".to_string());
 
-    sqlx::query("INSERT INTO users (id, name, created_at, updated_at) VALUES ($1, $2, to_timestamp($3), to_timestamp($4))")
+    sqlx::query("INSERT INTO users (id, name, timezone, created_at, updated_at) VALUES ($1, $2, $3, to_timestamp($4), to_timestamp($5))")
         .bind(&id)
         .bind(&body.name)
+        .bind(&timezone)
         .bind(now)
         .bind(now)
         .execute(&state.db)
@@ -48,6 +50,7 @@ pub async fn create_user(
     let user = User {
         id,
         name: body.name,
+        timezone,
         created_at: now,
         updated_at: now,
     };
@@ -55,19 +58,44 @@ pub async fn create_user(
     Ok((StatusCode::CREATED, Json(user)))
 }
 
+pub async fn get_user(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<User>, AppError> {
+    let row: UserRow = sqlx::query_as(
+        "SELECT id, name, timezone, pulsoid_access_token,
+                EXTRACT(EPOCH FROM pulsoid_last_connected_at)::BIGINT as pulsoid_last_connected_at,
+                pulsoid_last_error,
+                EXTRACT(EPOCH FROM created_at)::BIGINT as created_at,
+                EXTRACT(EPOCH FROM updated_at)::BIGINT as updated_at
+         FROM users WHERE id = $1"
+    )
+    .bind(&id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| AppError::NotFound("User not found".into()))?;
+
+    Ok(Json(User::from(row)))
+}
+
 pub async fn update_user(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(body): Json<UpdateUserRequest>,
 ) -> Result<Json<User>, AppError> {
-    if body.name.trim().is_empty() {
-        return Err(AppError::BadRequest("Name cannot be empty".into()));
+    if let Some(ref name) = body.name {
+        if name.trim().is_empty() {
+            return Err(AppError::BadRequest("Name cannot be empty".into()));
+        }
     }
 
     let now = now_unix();
 
-    let result = sqlx::query("UPDATE users SET name = $1, updated_at = to_timestamp($2) WHERE id = $3")
+    let result = sqlx::query(
+        "UPDATE users SET name = COALESCE($1, name), timezone = COALESCE($2, timezone), updated_at = to_timestamp($3) WHERE id = $4"
+    )
         .bind(&body.name)
+        .bind(&body.timezone)
         .bind(now)
         .bind(&id)
         .execute(&state.db)
@@ -78,7 +106,7 @@ pub async fn update_user(
     }
 
     let row: UserRow = sqlx::query_as(
-        "SELECT id, name, pulsoid_access_token,
+        "SELECT id, name, timezone, pulsoid_access_token,
                 EXTRACT(EPOCH FROM pulsoid_last_connected_at)::BIGINT as pulsoid_last_connected_at,
                 pulsoid_last_error,
                 EXTRACT(EPOCH FROM created_at)::BIGINT as created_at,

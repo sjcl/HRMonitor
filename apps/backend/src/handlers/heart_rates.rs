@@ -64,21 +64,28 @@ pub async fn daily_stats(
     Path(user_id): Path<String>,
     Query(params): Query<DailyStatsQuery>,
 ) -> Result<Json<Vec<DailyStatsResponse>>, AppError> {
+    let timezone: String = sqlx::query_scalar("SELECT timezone FROM users WHERE id = $1")
+        .bind(&user_id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or_else(|| AppError::NotFound("User not found".into()))?;
+
     let records: Vec<DailyStatsResponse> = sqlx::query_as(
         "SELECT
-            EXTRACT(EPOCH FROM date_trunc('day', recorded_at AT TIME ZONE 'UTC'))::BIGINT as day,
+            EXTRACT(EPOCH FROM date_trunc('day', recorded_at AT TIME ZONE $4))::BIGINT as day,
             ROUND(AVG(bpm)::numeric, 1)::FLOAT8 as avg_bpm,
             MIN(bpm) as min_bpm,
             MAX(bpm) as max_bpm,
             COUNT(*)::BIGINT as count
          FROM heart_rate_records
          WHERE user_id = $1 AND recorded_at >= to_timestamp($2) AND recorded_at < to_timestamp($3)
-         GROUP BY date_trunc('day', recorded_at AT TIME ZONE 'UTC')
+         GROUP BY date_trunc('day', recorded_at AT TIME ZONE $4)
          ORDER BY day ASC",
     )
     .bind(&user_id)
     .bind(params.from)
     .bind(params.to)
+    .bind(&timezone)
     .fetch_all(&state.db)
     .await?;
 

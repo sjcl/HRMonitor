@@ -1,11 +1,12 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
-import { getLatestHeartRate, getUsers } from "@/lib/api";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { getLatestHeartRate, getUser, updateUser } from "@/lib/api";
 import { HeartRateChart } from "@/components/heart-rate-chart";
 import { DailyStats } from "@/components/daily-stats";
 import { PulsoidToken } from "@/components/pulsoid-token";
-import { use } from "react";
+import { TimezoneSelect } from "@/components/timezone-select";
+import { use, useState, useEffect } from "react";
 import Link from "next/link";
 
 export default function UserDetailPage({
@@ -14,19 +15,40 @@ export default function UserDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = use(params);
+  const queryClient = useQueryClient();
 
-  const { data: users } = useQuery({
-    queryKey: ["users"],
-    queryFn: getUsers,
+  const { data: user } = useQuery({
+    queryKey: ["user", id],
+    queryFn: () => getUser(id),
   });
-
-  const user = users?.find((u) => u.id === id);
 
   const { data: latestHr } = useQuery({
     queryKey: ["latest-hr", id],
     queryFn: () => getLatestHeartRate(id).catch(() => null),
     refetchInterval: 5000,
   });
+
+  const [editName, setEditName] = useState("");
+  const [editTimezone, setEditTimezone] = useState("");
+
+  useEffect(() => {
+    if (user) {
+      setEditName(user.name);
+      setEditTimezone(user.timezone);
+    }
+  }, [user]);
+
+  const updateMutation = useMutation({
+    mutationFn: (data: { name?: string; timezone?: string }) =>
+      updateUser(id, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["user", id] });
+      queryClient.invalidateQueries({ queryKey: ["users"] });
+    },
+  });
+
+  const hasChanges =
+    user && (editName !== user.name || editTimezone !== user.timezone);
 
   return (
     <div>
@@ -36,6 +58,9 @@ export default function UserDetailPage({
 
       <div className="flex items-center gap-4 mt-4 mb-6">
         <h1 className="text-2xl font-bold">{user?.name ?? "Loading..."}</h1>
+        {user && (
+          <span className="text-sm text-gray-400">{user.timezone}</span>
+        )}
         {latestHr && (
           <span className="text-3xl font-mono font-bold text-red-400">
             {latestHr.bpm} BPM
@@ -53,9 +78,46 @@ export default function UserDetailPage({
         <DailyStats userId={id} />
       </section>
 
-      <section>
+      <section className="mb-8">
         <h2 className="text-lg font-semibold mb-3">Pulsoid</h2>
         <PulsoidToken userId={id} />
+      </section>
+
+      <section>
+        <h2 className="text-lg font-semibold mb-3">Settings</h2>
+        <div className="flex flex-col gap-3 max-w-md">
+          <div>
+            <label className="block text-sm text-gray-400 mb-1">Name</label>
+            <input
+              type="text"
+              value={editName}
+              onChange={(e) => setEditName(e.target.value)}
+              className="bg-gray-800 border border-gray-700 rounded px-3 py-2 w-full"
+            />
+          </div>
+          <div>
+            <label className="block text-sm text-gray-400 mb-1">Timezone</label>
+            <TimezoneSelect
+              value={editTimezone}
+              onChange={setEditTimezone}
+              className="w-full"
+            />
+          </div>
+          {hasChanges && (
+            <button
+              onClick={() =>
+                updateMutation.mutate({
+                  name: editName.trim(),
+                  timezone: editTimezone,
+                })
+              }
+              disabled={updateMutation.isPending || !editName.trim()}
+              className="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded text-sm disabled:opacity-50 self-start"
+            >
+              {updateMutation.isPending ? "Saving..." : "Save"}
+            </button>
+          )}
+        </div>
       </section>
     </div>
   );

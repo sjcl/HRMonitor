@@ -5,10 +5,12 @@ import { getUsers, createUser } from "@/lib/api";
 import { useState } from "react";
 import Link from "next/link";
 import { AllUsersHeartRateChart } from "@/components/all-users-heart-rate-chart";
+import { TimezoneSelect, getBrowserTimezone } from "@/components/timezone-select";
 
 export default function UsersPage() {
   const queryClient = useQueryClient();
   const [newName, setNewName] = useState("");
+  const [newTimezone, setNewTimezone] = useState(getBrowserTimezone);
   const [showForm, setShowForm] = useState(false);
 
   const { data: users, isLoading } = useQuery({
@@ -18,10 +20,12 @@ export default function UsersPage() {
   });
 
   const createMutation = useMutation({
-    mutationFn: (name: string) => createUser(name),
+    mutationFn: ({ name, timezone }: { name: string; timezone: string }) =>
+      createUser(name, timezone),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["users"] });
       setNewName("");
+      setNewTimezone(getBrowserTimezone());
       setShowForm(false);
     },
   });
@@ -42,25 +46,29 @@ export default function UsersPage() {
         <form
           onSubmit={(e) => {
             e.preventDefault();
-            if (newName.trim()) createMutation.mutate(newName.trim());
+            if (newName.trim())
+              createMutation.mutate({ name: newName.trim(), timezone: newTimezone });
           }}
-          className="mb-6 flex gap-2"
+          className="mb-6 flex flex-col gap-2"
         >
-          <input
-            type="text"
-            value={newName}
-            onChange={(e) => setNewName(e.target.value)}
-            placeholder="User name"
-            className="bg-gray-800 border border-gray-700 rounded px-3 py-2 flex-1"
-            autoFocus
-          />
-          <button
-            type="submit"
-            disabled={createMutation.isPending}
-            className="bg-green-600 hover:bg-green-700 px-4 py-2 rounded text-sm disabled:opacity-50"
-          >
-            Create
-          </button>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              placeholder="User name"
+              className="bg-gray-800 border border-gray-700 rounded px-3 py-2 flex-1"
+              autoFocus
+            />
+            <button
+              type="submit"
+              disabled={createMutation.isPending}
+              className="bg-green-600 hover:bg-green-700 px-4 py-2 rounded text-sm disabled:opacity-50"
+            >
+              Create
+            </button>
+          </div>
+          <TimezoneSelect value={newTimezone} onChange={setNewTimezone} />
         </form>
       )}
 

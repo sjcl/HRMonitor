@@ -5,7 +5,7 @@ mod models;
 mod worker;
 mod worker_manager;
 
-use axum::routing::{get, patch};
+use axum::routing::get;
 use axum::Router;
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
@@ -41,7 +41,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/api/users", get(handlers::users::list_users).post(handlers::users::create_user))
-        .route("/api/users/{id}", patch(handlers::users::update_user))
+        .route("/api/users/{id}", get(handlers::users::get_user).patch(handlers::users::update_user))
         .route(
             "/api/users/{id}/pulsoid-token",
             get(handlers::tokens::get_pulsoid_token)

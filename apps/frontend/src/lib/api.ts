@@ -11,6 +11,7 @@ export interface UserListItem {
 export interface User {
   id: string;
   name: string;
+  timezone: string;
   created_at: number;
   updated_at: number;
 }
@@ -41,19 +42,23 @@ export function getUsers() {
   return fetchJson<UserListItem[]>("/api/users");
 }
 
-export function createUser(name: string) {
+export function getUser(id: string) {
+  return fetchJson<User>(`/api/users/${id}`);
+}
+
+export function createUser(name: string, timezone: string) {
   return fetchJson<User>("/api/users", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name }),
+    body: JSON.stringify({ name, timezone }),
   });
 }
 
-export function updateUser(id: string, name: string) {
+export function updateUser(id: string, data: { name?: string; timezone?: string }) {
   return fetchJson<User>(`/api/users/${id}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name }),
+    body: JSON.stringify(data),
   });
 }
 

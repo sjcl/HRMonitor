@@ -7,6 +7,7 @@ use sqlx::FromRow;
 pub struct UserRow {
     pub id: String,
     pub name: String,
+    pub timezone: String,
     pub pulsoid_access_token: Option<String>,
     pub pulsoid_last_connected_at: Option<i64>,
     pub pulsoid_last_error: Option<String>,
@@ -18,6 +19,7 @@ pub struct UserRow {
 pub struct User {
     pub id: String,
     pub name: String,
+    pub timezone: String,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -27,6 +29,7 @@ impl From<UserRow> for User {
         Self {
             id: r.id,
             name: r.name,
+            timezone: r.timezone,
             created_at: r.created_at,
             updated_at: r.updated_at,
         }
@@ -48,11 +51,13 @@ pub struct HeartRateRecord {
 #[derive(Debug, Deserialize)]
 pub struct CreateUserRequest {
     pub name: String,
+    pub timezone: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateUserRequest {
-    pub name: String,
+    pub name: Option<String>,
+    pub timezone: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
