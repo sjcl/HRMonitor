@@ -44,8 +44,10 @@ http://localhost:3000 でフロントエンドにアクセスできます。
 ### 本番環境 (Cloudflare Tunnel)
 
 ```bash
-CLOUDFLARE_TUNNEL_TOKEN=<your-token> docker compose --profile prod up --build
+CLOUDFLARE_TUNNEL_TOKEN=<your-token> docker compose -f docker-compose.yml --profile prod up --build
 ```
+
+> **Note:** `-f docker-compose.yml` を明示指定することで `docker-compose.override.yml` の読み込みをスキップし、Frontend ポートをホストに公開しません (Docker 内部ネットワークのみ)。
 
 ### ローカル開発
 
