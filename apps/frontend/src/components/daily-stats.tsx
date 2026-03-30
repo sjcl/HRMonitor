@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useMemo, memo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { getDailyStats, getHeartRatesByDate } from "@/lib/api";
 import {
@@ -49,7 +49,7 @@ function formatDateDisplay(dateStr: string): string {
   });
 }
 
-export function DailyStats({
+export const DailyStats = memo(function DailyStats({
   userId,
   timezone,
 }: {
@@ -93,17 +93,21 @@ export function DailyStats({
 
   const todayStats = dailyStats?.find((s) => s.day === selectedDate);
 
-  const chartData = (records ?? [])
-    .slice()
-    .sort((a, b) => a.timestamp - b.timestamp)
-    .map((r) => ({
-      time: new Date(r.timestamp * 1000).toLocaleTimeString([], {
-        hour: "2-digit",
-        minute: "2-digit",
-        timeZone: timezone,
-      }),
-      bpm: r.bpm,
-    }));
+  const chartData = useMemo(
+    () =>
+      (records ?? [])
+        .slice()
+        .sort((a, b) => a.timestamp - b.timestamp)
+        .map((r) => ({
+          time: new Date(r.timestamp * 1000).toLocaleTimeString([], {
+            hour: "2-digit",
+            minute: "2-digit",
+            timeZone: timezone,
+          }),
+          bpm: r.bpm,
+        })),
+    [records, timezone],
+  );
 
   const goToPrevDay = () => {
     setSelectedDate((d) => addDays(d, -1));
@@ -245,4 +249,4 @@ export function DailyStats({
       )}
     </div>
   );
-}
+});
