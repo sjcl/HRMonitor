@@ -162,6 +162,7 @@ export function HeartRateChart({
               scale="time"
               domain={["dataMin", "dataMax"]}
               tickFormatter={formatTimestamp}
+              minTickGap={50}
               stroke="#9CA3AF"
               fontSize={12}
             />
