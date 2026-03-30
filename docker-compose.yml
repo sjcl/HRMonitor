@@ -31,7 +31,10 @@ services:
     restart: unless-stopped
 
   frontend:
-    build: ./apps/frontend
+    build:
+      context: ./apps/frontend
+      args:
+        REACT_PROFILING: ${REACT_PROFILING:-false}
     expose:
       - "3000"
     environment:

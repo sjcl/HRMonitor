@@ -1,10 +1,13 @@
 FROM node:24-alpine AS builder
 
+ARG REACT_PROFILING=false
+
 WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm install
 
 COPY . .
+ENV REACT_PROFILING=${REACT_PROFILING}
 RUN npm run build
 
 FROM node:24-alpine
