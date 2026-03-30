@@ -37,9 +37,20 @@ services:
         REACT_PROFILING: ${REACT_PROFILING:-false}
     expose:
       - "3000"
-    environment:
-      - BACKEND_URL=http://backend:3001
+    volumes:
+      - static-assets:/static-export
     depends_on:
+      - backend
+    restart: unless-stopped
+
+  nginx:
+    build: ./apps/nginx
+    expose:
+      - "80"
+    volumes:
+      - static-assets:/usr/share/nginx/static:ro
+    depends_on:
+      - frontend
       - backend
     restart: unless-stopped
 
@@ -49,10 +60,11 @@ services:
     environment:
       - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
     depends_on:
-      - frontend
+      - nginx
     restart: unless-stopped
     profiles:
       - prod
 
 volumes:
   ts-data:
+  static-assets:

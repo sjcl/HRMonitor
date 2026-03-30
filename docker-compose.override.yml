@@ -1,4 +1,4 @@
 services:
-  frontend:
+  nginx:
     ports:
-      - "3000:3000"
+      - "3000:80"
