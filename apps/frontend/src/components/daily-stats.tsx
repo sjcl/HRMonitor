@@ -64,15 +64,32 @@ export function DailyStats({
   const today = todayInTz(timezone);
   const isToday = selectedDate === today;
 
-  const { data: dailyStats } = useQuery({
+  const {
+    data: dailyStats,
+    refetch: refetchStats,
+    isFetching: isFetchingStats,
+  } = useQuery({
     queryKey: ["daily-stats", userId, timezone, statsFrom, statsTo],
     queryFn: () => getDailyStats(userId, statsFrom, statsTo),
   });
 
-  const { data: records, isLoading, isError, error } = useQuery({
+  const {
+    data: records,
+    isLoading,
+    isError,
+    error,
+    refetch: refetchRecords,
+    isFetching: isFetchingRecords,
+  } = useQuery({
     queryKey: ["daily-heart-rates", userId, timezone, selectedDate],
     queryFn: () => getHeartRatesByDate(userId, selectedDate),
   });
+
+  const isRefreshing = isFetchingStats || isFetchingRecords;
+  const handleRefresh = () => {
+    refetchStats();
+    refetchRecords();
+  };
 
   const todayStats = dailyStats?.find((s) => s.day === selectedDate);
 
@@ -124,17 +141,41 @@ export function DailyStats({
             className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-sm text-white [color-scheme:dark]"
           />
         </div>
-        <button
-          onClick={goToNextDay}
-          disabled={isToday}
-          className={`px-3 py-1.5 rounded ${
-            isToday
-              ? "bg-gray-900 text-gray-600 cursor-not-allowed"
-              : "bg-gray-800 text-gray-400 hover:bg-gray-700"
-          }`}
-        >
-          &rarr;
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={goToNextDay}
+            disabled={isToday}
+            className={`px-3 py-1.5 rounded ${
+              isToday
+                ? "bg-gray-900 text-gray-600 cursor-not-allowed"
+                : "bg-gray-800 text-gray-400 hover:bg-gray-700"
+            }`}
+          >
+            &rarr;
+          </button>
+          {isToday && (
+            <button
+              onClick={handleRefresh}
+              disabled={isRefreshing}
+              className="px-3 py-1.5 rounded bg-gray-800 text-gray-400 hover:bg-gray-700 disabled:opacity-50"
+              title="Reload"
+            >
+              <svg
+                className={`w-4 h-4 ${isRefreshing ? "animate-spin" : ""}`}
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+                />
+              </svg>
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Stats cards */}
