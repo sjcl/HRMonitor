@@ -39,6 +39,61 @@ function addDays(dateStr: string, days: number): string {
   return `${yy}-${mm}-${dd}`;
 }
 
+function getDateBoundsMs(dateStr: string, tz: string): [number, number] {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+
+  // Binary search for midnight of the given date in the target timezone
+  const findMidnight = (targetY: number, targetM: number, targetD: number) => {
+    // Start with a rough estimate using UTC
+    let guess = new Date(targetY, targetM - 1, targetD).getTime();
+    // Adjust: check what date/time this is in the target timezone
+    for (let i = 0; i < 3; i++) {
+      const parts = formatter.formatToParts(new Date(guess));
+      const h = Number(parts.find((p) => p.type === "hour")!.value);
+      const min = Number(parts.find((p) => p.type === "minute")!.value);
+      const s = Number(parts.find((p) => p.type === "second")!.value);
+      // Adjust to midnight
+      const offsetMs = (h * 3600 + min * 60 + s) * 1000;
+      guess -= offsetMs;
+      // Check if we landed on the right day
+      const check = formatter.formatToParts(new Date(guess));
+      const checkD = Number(check.find((p) => p.type === "day")!.value);
+      const checkM = Number(check.find((p) => p.type === "month")!.value);
+      if (checkD === targetD && checkM === targetM) break;
+      // If we overshot, add a day
+      if (checkD < targetD || checkM < targetM) guess += 86400000;
+    }
+    return guess;
+  };
+
+  const dayStart = findMidnight(y, m, d);
+  const nextDay = new Date(y, m - 1, d + 1);
+  const dayEnd = findMidnight(
+    nextDay.getFullYear(),
+    nextDay.getMonth() + 1,
+    nextDay.getDate(),
+  );
+  return [dayStart, dayEnd];
+}
+
+function formatTimeMs(ms: number, tz: string): string {
+  return new Date(ms).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZone: tz,
+  });
+}
+
 function formatDateDisplay(dateStr: string): string {
   const [y, m, d] = dateStr.split("-").map(Number);
   return new Date(y, m - 1, d).toLocaleDateString(undefined, {
@@ -93,20 +148,29 @@ export const DailyStats = memo(function DailyStats({
 
   const todayStats = dailyStats?.find((s) => s.day === selectedDate);
 
+  const [dayStartMs, dayEndMs] = useMemo(
+    () => getDateBoundsMs(selectedDate, timezone),
+    [selectedDate, timezone],
+  );
+
+  const dayTicks = useMemo(() => {
+    const ticks: number[] = [];
+    for (let t = dayStartMs; t <= dayEndMs; t += 3 * 3600 * 1000) {
+      ticks.push(t);
+    }
+    return ticks;
+  }, [dayStartMs, dayEndMs]);
+
   const chartData = useMemo(
     () =>
       (records ?? [])
         .slice()
         .sort((a, b) => a.timestamp - b.timestamp)
         .map((r) => ({
-          time: new Date(r.timestamp * 1000).toLocaleTimeString([], {
-            hour: "2-digit",
-            minute: "2-digit",
-            timeZone: timezone,
-          }),
+          time: r.timestamp * 1000,
           bpm: r.bpm,
         })),
-    [records, timezone],
+    [records],
   );
 
   const goToPrevDay = () => {
@@ -227,9 +291,18 @@ export const DailyStats = memo(function DailyStats({
         <ResponsiveContainer width="100%" height={300}>
           <LineChart data={chartData}>
             <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-            <XAxis dataKey="time" stroke="#9CA3AF" fontSize={12} />
+            <XAxis
+              dataKey="time"
+              type="number"
+              domain={[dayStartMs, dayEndMs]}
+              ticks={dayTicks}
+              tickFormatter={(ms: number) => formatTimeMs(ms, timezone)}
+              stroke="#9CA3AF"
+              fontSize={12}
+            />
             <YAxis domain={[40, 200]} stroke="#9CA3AF" fontSize={12} />
             <Tooltip
+              labelFormatter={(ms) => formatTimeMs(Number(ms), timezone)}
               contentStyle={{
                 backgroundColor: "#1F2937",
                 border: "1px solid #374151",
