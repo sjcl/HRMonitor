@@ -197,6 +197,7 @@ export function DailyStats({
               stroke="#EF4444"
               strokeWidth={2}
               dot={false}
+              isAnimationActive={false}
             />
           </LineChart>
         </ResponsiveContainer>

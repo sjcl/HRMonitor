@@ -271,6 +271,7 @@ export function AllUsersHeartRateChart({
                 stroke={USER_COLORS[i % USER_COLORS.length]}
                 strokeWidth={2}
                 dot={false}
+                isAnimationActive={false}
               />
             ))}
           </LineChart>
