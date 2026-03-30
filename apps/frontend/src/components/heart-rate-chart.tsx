@@ -14,6 +14,15 @@ import {
   ResponsiveContainer,
 } from "recharts";
 
+function computeTicks(data: Array<{ timestamp: number }>, count = 6): number[] {
+  if (data.length === 0) return [];
+  const min = data[0].timestamp;
+  const max = data[data.length - 1].timestamp;
+  if (min === max) return [min];
+  const step = (max - min) / (count - 1);
+  return Array.from({ length: count }, (_, i) => min + step * i);
+}
+
 const PRESETS = [
   { seconds: 600, label: "10m" },
   { seconds: 1800, label: "30m" },
@@ -130,6 +139,8 @@ export function HeartRateChart({
       }));
   }, [records, wsBuffer, isRealtime, range.seconds]);
 
+  const xTicks = useMemo(() => computeTicks(chartData), [chartData]);
+
   return (
     <div className="border border-gray-800 rounded-lg p-4">
       <div className="flex flex-wrap items-center justify-end gap-2 mb-3">
@@ -159,10 +170,9 @@ export function HeartRateChart({
             <XAxis
               dataKey="timestamp"
               type="number"
-              scale="time"
               domain={["dataMin", "dataMax"]}
+              ticks={xTicks}
               tickFormatter={formatTimestamp}
-              minTickGap={50}
               stroke="#9CA3AF"
               fontSize={12}
             />
