@@ -99,13 +99,12 @@ pub async fn daily_stats(
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<String>,
     Query(params): Query<DailyStatsQuery>,
-) -> Result<Json<Vec<DailyStatsResponse>>, AppError> {
-    parse_date(&params.from)?;
-    parse_date(&params.to)?;
+) -> Result<Json<Option<DailyStatsResponse>>, AppError> {
+    parse_date(&params.date)?;
 
     check_user_exists(&state.db, &user_id).await?;
 
-    let records: Vec<DailyStatsResponse> = sqlx::query_as(
+    let record: Option<DailyStatsResponse> = sqlx::query_as(
         "WITH tz AS (SELECT timezone FROM users WHERE id = $1)
          SELECT
              (time_bucket(INTERVAL '1 day', r.recorded_at, timezone => tz.timezone)
@@ -117,17 +116,15 @@ pub async fn daily_stats(
          FROM heart_rate_records r, tz
          WHERE r.user_id = $1
            AND r.recorded_at >= ($2::date::timestamp AT TIME ZONE tz.timezone)
-           AND r.recorded_at <  ($3::date::timestamp AT TIME ZONE tz.timezone)
-         GROUP BY 1
-         ORDER BY day ASC",
+           AND r.recorded_at <  (($2::date + INTERVAL '1 day')::timestamp AT TIME ZONE tz.timezone)
+         GROUP BY 1",
     )
     .bind(&user_id)
-    .bind(&params.from)
-    .bind(&params.to)
-    .fetch_all(&state.db)
+    .bind(&params.date)
+    .fetch_optional(&state.db)
     .await?;
 
-    Ok(Json(records))
+    Ok(Json(record))
 }
 
 pub async fn latest_heart_rate(

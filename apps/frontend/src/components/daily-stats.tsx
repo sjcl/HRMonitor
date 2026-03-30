@@ -113,9 +113,6 @@ export const DailyStats = memo(function DailyStats({
 }) {
   const [selectedDate, setSelectedDate] = useState(() => todayInTz(timezone));
 
-  const statsFrom = addDays(selectedDate, -15);
-  const statsTo = addDays(selectedDate, 16);
-
   const today = todayInTz(timezone);
   const isToday = selectedDate === today;
 
@@ -124,8 +121,8 @@ export const DailyStats = memo(function DailyStats({
     refetch: refetchStats,
     isFetching: isFetchingStats,
   } = useQuery({
-    queryKey: ["daily-stats", userId, timezone, statsFrom, statsTo],
-    queryFn: () => getDailyStats(userId, statsFrom, statsTo),
+    queryKey: ["daily-stats", userId, timezone, selectedDate],
+    queryFn: () => getDailyStats(userId, selectedDate),
   });
 
   const {
@@ -146,7 +143,7 @@ export const DailyStats = memo(function DailyStats({
     refetchRecords();
   };
 
-  const todayStats = dailyStats?.find((s) => s.day === selectedDate);
+  const todayStats = dailyStats ?? undefined;
 
   const [dayStartMs, dayEndMs] = useMemo(
     () => getDateBoundsMs(selectedDate, timezone),

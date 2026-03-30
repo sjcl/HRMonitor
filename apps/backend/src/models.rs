@@ -77,8 +77,7 @@ pub struct HeartRateByDateQuery {
 
 #[derive(Debug, Deserialize)]
 pub struct DailyStatsQuery {
-    pub from: String,
-    pub to: String,
+    pub date: String,
 }
 
 // --- Response DTOs ---

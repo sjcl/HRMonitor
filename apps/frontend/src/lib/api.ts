@@ -99,9 +99,9 @@ export interface DailyStats {
   count: number;
 }
 
-export function getDailyStats(userId: string, from: string, to: string) {
-  return fetchJson<DailyStats[]>(
-    `/api/users/${userId}/heart-rates/daily-stats?from=${from}&to=${to}`
+export function getDailyStats(userId: string, date: string) {
+  return fetchJson<DailyStats | null>(
+    `/api/users/${userId}/heart-rates/daily-stats?date=${date}`
   );
 }
 
