@@ -11,7 +11,6 @@ export function PulsoidToken({ userId }: { userId: string }) {
   const { data: token, isLoading } = useQuery({
     queryKey: ["pulsoid-token", userId],
     queryFn: () => getPulsoidToken(userId),
-    refetchInterval: 5000,
   });
 
   const connectMutation = useMutation({
