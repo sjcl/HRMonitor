@@ -11,7 +11,7 @@ export interface LatestHeartRate {
 
 interface SnapshotMessage {
   type: "snapshot";
-  data: (LatestHeartRate | null)[];
+  data: Record<string, LatestHeartRate | null>;
 }
 
 interface UpdateMessage {
@@ -77,8 +77,12 @@ export function useHeartRateWs(
         if (msg.type === "snapshot") {
           setData((prev) => {
             const next = new Map(prev);
-            for (const item of msg.data) {
-              if (item) next.set(item.user_id, item);
+            for (const [userId, item] of Object.entries(msg.data)) {
+              if (item) {
+                next.set(userId, item);
+              } else {
+                next.delete(userId);
+              }
             }
             return next;
           });

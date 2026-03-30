@@ -4,7 +4,7 @@ use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
 use redis::AsyncCommands;
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::AppState;
@@ -15,7 +15,7 @@ use crate::models::WsClientMessage;
 #[serde(tag = "type", rename_all = "snake_case")]
 enum WsServerMessage {
     Snapshot {
-        data: Vec<Option<LatestHeartRateUpdate>>,
+        data: HashMap<String, Option<LatestHeartRateUpdate>>,
     },
     Update {
         data: LatestHeartRateUpdate,
@@ -92,8 +92,9 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>) {
 async fn read_snapshot(
     state: &AppState,
     user_ids: &[String],
-) -> Vec<Option<LatestHeartRateUpdate>> {
-    let mut results = Vec::with_capacity(user_ids.len());
+) -> HashMap<String, Option<LatestHeartRateUpdate>> {
+    let mut results: HashMap<String, Option<LatestHeartRateUpdate>> =
+        HashMap::with_capacity(user_ids.len());
     let mut missing = Vec::new();
 
     {
@@ -101,20 +102,23 @@ async fn read_snapshot(
         for user_id in user_ids {
             let key = format!("latest_bpm:{user_id}");
             let value: Option<String> = redis.get(&key).await.unwrap_or(None);
-            let parsed = value.and_then(|v| serde_json::from_str::<LatestHeartRateUpdate>(&v).ok());
+            let parsed =
+                value.and_then(|v| serde_json::from_str::<LatestHeartRateUpdate>(&v).ok());
 
             match parsed {
-                Some(value) => results.push(Some(value)),
+                Some(value) => {
+                    results.insert(user_id.clone(), Some(value));
+                }
                 None => {
-                    missing.push((results.len(), user_id.clone(), key));
-                    results.push(None);
+                    missing.push((user_id.clone(), key));
+                    results.insert(user_id.clone(), None);
                 }
             }
         }
     }
 
     let mut cache_refills = Vec::new();
-    for (index, user_id, key) in missing {
+    for (user_id, key) in missing {
         let from_db = sqlx::query_as::<_, (i32, i64)>(
             "SELECT bpm, EXTRACT(EPOCH FROM recorded_at)::BIGINT as recorded_at \
              FROM heart_rate_records WHERE user_id = $1 \
@@ -126,14 +130,14 @@ async fn read_snapshot(
         .ok()
         .flatten()
         .map(|(bpm, recorded_at)| LatestHeartRateUpdate {
-            user_id,
+            user_id: user_id.clone(),
             bpm,
             recorded_at,
             received_at: recorded_at,
         });
 
         if let Some(update) = from_db {
-            results[index] = Some(update.clone());
+            results.insert(user_id, Some(update.clone()));
             cache_refills.push((key, update));
         }
     }
