@@ -84,6 +84,7 @@ export function AllUsersHeartRateChart({
     },
     enabled: !!users?.length,
     refetchInterval: isRealtime ? false : 60_000,
+    refetchOnMount: isRealtime ? "always" : true,
     refetchOnWindowFocus: isRealtime ? "always" : true,
     refetchOnReconnect: isRealtime ? "always" : true,
     staleTime: isRealtime ? Infinity : undefined,
