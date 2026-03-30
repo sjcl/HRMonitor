@@ -84,8 +84,7 @@ pub async fn heart_rates_by_date(
          WHERE user_id = $1
            AND recorded_at >= ($2::date::timestamp AT TIME ZONE tz.timezone)
            AND recorded_at <  (($2::date + INTERVAL '1 day')::timestamp AT TIME ZONE tz.timezone)
-         ORDER BY recorded_at DESC
-         LIMIT 2880",
+         ORDER BY recorded_at",
     )
     .bind(&user_id)
     .bind(&params.date)
