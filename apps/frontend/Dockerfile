@@ -17,8 +17,9 @@ WORKDIR /app
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
 COPY --from=builder /app/public ./public
-COPY --from=builder /app/custom-server.js ./server.js
+COPY entrypoint.sh ./
+RUN chmod +x entrypoint.sh
 
 EXPOSE 3000
 
-CMD ["node", "server.js"]
+CMD ["./entrypoint.sh"]
