@@ -112,6 +112,15 @@ pub struct DailyStatsResponse {
     pub count: i64,
 }
 
+#[derive(Debug, FromRow, Serialize)]
+pub struct MinuteStatsResponse {
+    pub timestamp: i64,
+    pub avg_bpm: f64,
+    pub min_bpm: i32,
+    pub max_bpm: i32,
+    pub sample_count: i64,
+}
+
 // --- Client WebSocket messages ---
 
 #[derive(Debug, Deserialize)]

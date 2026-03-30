@@ -76,6 +76,10 @@ async fn main() {
                 .delete(handlers::tokens::delete_pulsoid_token),
         )
         .route(
+            "/api/users/{id}/heart-rates/minute-stats",
+            get(handlers::heart_rates::minute_stats),
+        )
+        .route(
             "/api/users/{id}/heart-rates/daily-stats",
             get(handlers::heart_rates::daily_stats),
         )

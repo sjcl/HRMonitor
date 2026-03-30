@@ -9,6 +9,7 @@ use crate::broadcast::LatestHeartRateUpdate;
 use crate::error::AppError;
 use crate::models::{
     DailyStatsQuery, DailyStatsResponse, HeartRateByDateQuery, HeartRateQuery, HeartRateResponse,
+    MinuteStatsResponse,
 };
 
 fn parse_date(s: &str) -> Result<NaiveDate, AppError> {
@@ -124,6 +125,37 @@ pub async fn daily_stats(
     .await?;
 
     Ok(Json(record))
+}
+
+pub async fn minute_stats(
+    State(state): State<Arc<AppState>>,
+    Path(user_id): Path<String>,
+    Query(params): Query<HeartRateQuery>,
+) -> Result<Json<Vec<MinuteStatsResponse>>, AppError> {
+    let (seconds, _) = parse_period(&params.period)?;
+    let now = chrono::Utc::now().timestamp();
+    let from = now - seconds;
+
+    check_user_exists(&state.db, &user_id).await?;
+
+    let records: Vec<MinuteStatsResponse> = sqlx::query_as(
+        "SELECT
+             EXTRACT(EPOCH FROM bucket)::BIGINT AS timestamp,
+             avg_bpm,
+             min_bpm,
+             max_bpm,
+             sample_count
+         FROM heart_rate_1m
+         WHERE user_id = $1
+           AND bucket >= to_timestamp($2)
+         ORDER BY bucket",
+    )
+    .bind(&user_id)
+    .bind(from)
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(Json(records))
 }
 
 pub async fn latest_heart_rate(
