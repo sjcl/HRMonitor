@@ -84,8 +84,8 @@ export function AllUsersHeartRateChart({
     },
     enabled: !!users?.length,
     refetchInterval: isRealtime ? false : 60_000,
-    refetchOnWindowFocus: !isRealtime,
-    refetchOnReconnect: !isRealtime,
+    refetchOnWindowFocus: isRealtime ? "always" : true,
+    refetchOnReconnect: isRealtime ? "always" : true,
     staleTime: isRealtime ? Infinity : undefined,
   });
 

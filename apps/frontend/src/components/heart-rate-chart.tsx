@@ -50,8 +50,8 @@ export function HeartRateChart({
     queryKey: ["heart-rates", userId, range.label],
     queryFn: () => getHeartRates(userId, range.label),
     refetchInterval: isRealtime ? false : 60_000,
-    refetchOnWindowFocus: !isRealtime,
-    refetchOnReconnect: !isRealtime,
+    refetchOnWindowFocus: isRealtime ? "always" : true,
+    refetchOnReconnect: isRealtime ? "always" : true,
     staleTime: isRealtime ? Infinity : undefined,
   });
 
