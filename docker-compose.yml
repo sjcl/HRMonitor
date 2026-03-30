@@ -12,7 +12,7 @@ services:
     restart: unless-stopped
 
   redis:
-    image: redis:7-alpine
+    image: redis:8-alpine
     expose:
       - "6379"
     restart: unless-stopped
