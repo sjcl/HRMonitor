@@ -1,8 +1,10 @@
 use axum::extract::{Path, Query, State};
 use axum::Json;
 use chrono::NaiveDate;
+use redis::AsyncCommands;
 use std::sync::Arc;
 
+use crate::broadcast::LatestHeartRateUpdate;
 use crate::error::AppError;
 use crate::models::{
     DailyStatsQuery, DailyStatsResponse, HeartRateByDateQuery, HeartRateQuery, HeartRateResponse,
@@ -136,6 +138,21 @@ pub async fn latest_heart_rate(
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<String>,
 ) -> Result<Json<HeartRateResponse>, AppError> {
+    // Try Redis first
+    {
+        let mut redis = state.redis.lock().await;
+        let key = format!("latest_bpm:{user_id}");
+        if let Ok(Some(value)) = redis.get::<_, Option<String>>(&key).await {
+            if let Ok(cached) = serde_json::from_str::<LatestHeartRateUpdate>(&value) {
+                return Ok(Json(HeartRateResponse {
+                    bpm: cached.bpm,
+                    timestamp: cached.recorded_at,
+                }));
+            }
+        }
+    }
+
+    // Fall back to DB
     let record: HeartRateResponse = sqlx::query_as(
         "SELECT bpm, EXTRACT(EPOCH FROM recorded_at)::BIGINT as timestamp FROM heart_rate_records WHERE user_id = $1 ORDER BY recorded_at DESC LIMIT 1"
     )

@@ -1,21 +1,31 @@
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::broadcast::Sender;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
+use crate::broadcast::LatestHeartRateUpdate;
 use crate::models::UserRow;
 use crate::worker::run_worker;
 
 pub struct WorkerManager {
     db: PgPool,
+    redis: redis::aio::MultiplexedConnection,
+    hr_tx: Sender<LatestHeartRateUpdate>,
     workers: Mutex<HashMap<String, JoinHandle<()>>>,
 }
 
 impl WorkerManager {
-    pub fn new(db: PgPool) -> Arc<Self> {
+    pub fn new(
+        db: PgPool,
+        redis: redis::aio::MultiplexedConnection,
+        hr_tx: Sender<LatestHeartRateUpdate>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             db,
+            redis,
+            hr_tx,
             workers: Mutex::new(HashMap::new()),
         })
     }
@@ -55,8 +65,10 @@ impl WorkerManager {
         }
 
         let db = self.db.clone();
+        let redis = self.redis.clone();
+        let hr_tx = self.hr_tx.clone();
         let user_id = user.id.clone();
-        let handle = tokio::spawn(run_worker(db, user));
+        let handle = tokio::spawn(run_worker(db, redis, hr_tx, user));
         workers.insert(user_id, handle);
     }
 

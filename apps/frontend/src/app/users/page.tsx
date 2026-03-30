@@ -2,10 +2,11 @@
 
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { getUsers, createUser } from "@/lib/api";
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import Link from "next/link";
 import { AllUsersHeartRateChart } from "@/components/all-users-heart-rate-chart";
 import { TimezoneSelect, getBrowserTimezone } from "@/components/timezone-select";
+import { useHeartRateWs } from "@/lib/ws";
 
 export default function UsersPage() {
   const queryClient = useQueryClient();
@@ -16,8 +17,10 @@ export default function UsersPage() {
   const { data: users, isLoading } = useQuery({
     queryKey: ["users"],
     queryFn: getUsers,
-    refetchInterval: 5000,
   });
+
+  const userIds = useMemo(() => (users ?? []).map((u) => u.id), [users]);
+  const liveHr = useHeartRateWs(userIds);
 
   const createMutation = useMutation({
     mutationFn: ({ name, timezone }: { name: string; timezone: string }) =>
@@ -101,7 +104,7 @@ export default function UsersPage() {
                     </Link>
                   </td>
                   <td className="px-4 py-3 text-right">
-                    <BpmBadge bpm={user.latest_bpm} />
+                    <BpmBadge bpm={liveHr.get(user.id)?.bpm ?? user.latest_bpm} />
                   </td>
                   <td className="px-4 py-3 text-right">
                     {user.has_pulsoid_token ? (

@@ -1,27 +1,58 @@
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
+use redis::AsyncCommands;
 use std::sync::Arc;
 
+use crate::broadcast::LatestHeartRateUpdate;
 use crate::error::AppError;
 use crate::models::{CreateUserRequest, UpdateUserRequest, User, UserListItem, UserRow};
 use crate::AppState;
 
+#[derive(Debug, sqlx::FromRow)]
+struct UserListRow {
+    id: String,
+    name: String,
+    has_pulsoid_token: bool,
+    created_at: i64,
+}
+
 pub async fn list_users(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<UserListItem>>, AppError> {
-    let users: Vec<UserListItem> = sqlx::query_as(
+    let rows: Vec<UserListRow> = sqlx::query_as(
         "SELECT
             u.id,
             u.name,
             EXTRACT(EPOCH FROM u.created_at)::BIGINT as created_at,
-            (SELECT hr.bpm FROM heart_rate_records hr WHERE hr.user_id = u.id ORDER BY hr.recorded_at DESC LIMIT 1) as latest_bpm,
             (u.pulsoid_access_token IS NOT NULL) as has_pulsoid_token
         FROM users u
         ORDER BY u.created_at DESC"
     )
     .fetch_all(&state.db)
     .await?;
+
+    // Read latest_bpm from Redis for all users
+    let mut redis = state.redis.lock().await;
+    let mut users = Vec::with_capacity(rows.len());
+    for row in rows {
+        let key = format!("latest_bpm:{}", row.id);
+        let latest_bpm: Option<i32> = redis
+            .get::<_, Option<String>>(&key)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|v| serde_json::from_str::<LatestHeartRateUpdate>(&v).ok())
+            .map(|u| u.bpm);
+
+        users.push(UserListItem {
+            id: row.id,
+            name: row.name,
+            latest_bpm,
+            has_pulsoid_token: row.has_pulsoid_token,
+            created_at: row.created_at,
+        });
+    }
 
     Ok(Json(users))
 }
