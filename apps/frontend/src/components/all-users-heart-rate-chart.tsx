@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { getUsers, getHeartRates } from "@/lib/api";
 import { LatestHeartRate } from "@/lib/ws";
@@ -157,62 +157,66 @@ export function AllUsersHeartRateChart({
         });
   };
 
-  const now = Date.now() / 1000;
-  const cutoff = isRealtime ? now - range.seconds : 0;
+  const { chartData, userMeta } = useMemo(() => {
+    const now = Date.now() / 1000;
+    const cutoff = isRealtime ? now - range.seconds : 0;
 
-  const BUCKET_SIZE = 5;
-  const bucketMap = new Map<number, Record<string, unknown>>();
-  const userMeta: { id: string; name: string }[] = [];
+    const BUCKET_SIZE = 5;
+    const bucketMap = new Map<number, Record<string, unknown>>();
+    const meta: { id: string; name: string }[] = [];
 
-  // API data — cutoff before bucketing, latest-wins per bucket
-  if (allRecords?.length) {
-    for (const { userId, name, records } of allRecords) {
-      userMeta.push({ id: userId, name });
-      for (const r of records) {
-        if (r.timestamp < cutoff) continue;
-        const bucket = Math.round(r.timestamp / BUCKET_SIZE) * BUCKET_SIZE;
-        if (!bucketMap.has(bucket))
-          bucketMap.set(bucket, { _ts: bucket });
-        const row = bucketMap.get(bucket)!;
-        const existingTs =
-          (row[`_ts_${userId}`] as number | undefined) ?? 0;
-        if (r.timestamp >= existingTs) {
-          row[userId] = r.bpm;
-          row[`_ts_${userId}`] = r.timestamp;
+    // API data — cutoff before bucketing, latest-wins per bucket
+    if (allRecords?.length) {
+      for (const { userId, name, records } of allRecords) {
+        meta.push({ id: userId, name });
+        for (const r of records) {
+          if (r.timestamp < cutoff) continue;
+          const bucket = Math.round(r.timestamp / BUCKET_SIZE) * BUCKET_SIZE;
+          if (!bucketMap.has(bucket))
+            bucketMap.set(bucket, { _ts: bucket });
+          const row = bucketMap.get(bucket)!;
+          const existingTs =
+            (row[`_ts_${userId}`] as number | undefined) ?? 0;
+          if (r.timestamp >= existingTs) {
+            row[userId] = r.bpm;
+            row[`_ts_${userId}`] = r.timestamp;
+          }
         }
       }
     }
-  }
 
-  // WS buffer data — same logic
-  for (const [uid, buf] of wsBuffers) {
-    if (!userMeta.some((u) => u.id === uid)) continue;
-    for (const p of buf) {
-      if (p.timestamp < cutoff) continue;
-      const bucket = Math.round(p.timestamp / BUCKET_SIZE) * BUCKET_SIZE;
-      if (!bucketMap.has(bucket))
-        bucketMap.set(bucket, { _ts: bucket });
-      const row = bucketMap.get(bucket)!;
-      const existingTs = (row[`_ts_${uid}`] as number | undefined) ?? 0;
-      if (p.timestamp >= existingTs) {
-        row[uid] = p.bpm;
-        row[`_ts_${uid}`] = p.timestamp;
+    // WS buffer data — same logic
+    for (const [uid, buf] of wsBuffers) {
+      if (!meta.some((u) => u.id === uid)) continue;
+      for (const p of buf) {
+        if (p.timestamp < cutoff) continue;
+        const bucket = Math.round(p.timestamp / BUCKET_SIZE) * BUCKET_SIZE;
+        if (!bucketMap.has(bucket))
+          bucketMap.set(bucket, { _ts: bucket });
+        const row = bucketMap.get(bucket)!;
+        const existingTs = (row[`_ts_${uid}`] as number | undefined) ?? 0;
+        if (p.timestamp >= existingTs) {
+          row[uid] = p.bpm;
+          row[`_ts_${uid}`] = p.timestamp;
+        }
       }
     }
-  }
 
-  // Clean tracking keys before render
-  const chartData = [...bucketMap.values()]
-    .sort((a, b) => (a._ts as number) - (b._ts as number))
-    .map((row) => {
-      const clean: Record<string, unknown> = {
-        timestamp: (row._ts as number) * 1000,
-      };
-      for (const [k, v] of Object.entries(row)) {
-        if (!k.startsWith("_")) clean[k] = v;
-      }
-      return clean;
-    });
+    // Clean tracking keys before render
+    const data = [...bucketMap.values()]
+      .sort((a, b) => (a._ts as number) - (b._ts as number))
+      .map((row) => {
+        const clean: Record<string, unknown> = {
+          timestamp: (row._ts as number) * 1000,
+        };
+        for (const [k, v] of Object.entries(row)) {
+          if (!k.startsWith("_")) clean[k] = v;
+        }
+        return clean;
+      });
+
+    return { chartData: data, userMeta: meta };
+  }, [allRecords, wsBuffers, isRealtime, range.seconds]);
 
   return (
     <div className="border border-gray-800 rounded-lg p-4 mb-6">

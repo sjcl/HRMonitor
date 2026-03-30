@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { getHeartRates } from "@/lib/api";
 import { LatestHeartRate } from "@/lib/ws";
@@ -108,25 +108,27 @@ export function HeartRateChart({
   };
 
   // Merge API + WS data with moving window cutoff
-  const now = Date.now() / 1000;
-  const cutoff = isRealtime ? now - range.seconds : 0;
+  const chartData = useMemo(() => {
+    const now = Date.now() / 1000;
+    const cutoff = isRealtime ? now - range.seconds : 0;
 
-  const apiPoints = (records ?? []).map((r) => ({
-    timestamp: r.timestamp,
-    bpm: r.bpm,
-  }));
-  const apiTimestamps = new Set(apiPoints.map((p) => p.timestamp));
-  const uniqueWsPoints = wsBuffer.filter(
-    (p) => !apiTimestamps.has(p.timestamp),
-  );
-
-  const chartData = [...apiPoints, ...uniqueWsPoints]
-    .filter((p) => p.timestamp >= cutoff)
-    .sort((a, b) => a.timestamp - b.timestamp)
-    .map((r) => ({
-      timestamp: r.timestamp * 1000,
+    const apiPoints = (records ?? []).map((r) => ({
+      timestamp: r.timestamp,
       bpm: r.bpm,
     }));
+    const apiTimestamps = new Set(apiPoints.map((p) => p.timestamp));
+    const uniqueWsPoints = wsBuffer.filter(
+      (p) => !apiTimestamps.has(p.timestamp),
+    );
+
+    return [...apiPoints, ...uniqueWsPoints]
+      .filter((p) => p.timestamp >= cutoff)
+      .sort((a, b) => a.timestamp - b.timestamp)
+      .map((r) => ({
+        timestamp: r.timestamp * 1000,
+        bpm: r.bpm,
+      }));
+  }, [records, wsBuffer, isRealtime, range.seconds]);
 
   return (
     <div className="border border-gray-800 rounded-lg p-4">

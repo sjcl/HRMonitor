@@ -1,12 +1,12 @@
 "use client";
 
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { getUsers, createUser } from "@/lib/api";
-import { useState, useMemo } from "react";
+import { getUsers, createUser, type UserListItem } from "@/lib/api";
+import { useState, useMemo, memo } from "react";
 import Link from "next/link";
 import { AllUsersHeartRateChart } from "@/components/all-users-heart-rate-chart";
 import { TimezoneSelect, getBrowserTimezone } from "@/components/timezone-select";
-import { useHeartRateWs } from "@/lib/ws";
+import { useHeartRateWs, type LatestHeartRate } from "@/lib/ws";
 
 export default function UsersPage() {
   const queryClient = useQueryClient();
@@ -93,32 +93,11 @@ export default function UsersPage() {
             </thead>
             <tbody>
               {users?.map((user) => (
-                <tr
+                <UserRow
                   key={user.id}
-                  className="border-t border-gray-800 hover:bg-gray-900/50"
-                >
-                  <td className="px-4 py-3">
-                    <Link
-                      href={`/users/${user.id}`}
-                      className="text-blue-400 hover:underline"
-                    >
-                      {user.name}
-                    </Link>
-                  </td>
-                  <td className="px-4 py-3 text-right">
-                    <BpmBadge bpm={liveHr.get(user.id)?.bpm ?? user.latest_bpm} />
-                  </td>
-                  <td className="px-4 py-3 text-right text-sm text-gray-400">
-                    <RecordedAtLabel epochSecs={liveHr.get(user.id)?.recorded_at ?? null} />
-                  </td>
-                  <td className="px-4 py-3 text-right">
-                    {user.has_pulsoid_token ? (
-                      <span className="inline-block w-2 h-2 rounded-full bg-green-400" title="Connected" />
-                    ) : (
-                      <span className="text-gray-600">--</span>
-                    )}
-                  </td>
-                </tr>
+                  user={user}
+                  liveHr={liveHr.get(user.id) ?? null}
+                />
               ))}
               {users?.length === 0 && (
                 <tr>
@@ -134,6 +113,40 @@ export default function UsersPage() {
     </div>
   );
 }
+
+const UserRow = memo(function UserRow({
+  user,
+  liveHr,
+}: {
+  user: UserListItem;
+  liveHr: LatestHeartRate | null;
+}) {
+  return (
+    <tr className="border-t border-gray-800 hover:bg-gray-900/50">
+      <td className="px-4 py-3">
+        <Link
+          href={`/users/${user.id}`}
+          className="text-blue-400 hover:underline"
+        >
+          {user.name}
+        </Link>
+      </td>
+      <td className="px-4 py-3 text-right">
+        <BpmBadge bpm={liveHr?.bpm ?? user.latest_bpm} />
+      </td>
+      <td className="px-4 py-3 text-right text-sm text-gray-400">
+        <RecordedAtLabel epochSecs={liveHr?.recorded_at ?? null} />
+      </td>
+      <td className="px-4 py-3 text-right">
+        {user.has_pulsoid_token ? (
+          <span className="inline-block w-2 h-2 rounded-full bg-green-400" title="Connected" />
+        ) : (
+          <span className="text-gray-600">--</span>
+        )}
+      </td>
+    </tr>
+  );
+});
 
 function RecordedAtLabel({ epochSecs }: { epochSecs: number | null }) {
   if (epochSecs === null) return <span className="text-gray-600">--</span>;

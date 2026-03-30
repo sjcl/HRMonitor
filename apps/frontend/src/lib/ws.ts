@@ -39,9 +39,28 @@ export function useHeartRateWs(
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const backoffRef = useRef(1000);
 
+  // Batch pending WS updates and flush once per animation frame
+  const pendingUpdatesRef = useRef<Map<string, LatestHeartRate>>(new Map());
+  const rafRef = useRef<number | null>(null);
+
   // Keep userIdsRef in sync
   userIdsRef.current = userIds;
   const userIdsKey = userIds.slice().sort().join(",");
+
+  const flushUpdates = useCallback(() => {
+    rafRef.current = null;
+    const pending = pendingUpdatesRef.current;
+    if (pending.size === 0) return;
+    const batch = new Map(pending);
+    pending.clear();
+    setData((prev) => {
+      const next = new Map(prev);
+      for (const [uid, hr] of batch) {
+        next.set(uid, hr);
+      }
+      return next;
+    });
+  }, []);
 
   const connect = useCallback(() => {
     if (typeof window === "undefined") return;
@@ -75,6 +94,7 @@ export function useHeartRateWs(
       try {
         const msg: ServerMessage = JSON.parse(event.data);
         if (msg.type === "snapshot") {
+          // Snapshots are infrequent — apply immediately
           setData((prev) => {
             const next = new Map(prev);
             for (const [userId, item] of Object.entries(msg.data)) {
@@ -87,11 +107,11 @@ export function useHeartRateWs(
             return next;
           });
         } else if (msg.type === "update") {
-          setData((prev) => {
-            const next = new Map(prev);
-            next.set(msg.data.user_id, msg.data);
-            return next;
-          });
+          // Batch updates and flush once per animation frame
+          pendingUpdatesRef.current.set(msg.data.user_id, msg.data);
+          if (rafRef.current === null) {
+            rafRef.current = requestAnimationFrame(flushUpdates);
+          }
         }
       } catch {
         // Ignore malformed messages
@@ -122,6 +142,10 @@ export function useHeartRateWs(
       if (reconnectTimerRef.current) {
         clearTimeout(reconnectTimerRef.current);
         reconnectTimerRef.current = null;
+      }
+      if (rafRef.current !== null) {
+        cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
       }
       const ws = wsRef.current;
       wsRef.current = null;
