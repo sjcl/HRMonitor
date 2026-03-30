@@ -46,7 +46,7 @@ export function HeartRateChart({
   const isRealtime = range.seconds <= 3600;
   const queryClient = useQueryClient();
 
-  const { data: records } = useQuery({
+  const { data: records, isPending } = useQuery({
     queryKey: ["heart-rates", userId, range.label],
     queryFn: () => getHeartRates(userId, range.label),
     refetchInterval: isRealtime ? false : 60_000,
@@ -160,7 +160,9 @@ export function HeartRateChart({
         ))}
       </div>
 
-      {chartData.length === 0 ? (
+      {isPending ? (
+        <div className="p-8 text-center text-gray-500">Loading...</div>
+      ) : chartData.length === 0 ? (
         <div className="p-8 text-center text-gray-500">
           No heart rate data in the last {range.label}
         </div>

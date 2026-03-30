@@ -58,7 +58,7 @@ export function AllUsersHeartRateChart({
   const isRealtime = range.seconds <= 3600;
   const queryClient = useQueryClient();
 
-  const { data: users } = useQuery({
+  const { data: users, isPending: isUsersPending } = useQuery({
     queryKey: ["users"],
     queryFn: getUsers,
     staleTime: Infinity,
@@ -69,7 +69,7 @@ export function AllUsersHeartRateChart({
     .sort()
     .join(",");
 
-  const { data: allRecords } = useQuery({
+  const { data: allRecords, isPending: isRecordsPending } = useQuery({
     queryKey: ["all-heart-rates", userIds, range.label],
     queryFn: async () => {
       if (!users?.length) return [];
@@ -254,7 +254,9 @@ export function AllUsersHeartRateChart({
         </div>
       </div>
 
-      {chartData.length === 0 ? (
+      {isUsersPending || isRecordsPending ? (
+        <div className="p-8 text-center text-gray-500">Loading...</div>
+      ) : chartData.length === 0 ? (
         <div className="p-8 text-center text-gray-500">
           No heart rate data in the last {range.label}
         </div>
