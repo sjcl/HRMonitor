@@ -146,17 +146,6 @@ export const DailyStats = memo(function DailyStats({
           />
         </div>
         <div className="flex items-center gap-2">
-          <button
-            onClick={goToNextDay}
-            disabled={isToday}
-            className={`px-3 py-1.5 rounded ${
-              isToday
-                ? "bg-gray-900 text-gray-600 cursor-not-allowed"
-                : "bg-gray-800 text-gray-400 hover:bg-gray-700"
-            }`}
-          >
-            &rarr;
-          </button>
           {isToday && (
             <button
               onClick={handleRefresh}
@@ -179,6 +168,17 @@ export const DailyStats = memo(function DailyStats({
               </svg>
             </button>
           )}
+          <button
+            onClick={goToNextDay}
+            disabled={isToday}
+            className={`px-3 py-1.5 rounded ${
+              isToday
+                ? "bg-gray-900 text-gray-600 cursor-not-allowed"
+                : "bg-gray-800 text-gray-400 hover:bg-gray-700"
+            }`}
+          >
+            &rarr;
+          </button>
         </div>
       </div>
 
