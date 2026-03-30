@@ -1,30 +1,26 @@
-use axum::extract::{Path, Query, State};
 use axum::Json;
+use axum::extract::{Path, Query, State};
 use chrono::NaiveDate;
 use redis::AsyncCommands;
 use std::sync::Arc;
 
+use crate::AppState;
 use crate::broadcast::LatestHeartRateUpdate;
 use crate::error::AppError;
 use crate::models::{
     DailyStatsQuery, DailyStatsResponse, HeartRateByDateQuery, HeartRateQuery, HeartRateResponse,
 };
-use crate::AppState;
 
 fn parse_date(s: &str) -> Result<NaiveDate, AppError> {
     NaiveDate::parse_from_str(s, "%Y-%m-%d")
         .map_err(|_| AppError::BadRequest(format!("Invalid date: {s}, expected YYYY-MM-DD")))
 }
 
-async fn check_user_exists(
-    db: &sqlx::PgPool,
-    user_id: &str,
-) -> Result<(), AppError> {
-    let exists: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)")
-            .bind(user_id)
-            .fetch_one(db)
-            .await?;
+async fn check_user_exists(db: &sqlx::PgPool, user_id: &str) -> Result<(), AppError> {
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)")
+        .bind(user_id)
+        .fetch_one(db)
+        .await?;
     if !exists {
         return Err(AppError::NotFound("User not found".into()));
     }
@@ -142,13 +138,13 @@ pub async fn latest_heart_rate(
     {
         let mut redis = state.redis.lock().await;
         let key = format!("latest_bpm:{user_id}");
-        if let Ok(Some(value)) = redis.get::<_, Option<String>>(&key).await {
-            if let Ok(cached) = serde_json::from_str::<LatestHeartRateUpdate>(&value) {
-                return Ok(Json(HeartRateResponse {
-                    bpm: cached.bpm,
-                    timestamp: cached.recorded_at,
-                }));
-            }
+        if let Ok(Some(value)) = redis.get::<_, Option<String>>(&key).await
+            && let Ok(cached) = serde_json::from_str::<LatestHeartRateUpdate>(&value)
+        {
+            return Ok(Json(HeartRateResponse {
+                bpm: cached.bpm,
+                timestamp: cached.recorded_at,
+            }));
         }
     }
 
@@ -172,7 +168,12 @@ pub async fn latest_heart_rate(
         if let Ok(json) = serde_json::to_string(&update) {
             let mut redis = state.redis.lock().await;
             let key = format!("latest_bpm:{user_id}");
-            let _: Result<(), _> = redis.set(&key, &json).await;
+            let _: Result<Option<String>, _> = redis::cmd("SET")
+                .arg(&key)
+                .arg(&json)
+                .arg("NX")
+                .query_async(&mut *redis)
+                .await;
         }
     }
 

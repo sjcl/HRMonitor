@@ -7,15 +7,19 @@ use serde::Serialize;
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use crate::AppState;
 use crate::broadcast::LatestHeartRateUpdate;
 use crate::models::WsClientMessage;
-use crate::AppState;
 
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum WsServerMessage {
-    Snapshot { data: Vec<Option<LatestHeartRateUpdate>> },
-    Update { data: LatestHeartRateUpdate },
+    Snapshot {
+        data: Vec<Option<LatestHeartRateUpdate>>,
+    },
+    Update {
+        data: LatestHeartRateUpdate,
+    },
 }
 
 pub async fn heart_rate_ws(
@@ -42,10 +46,10 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>) {
                                 // Send snapshot from Redis
                                 let snapshot = read_snapshot(&state, &user_ids).await;
                                 let msg = WsServerMessage::Snapshot { data: snapshot };
-                                if let Ok(json) = serde_json::to_string(&msg) {
-                                    if sender.send(Message::Text(json.into())).await.is_err() {
-                                        break;
-                                    }
+                                if let Ok(json) = serde_json::to_string(&msg)
+                                    && sender.send(Message::Text(json.into())).await.is_err()
+                                {
+                                    break;
                                 }
                             }
                             Ok(WsClientMessage::Unsubscribe { user_ids }) => {
@@ -68,10 +72,10 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>) {
                     Ok(update) => {
                         if subscribed.contains(&update.user_id) {
                             let msg = WsServerMessage::Update { data: update };
-                            if let Ok(json) = serde_json::to_string(&msg) {
-                                if sender.send(Message::Text(json.into())).await.is_err() {
-                                    break;
-                                }
+                            if let Ok(json) = serde_json::to_string(&msg)
+                                && sender.send(Message::Text(json.into())).await.is_err()
+                            {
+                                break;
                             }
                         }
                     }
@@ -89,46 +93,63 @@ async fn read_snapshot(
     state: &AppState,
     user_ids: &[String],
 ) -> Vec<Option<LatestHeartRateUpdate>> {
-    let mut redis = state.redis.lock().await;
     let mut results = Vec::with_capacity(user_ids.len());
+    let mut missing = Vec::new();
 
-    for user_id in user_ids {
-        let key = format!("latest_bpm:{user_id}");
-        let value: Option<String> = redis.get(&key).await.unwrap_or(None);
-        let parsed = value.and_then(|v| serde_json::from_str::<LatestHeartRateUpdate>(&v).ok());
+    {
+        let mut redis = state.redis.lock().await;
+        for user_id in user_ids {
+            let key = format!("latest_bpm:{user_id}");
+            let value: Option<String> = redis.get(&key).await.unwrap_or(None);
+            let parsed = value.and_then(|v| serde_json::from_str::<LatestHeartRateUpdate>(&v).ok());
 
-        let entry = match parsed {
-            Some(v) => Some(v),
-            None => {
-                // Fall back to DB
-                let from_db = sqlx::query_as::<_, (i32, i64)>(
-                    "SELECT bpm, EXTRACT(EPOCH FROM recorded_at)::BIGINT as recorded_at \
-                     FROM heart_rate_records WHERE user_id = $1 \
-                     ORDER BY recorded_at DESC LIMIT 1",
-                )
-                .bind(user_id)
-                .fetch_optional(&state.db)
-                .await
-                .ok()
-                .flatten()
-                .map(|(bpm, recorded_at)| LatestHeartRateUpdate {
-                    user_id: user_id.clone(),
-                    bpm,
-                    recorded_at,
-                    received_at: recorded_at,
-                });
-
-                // Write back to Redis (cache-aside)
-                if let Some(ref update) = from_db {
-                    if let Ok(json) = serde_json::to_string(update) {
-                        let _: Result<(), _> = redis.set(&key, &json).await;
-                    }
+            match parsed {
+                Some(value) => results.push(Some(value)),
+                None => {
+                    missing.push((results.len(), user_id.clone(), key));
+                    results.push(None);
                 }
-
-                from_db
             }
-        };
-        results.push(entry);
+        }
+    }
+
+    let mut cache_refills = Vec::new();
+    for (index, user_id, key) in missing {
+        let from_db = sqlx::query_as::<_, (i32, i64)>(
+            "SELECT bpm, EXTRACT(EPOCH FROM recorded_at)::BIGINT as recorded_at \
+             FROM heart_rate_records WHERE user_id = $1 \
+             ORDER BY recorded_at DESC LIMIT 1",
+        )
+        .bind(&user_id)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .map(|(bpm, recorded_at)| LatestHeartRateUpdate {
+            user_id,
+            bpm,
+            recorded_at,
+            received_at: recorded_at,
+        });
+
+        if let Some(update) = from_db {
+            results[index] = Some(update.clone());
+            cache_refills.push((key, update));
+        }
+    }
+
+    if !cache_refills.is_empty() {
+        let mut redis = state.redis.lock().await;
+        for (key, update) in cache_refills {
+            if let Ok(json) = serde_json::to_string(&update) {
+                let _: Result<Option<String>, _> = redis::cmd("SET")
+                    .arg(&key)
+                    .arg(&json)
+                    .arg("NX")
+                    .query_async(&mut *redis)
+                    .await;
+            }
+        }
     }
 
     results

@@ -1,13 +1,13 @@
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::Json;
 use redis::AsyncCommands;
 use std::sync::Arc;
 
+use crate::AppState;
 use crate::broadcast::LatestHeartRateUpdate;
 use crate::error::AppError;
 use crate::models::{CreateUserRequest, UpdateUserRequest, User, UserListItem, UserRow};
-use crate::AppState;
 
 #[derive(Debug, sqlx::FromRow)]
 struct UserListRow {
@@ -27,7 +27,7 @@ pub async fn list_users(
             EXTRACT(EPOCH FROM u.created_at)::BIGINT as created_at,
             (u.pulsoid_access_token IS NOT NULL) as has_pulsoid_token
         FROM users u
-        ORDER BY u.created_at DESC"
+        ORDER BY u.created_at DESC",
     )
     .fetch_all(&state.db)
     .await?;
@@ -76,8 +76,10 @@ pub async fn list_users(
         .fetch_all(&state.db)
         .await?;
 
-        let bpm_map: std::collections::HashMap<&str, (i32, i64)> =
-            db_rows.iter().map(|(uid, bpm, ts)| (uid.as_str(), (*bpm, *ts))).collect();
+        let bpm_map: std::collections::HashMap<&str, (i32, i64)> = db_rows
+            .iter()
+            .map(|(uid, bpm, ts)| (uid.as_str(), (*bpm, *ts)))
+            .collect();
 
         // Write back to Redis
         {
@@ -91,7 +93,12 @@ pub async fn list_users(
                 };
                 if let Ok(json) = serde_json::to_string(&update) {
                     let key = format!("latest_bpm:{uid}");
-                    let _: Result<(), _> = redis.set(&key, &json).await;
+                    let _: Result<Option<String>, _> = redis::cmd("SET")
+                        .arg(&key)
+                        .arg(&json)
+                        .arg("NX")
+                        .query_async(&mut *redis)
+                        .await;
                 }
             }
         }
@@ -148,7 +155,7 @@ pub async fn get_user(
                 pulsoid_last_error,
                 EXTRACT(EPOCH FROM created_at)::BIGINT as created_at,
                 EXTRACT(EPOCH FROM updated_at)::BIGINT as updated_at
-         FROM users WHERE id = $1"
+         FROM users WHERE id = $1",
     )
     .bind(&id)
     .fetch_optional(&state.db)
@@ -163,10 +170,10 @@ pub async fn update_user(
     Path(id): Path<String>,
     Json(body): Json<UpdateUserRequest>,
 ) -> Result<Json<User>, AppError> {
-    if let Some(ref name) = body.name {
-        if name.trim().is_empty() {
-            return Err(AppError::BadRequest("Name cannot be empty".into()));
-        }
+    if let Some(ref name) = body.name
+        && name.trim().is_empty()
+    {
+        return Err(AppError::BadRequest("Name cannot be empty".into()));
     }
 
     let now = now_unix();
@@ -191,7 +198,7 @@ pub async fn update_user(
                 pulsoid_last_error,
                 EXTRACT(EPOCH FROM created_at)::BIGINT as created_at,
                 EXTRACT(EPOCH FROM updated_at)::BIGINT as updated_at
-         FROM users WHERE id = $1"
+         FROM users WHERE id = $1",
     )
     .bind(&id)
     .fetch_one(&state.db)
