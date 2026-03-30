@@ -21,7 +21,7 @@ export default function UsersPage() {
   });
 
   const userIds = useMemo(() => (users ?? []).map((u) => u.id), [users]);
-  const liveHr = useHeartRateWs(userIds);
+  const { data: liveHr, reconnectCount } = useHeartRateWs(userIds);
 
   const createMutation = useMutation({
     mutationFn: ({ name, timezone }: { name: string; timezone: string }) =>
@@ -76,7 +76,7 @@ export default function UsersPage() {
         </form>
       )}
 
-      <AllUsersHeartRateChart />
+      <AllUsersHeartRateChart liveHr={liveHr} wsReconnectCount={reconnectCount} />
 
       {isLoading ? (
         <p className="text-gray-400">Loading...</p>

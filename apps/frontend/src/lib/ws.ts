@@ -26,26 +26,52 @@ function buildWsUrl(): string {
   return `${proto}//${location.host}/api/ws/heart-rates`;
 }
 
-export function useHeartRateWs(userIds: string[]): Map<string, LatestHeartRate> {
+export function useHeartRateWs(
+  userIds: string[],
+): { data: Map<string, LatestHeartRate>; reconnectCount: number } {
   const [data, setData] = useState<Map<string, LatestHeartRate>>(new Map());
+  const [reconnectCount, setReconnectCount] = useState(0);
   const wsRef = useRef<WebSocket | null>(null);
   const subscribedRef = useRef<Set<string>>(new Set());
+  const userIdsRef = useRef(userIds);
+  const hasConnectedRef = useRef(false);
+  const wasDisconnectedRef = useRef(false);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const backoffRef = useRef(1000);
+
+  // Keep userIdsRef in sync
+  userIdsRef.current = userIds;
   const userIdsKey = userIds.slice().sort().join(",");
 
   const connect = useCallback(() => {
     if (typeof window === "undefined") return;
 
+    // Clear any pending reconnect timer
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+
     const ws = new WebSocket(buildWsUrl());
     wsRef.current = ws;
 
     ws.onopen = () => {
-      if (userIds.length > 0) {
-        ws.send(JSON.stringify({ type: "subscribe", user_ids: userIds }));
-        subscribedRef.current = new Set(userIds);
+      if (hasConnectedRef.current && wasDisconnectedRef.current) {
+        setReconnectCount((c) => c + 1);
+      }
+      hasConnectedRef.current = true;
+      wasDisconnectedRef.current = false;
+      backoffRef.current = 1000;
+
+      const ids = userIdsRef.current;
+      if (ids.length > 0) {
+        ws.send(JSON.stringify({ type: "subscribe", user_ids: ids }));
+        subscribedRef.current = new Set(ids);
       }
     };
 
     ws.onmessage = (event) => {
+      if (ws !== wsRef.current) return;
       try {
         const msg: ServerMessage = JSON.parse(event.data);
         if (msg.type === "snapshot") {
@@ -68,27 +94,34 @@ export function useHeartRateWs(userIds: string[]): Map<string, LatestHeartRate> 
       }
     };
 
-    let backoff = 1000;
     ws.onclose = () => {
+      if (ws !== wsRef.current) return;
       wsRef.current = null;
-      // Reconnect with backoff
-      setTimeout(() => {
-        backoff = Math.min(backoff * 2, 30000);
+      wasDisconnectedRef.current = true;
+      const delay = backoffRef.current;
+      reconnectTimerRef.current = setTimeout(() => {
+        reconnectTimerRef.current = null;
+        backoffRef.current = Math.min(backoffRef.current * 2, 30000);
         connect();
-      }, backoff);
+      }, delay);
     };
 
     ws.onerror = () => {
       ws.close();
     };
-  }, [userIdsKey]);
+  }, []);
 
-  // Connect on mount, reconnect when userIds change
+  // Connect on mount only
   useEffect(() => {
     connect();
     return () => {
-      wsRef.current?.close();
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+      const ws = wsRef.current;
       wsRef.current = null;
+      ws?.close();
     };
   }, [connect]);
 
@@ -107,11 +140,18 @@ export function useHeartRateWs(userIds: string[]): Map<string, LatestHeartRate> 
       ws.send(JSON.stringify({ type: "subscribe", user_ids: toSubscribe }));
     }
     if (toUnsubscribe.length > 0) {
-      ws.send(JSON.stringify({ type: "unsubscribe", user_ids: toUnsubscribe }));
+      ws.send(
+        JSON.stringify({ type: "unsubscribe", user_ids: toUnsubscribe }),
+      );
+      setData((prev) => {
+        const next = new Map(prev);
+        for (const id of toUnsubscribe) next.delete(id);
+        return next;
+      });
     }
 
     subscribedRef.current = currentIds;
   }, [userIdsKey]);
 
-  return data;
+  return { data, reconnectCount };
 }

@@ -24,8 +24,8 @@ export default function UserDetailPage({
   });
 
   const userIds = useMemo(() => [id], [id]);
-  const liveHr = useHeartRateWs(userIds);
-  const latestHr = liveHr.get(id) ?? null;
+  const { data: liveHrData, reconnectCount } = useHeartRateWs(userIds);
+  const latestHr = liveHrData.get(id) ?? null;
 
   const [editName, setEditName] = useState("");
   const [editTimezone, setEditTimezone] = useState("");
@@ -76,7 +76,7 @@ export default function UserDetailPage({
 
       <section className="mb-8">
         <h2 className="text-lg font-semibold mb-3">Heart Rate</h2>
-        <HeartRateChart userId={id} />
+        <HeartRateChart userId={id} latestHr={latestHr} wsReconnectCount={reconnectCount} />
       </section>
 
       {user && (
