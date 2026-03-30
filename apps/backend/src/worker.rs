@@ -43,7 +43,8 @@ pub async fn run_worker(
                 while let Some(msg) = read.next().await {
                     match msg {
                         Ok(tokio_tungstenite::tungstenite::Message::Text(text)) => {
-                            if let Err(e) = handle_message(&db, &redis, &hr_tx, &user, &text).await {
+                            if let Err(e) = handle_message(&db, &redis, &hr_tx, &user, &text).await
+                            {
                                 tracing::warn!(user_id = %user.id, "Failed to handle message: {e}");
                             }
                         }
@@ -86,7 +87,8 @@ async fn handle_message(
     user: &UserRow,
     text: &str,
 ) -> Result<(), String> {
-    let msg: PulsoidMessage = serde_json::from_str(text).map_err(|e| format!("Parse error: {e}"))?;
+    let msg: PulsoidMessage =
+        serde_json::from_str(text).map_err(|e| format!("Parse error: {e}"))?;
 
     let bpm = msg.data.heart_rate;
     if !(20..=250).contains(&bpm) {
@@ -94,7 +96,8 @@ async fn handle_message(
     }
 
     let now = chrono_now();
-    let recorded_at = msg.measured_at
+    let recorded_at = msg
+        .measured_at
         .filter(|&t| t > 0)
         .map(|t| t / 1000)
         .unwrap_or(now);

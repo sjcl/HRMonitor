@@ -1,8 +1,8 @@
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::broadcast::Sender;
 use tokio::sync::Mutex;
+use tokio::sync::broadcast::Sender;
 use tokio::task::JoinHandle;
 
 use crate::broadcast::LatestHeartRateUpdate;

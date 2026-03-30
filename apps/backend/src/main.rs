@@ -6,8 +6,8 @@ mod models;
 mod worker;
 mod worker_manager;
 
-use axum::routing::get;
 use axum::Router;
+use axum::routing::get;
 use std::sync::Arc;
 use tokio::sync::broadcast as tokio_broadcast;
 use tower_http::cors::CorsLayer;
@@ -31,13 +31,14 @@ async fn main() {
         )
         .init();
 
-    let database_url =
-        std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://hrmonitor:hrmonitor@localhost:5432/hrmonitor".into());
+    let database_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://hrmonitor:hrmonitor@localhost:5432/hrmonitor".into());
 
-    let redis_url =
-        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".into());
+    let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".into());
 
-    let pool = db::init_pool(&database_url).await.expect("Failed to initialize database");
+    let pool = db::init_pool(&database_url)
+        .await
+        .expect("Failed to initialize database");
 
     let redis_client = redis::Client::open(redis_url).expect("Invalid REDIS_URL");
     let redis_conn = redis_client
@@ -60,18 +61,36 @@ async fn main() {
     });
 
     let app = Router::new()
-        .route("/api/users", get(handlers::users::list_users).post(handlers::users::create_user))
-        .route("/api/users/{id}", get(handlers::users::get_user).patch(handlers::users::update_user))
+        .route(
+            "/api/users",
+            get(handlers::users::list_users).post(handlers::users::create_user),
+        )
+        .route(
+            "/api/users/{id}",
+            get(handlers::users::get_user).patch(handlers::users::update_user),
+        )
         .route(
             "/api/users/{id}/pulsoid-token",
             get(handlers::tokens::get_pulsoid_token)
                 .put(handlers::tokens::set_pulsoid_token)
                 .delete(handlers::tokens::delete_pulsoid_token),
         )
-        .route("/api/users/{id}/heart-rates/daily-stats", get(handlers::heart_rates::daily_stats))
-        .route("/api/users/{id}/heart-rates/by-date", get(handlers::heart_rates::heart_rates_by_date))
-        .route("/api/users/{id}/heart-rates", get(handlers::heart_rates::list_heart_rates))
-        .route("/api/users/{id}/latest-heart-rate", get(handlers::heart_rates::latest_heart_rate))
+        .route(
+            "/api/users/{id}/heart-rates/daily-stats",
+            get(handlers::heart_rates::daily_stats),
+        )
+        .route(
+            "/api/users/{id}/heart-rates/by-date",
+            get(handlers::heart_rates::heart_rates_by_date),
+        )
+        .route(
+            "/api/users/{id}/heart-rates",
+            get(handlers::heart_rates::list_heart_rates),
+        )
+        .route(
+            "/api/users/{id}/latest-heart-rate",
+            get(handlers::heart_rates::latest_heart_rate),
+        )
         .route("/api/ws/heart-rates", get(handlers::ws::heart_rate_ws))
         .layer(CorsLayer::permissive())
         .with_state(state);

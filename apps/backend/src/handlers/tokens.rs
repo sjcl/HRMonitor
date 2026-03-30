@@ -1,14 +1,13 @@
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::Json;
 use std::sync::Arc;
 
+use crate::AppState;
 use crate::error::AppError;
 use crate::models::{PulsoidTokenResponse, SetPulsoidTokenRequest, UserRow};
-use crate::AppState;
 
-const SELECT_USER_ROW: &str =
-    "SELECT id, name, timezone, pulsoid_access_token,
+const SELECT_USER_ROW: &str = "SELECT id, name, timezone, pulsoid_access_token,
             EXTRACT(EPOCH FROM pulsoid_last_connected_at)::BIGINT as pulsoid_last_connected_at,
             pulsoid_last_error,
             EXTRACT(EPOCH FROM created_at)::BIGINT as created_at,
