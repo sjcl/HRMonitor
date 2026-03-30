@@ -35,7 +35,7 @@ export function AllUsersHeartRateChart() {
   const { data: users } = useQuery({
     queryKey: ["users"],
     queryFn: getUsers,
-    refetchInterval: 5000,
+    staleTime: Infinity,
   });
 
   const userIds = (users ?? []).map((u) => u.id).sort().join(",");
