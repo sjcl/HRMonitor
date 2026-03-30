@@ -123,6 +123,7 @@ export const DailyStats = memo(function DailyStats({
   } = useQuery({
     queryKey: ["daily-stats", userId, timezone, selectedDate],
     queryFn: () => getDailyStats(userId, selectedDate),
+    refetchOnWindowFocus: false,
   });
 
   const {
@@ -135,6 +136,7 @@ export const DailyStats = memo(function DailyStats({
   } = useQuery({
     queryKey: ["daily-heart-rates", userId, timezone, selectedDate],
     queryFn: () => getHeartRatesByDate(userId, selectedDate),
+    refetchOnWindowFocus: false,
   });
 
   const isRefreshing = isFetchingStats || isFetchingRecords;
