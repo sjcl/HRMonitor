@@ -35,6 +35,9 @@ pub async fn list_users(
     // Read latest_bpm from Redis for all users
     let mut redis = state.redis.lock().await;
     let mut users = Vec::with_capacity(rows.len());
+    let mut missing_bpm_indices: Vec<usize> = Vec::new();
+    let mut missing_bpm_user_ids: Vec<String> = Vec::new();
+
     for row in rows {
         let key = format!("latest_bpm:{}", row.id);
         let latest_bpm: Option<i32> = redis
@@ -45,6 +48,11 @@ pub async fn list_users(
             .and_then(|v| serde_json::from_str::<LatestHeartRateUpdate>(&v).ok())
             .map(|u| u.bpm);
 
+        if latest_bpm.is_none() {
+            missing_bpm_indices.push(users.len());
+            missing_bpm_user_ids.push(row.id.clone());
+        }
+
         users.push(UserListItem {
             id: row.id,
             name: row.name,
@@ -52,6 +60,29 @@ pub async fn list_users(
             has_pulsoid_token: row.has_pulsoid_token,
             created_at: row.created_at,
         });
+    }
+    drop(redis);
+
+    // Fall back to DB for users without cached latest_bpm
+    if !missing_bpm_user_ids.is_empty() {
+        let db_rows: Vec<(String, i32)> = sqlx::query_as(
+            "SELECT DISTINCT ON (user_id) user_id, bpm
+             FROM heart_rate_records
+             WHERE user_id = ANY($1)
+             ORDER BY user_id, recorded_at DESC",
+        )
+        .bind(&missing_bpm_user_ids)
+        .fetch_all(&state.db)
+        .await?;
+
+        let bpm_map: std::collections::HashMap<&str, i32> =
+            db_rows.iter().map(|(uid, bpm)| (uid.as_str(), *bpm)).collect();
+
+        for &idx in &missing_bpm_indices {
+            if let Some(&bpm) = bpm_map.get(users[idx].id.as_str()) {
+                users[idx].latest_bpm = Some(bpm);
+            }
+        }
     }
 
     Ok(Json(users))
