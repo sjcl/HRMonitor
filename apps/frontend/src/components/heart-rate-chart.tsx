@@ -1,8 +1,9 @@
 "use client";
 
-import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useState, useEffect, useRef } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { getHeartRates } from "@/lib/api";
+import { LatestHeartRate } from "@/lib/ws";
 import {
   LineChart,
   Line,
@@ -23,26 +24,104 @@ const PRESETS = [
   { seconds: 86400, label: "24h" },
 ] as const;
 
-export function HeartRateChart({ userId }: { userId: string }) {
+export function HeartRateChart({
+  userId,
+  latestHr,
+  wsReconnectCount,
+}: {
+  userId: string;
+  latestHr?: LatestHeartRate | null;
+  wsReconnectCount?: number;
+}) {
   const [range, setRange] = useState<(typeof PRESETS)[number]>(PRESETS[2]);
+  const isRealtime = range.seconds <= 3600;
+  const queryClient = useQueryClient();
 
   const { data: records } = useQuery({
     queryKey: ["heart-rates", userId, range.label],
     queryFn: () => getHeartRates(userId, range.label),
-    refetchInterval: 5000,
+    refetchInterval: isRealtime ? false : 60_000,
+    refetchOnWindowFocus: !isRealtime,
+    refetchOnReconnect: !isRealtime,
+    staleTime: isRealtime ? Infinity : undefined,
   });
+
+  // Refetch on WS reconnect to fill gaps
+  const prevReconnectCount = useRef(wsReconnectCount);
+  useEffect(() => {
+    if (
+      wsReconnectCount !== undefined &&
+      wsReconnectCount !== prevReconnectCount.current
+    ) {
+      prevReconnectCount.current = wsReconnectCount;
+      if (isRealtime) {
+        queryClient.invalidateQueries({
+          queryKey: ["heart-rates", userId, range.label],
+        });
+      }
+    }
+  }, [wsReconnectCount, isRealtime, queryClient, userId, range.label]);
+
+  // WS buffer for realtime mode
+  const [wsBuffer, setWsBuffer] = useState<
+    Array<{ timestamp: number; bpm: number }>
+  >([]);
+
+  useEffect(() => {
+    setWsBuffer([]);
+  }, [range.label, userId]);
+
+  useEffect(() => {
+    if (!isRealtime || !latestHr) return;
+    const cutoff = Date.now() / 1000 - range.seconds;
+    setWsBuffer((prev) => {
+      if (
+        prev.length > 0 &&
+        prev[prev.length - 1].timestamp === latestHr.recorded_at
+      )
+        return prev;
+      const next = [
+        ...prev,
+        { timestamp: latestHr.recorded_at, bpm: latestHr.bpm },
+      ];
+      const firstValid = next.findIndex((p) => p.timestamp >= cutoff);
+      return firstValid > 0 ? next.slice(firstValid) : next;
+    });
+  }, [latestHr, isRealtime, range.seconds]);
 
   const useShortFormat = range.seconds <= 10800;
 
   const formatTimestamp = (tsMs: number): string => {
     const d = new Date(tsMs);
     return useShortFormat
-      ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
-      : d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+      ? d.toLocaleTimeString([], {
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+        })
+      : d.toLocaleString([], {
+          month: "short",
+          day: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+        });
   };
 
-  const chartData = (records ?? [])
-    .slice()
+  // Merge API + WS data with moving window cutoff
+  const now = Date.now() / 1000;
+  const cutoff = isRealtime ? now - range.seconds : 0;
+
+  const apiPoints = (records ?? []).map((r) => ({
+    timestamp: r.timestamp,
+    bpm: r.bpm,
+  }));
+  const apiTimestamps = new Set(apiPoints.map((p) => p.timestamp));
+  const uniqueWsPoints = wsBuffer.filter(
+    (p) => !apiTimestamps.has(p.timestamp),
+  );
+
+  const chartData = [...apiPoints, ...uniqueWsPoints]
+    .filter((p) => p.timestamp >= cutoff)
     .sort((a, b) => a.timestamp - b.timestamp)
     .map((r) => ({
       timestamp: r.timestamp * 1000,
@@ -79,7 +158,7 @@ export function HeartRateChart({ userId }: { userId: string }) {
               dataKey="timestamp"
               type="number"
               scale="time"
-              domain={['dataMin', 'dataMax']}
+              domain={["dataMin", "dataMax"]}
               tickFormatter={formatTimestamp}
               stroke="#9CA3AF"
               fontSize={12}

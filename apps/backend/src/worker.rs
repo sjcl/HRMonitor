@@ -1,13 +1,21 @@
 use futures_util::StreamExt;
+use redis::AsyncCommands;
 use sqlx::PgPool;
 use std::time::Duration;
+use tokio::sync::broadcast::Sender;
 use tokio_tungstenite::connect_async;
 
+use crate::broadcast::LatestHeartRateUpdate;
 use crate::models::{PulsoidMessage, UserRow};
 
 const PULSOID_WS_URL: &str = "wss://dev.pulsoid.net/api/v1/data/real_time";
 
-pub async fn run_worker(db: PgPool, user: UserRow) {
+pub async fn run_worker(
+    db: PgPool,
+    redis: redis::aio::MultiplexedConnection,
+    hr_tx: Sender<LatestHeartRateUpdate>,
+    user: UserRow,
+) {
     let access_token = user.pulsoid_access_token.as_ref().unwrap();
     let mut backoff = Duration::from_secs(1);
     let max_backoff = Duration::from_secs(60);
@@ -35,7 +43,8 @@ pub async fn run_worker(db: PgPool, user: UserRow) {
                 while let Some(msg) = read.next().await {
                     match msg {
                         Ok(tokio_tungstenite::tungstenite::Message::Text(text)) => {
-                            if let Err(e) = handle_message(&db, &user, &text).await {
+                            if let Err(e) = handle_message(&db, &redis, &hr_tx, &user, &text).await
+                            {
                                 tracing::warn!(user_id = %user.id, "Failed to handle message: {e}");
                             }
                         }
@@ -73,10 +82,13 @@ pub async fn run_worker(db: PgPool, user: UserRow) {
 
 async fn handle_message(
     db: &PgPool,
+    redis: &redis::aio::MultiplexedConnection,
+    hr_tx: &Sender<LatestHeartRateUpdate>,
     user: &UserRow,
     text: &str,
 ) -> Result<(), String> {
-    let msg: PulsoidMessage = serde_json::from_str(text).map_err(|e| format!("Parse error: {e}"))?;
+    let msg: PulsoidMessage =
+        serde_json::from_str(text).map_err(|e| format!("Parse error: {e}"))?;
 
     let bpm = msg.data.heart_rate;
     if !(20..=250).contains(&bpm) {
@@ -84,7 +96,8 @@ async fn handle_message(
     }
 
     let now = chrono_now();
-    let recorded_at = msg.measured_at
+    let recorded_at = msg
+        .measured_at
         .filter(|&t| t > 0)
         .map(|t| t / 1000)
         .unwrap_or(now);
@@ -99,6 +112,24 @@ async fn handle_message(
     .execute(db)
     .await
     .map_err(|e| format!("DB insert error: {e}"))?;
+
+    let update = LatestHeartRateUpdate {
+        user_id: user.id.clone(),
+        bpm,
+        recorded_at,
+        received_at: now,
+    };
+
+    // Write to Redis
+    let redis_value = serde_json::to_string(&update).unwrap();
+    let key = format!("latest_bpm:{}", user.id);
+    let mut redis_conn = redis.clone();
+    if let Err(e) = redis_conn.set::<_, _, ()>(&key, &redis_value).await {
+        tracing::warn!(user_id = %user.id, "Failed to write to Redis: {e}");
+    }
+
+    // Broadcast to WebSocket subscribers (ignore error if no receivers)
+    let _ = hr_tx.send(update);
 
     Ok(())
 }

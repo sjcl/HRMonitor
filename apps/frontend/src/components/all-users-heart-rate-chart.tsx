@@ -1,8 +1,9 @@
 "use client";
 
-import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useState, useEffect, useRef } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { getUsers, getHeartRates } from "@/lib/api";
+import { LatestHeartRate } from "@/lib/ws";
 import {
   LineChart,
   Line,
@@ -25,20 +26,39 @@ const PRESETS = [
 ] as const;
 
 const USER_COLORS = [
-  "#EF4444", "#3B82F6", "#10B981", "#F59E0B", "#8B5CF6",
-  "#EC4899", "#06B6D4", "#F97316", "#84CC16", "#6366F1",
+  "#EF4444",
+  "#3B82F6",
+  "#10B981",
+  "#F59E0B",
+  "#8B5CF6",
+  "#EC4899",
+  "#06B6D4",
+  "#F97316",
+  "#84CC16",
+  "#6366F1",
 ];
 
-export function AllUsersHeartRateChart() {
+export function AllUsersHeartRateChart({
+  liveHr,
+  wsReconnectCount,
+}: {
+  liveHr: Map<string, LatestHeartRate>;
+  wsReconnectCount: number;
+}) {
   const [range, setRange] = useState<(typeof PRESETS)[number]>(PRESETS[2]);
+  const isRealtime = range.seconds <= 3600;
+  const queryClient = useQueryClient();
 
   const { data: users } = useQuery({
     queryKey: ["users"],
     queryFn: getUsers,
-    refetchInterval: 5000,
+    staleTime: Infinity,
   });
 
-  const userIds = (users ?? []).map((u) => u.id).sort().join(",");
+  const userIds = (users ?? [])
+    .map((u) => u.id)
+    .sort()
+    .join(",");
 
   const { data: allRecords } = useQuery({
     queryKey: ["all-heart-rates", userIds, range.label],
@@ -49,46 +69,150 @@ export function AllUsersHeartRateChart() {
           userId: u.id,
           name: u.name,
           records: await getHeartRates(u.id, range.label),
-        }))
+        })),
       );
       return results;
     },
     enabled: !!users?.length,
-    refetchInterval: 5000,
+    refetchInterval: isRealtime ? false : 60_000,
+    refetchOnWindowFocus: !isRealtime,
+    refetchOnReconnect: !isRealtime,
+    staleTime: isRealtime ? Infinity : undefined,
   });
+
+  // Refetch on WS reconnect
+  const prevReconnectCount = useRef(wsReconnectCount);
+  useEffect(() => {
+    if (wsReconnectCount !== prevReconnectCount.current) {
+      prevReconnectCount.current = wsReconnectCount;
+      if (isRealtime) {
+        queryClient.invalidateQueries({
+          queryKey: ["all-heart-rates", userIds, range.label],
+        });
+      }
+    }
+  }, [wsReconnectCount, isRealtime, queryClient, userIds, range.label]);
+
+  // Per-user WS buffers
+  const [wsBuffers, setWsBuffers] = useState<
+    Map<string, Array<{ timestamp: number; bpm: number }>>
+  >(new Map());
+  const lastProcessedRef = useRef<Map<string, number>>(new Map());
+
+  useEffect(() => {
+    setWsBuffers(new Map());
+    lastProcessedRef.current = new Map();
+  }, [range.label]);
+
+  useEffect(() => {
+    if (!isRealtime) return;
+    const cutoff = Date.now() / 1000 - range.seconds;
+
+    setWsBuffers((prev) => {
+      const next = new Map(prev);
+      let changed = false;
+
+      for (const [uid, hr] of liveHr) {
+        const lastTs = lastProcessedRef.current.get(uid);
+        if (lastTs === hr.recorded_at) continue;
+        lastProcessedRef.current.set(uid, hr.recorded_at);
+
+        const buf = next.get(uid) ?? [];
+        const appended = [
+          ...buf,
+          { timestamp: hr.recorded_at, bpm: hr.bpm },
+        ];
+        const firstValid = appended.findIndex((p) => p.timestamp >= cutoff);
+        next.set(uid, firstValid > 0 ? appended.slice(firstValid) : appended);
+        changed = true;
+      }
+
+      for (const uid of next.keys()) {
+        if (!liveHr.has(uid)) {
+          next.delete(uid);
+          lastProcessedRef.current.delete(uid);
+          changed = true;
+        }
+      }
+
+      return changed ? next : prev;
+    });
+  }, [liveHr, isRealtime, range.seconds]);
 
   const useShortFormat = range.seconds <= 10800;
 
   const formatTimestamp = (tsMs: number): string => {
     const d = new Date(tsMs);
     return useShortFormat
-      ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
-      : d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+      ? d.toLocaleTimeString([], {
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+        })
+      : d.toLocaleString([], {
+          month: "short",
+          day: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+        });
   };
+
+  const now = Date.now() / 1000;
+  const cutoff = isRealtime ? now - range.seconds : 0;
 
   const BUCKET_SIZE = 5;
   const bucketMap = new Map<number, Record<string, unknown>>();
   const userMeta: { id: string; name: string }[] = [];
 
+  // API data — cutoff before bucketing, latest-wins per bucket
   if (allRecords?.length) {
     for (const { userId, name, records } of allRecords) {
       userMeta.push({ id: userId, name });
       for (const r of records) {
+        if (r.timestamp < cutoff) continue;
         const bucket = Math.round(r.timestamp / BUCKET_SIZE) * BUCKET_SIZE;
-        if (!bucketMap.has(bucket)) {
+        if (!bucketMap.has(bucket))
           bucketMap.set(bucket, { _ts: bucket });
+        const row = bucketMap.get(bucket)!;
+        const existingTs =
+          (row[`_ts_${userId}`] as number | undefined) ?? 0;
+        if (r.timestamp >= existingTs) {
+          row[userId] = r.bpm;
+          row[`_ts_${userId}`] = r.timestamp;
         }
-        bucketMap.get(bucket)![userId] = r.bpm;
       }
     }
   }
 
+  // WS buffer data — same logic
+  for (const [uid, buf] of wsBuffers) {
+    if (!userMeta.some((u) => u.id === uid)) continue;
+    for (const p of buf) {
+      if (p.timestamp < cutoff) continue;
+      const bucket = Math.round(p.timestamp / BUCKET_SIZE) * BUCKET_SIZE;
+      if (!bucketMap.has(bucket))
+        bucketMap.set(bucket, { _ts: bucket });
+      const row = bucketMap.get(bucket)!;
+      const existingTs = (row[`_ts_${uid}`] as number | undefined) ?? 0;
+      if (p.timestamp >= existingTs) {
+        row[uid] = p.bpm;
+        row[`_ts_${uid}`] = p.timestamp;
+      }
+    }
+  }
+
+  // Clean tracking keys before render
   const chartData = [...bucketMap.values()]
     .sort((a, b) => (a._ts as number) - (b._ts as number))
-    .map((row) => ({
-      ...row,
-      timestamp: (row._ts as number) * 1000,
-    }));
+    .map((row) => {
+      const clean: Record<string, unknown> = {
+        timestamp: (row._ts as number) * 1000,
+      };
+      for (const [k, v] of Object.entries(row)) {
+        if (!k.startsWith("_")) clean[k] = v;
+      }
+      return clean;
+    });
 
   return (
     <div className="border border-gray-800 rounded-lg p-4 mb-6">
@@ -123,7 +247,7 @@ export function AllUsersHeartRateChart() {
               dataKey="timestamp"
               type="number"
               scale="time"
-              domain={['dataMin', 'dataMax']}
+              domain={["dataMin", "dataMax"]}
               tickFormatter={formatTimestamp}
               stroke="#9CA3AF"
               fontSize={12}

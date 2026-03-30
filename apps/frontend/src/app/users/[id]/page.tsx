@@ -1,12 +1,13 @@
 "use client";
 
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { getLatestHeartRate, getUser, updateUser } from "@/lib/api";
+import { getUser, updateUser } from "@/lib/api";
 import { HeartRateChart } from "@/components/heart-rate-chart";
 import { DailyStats } from "@/components/daily-stats";
 import { PulsoidToken } from "@/components/pulsoid-token";
 import { TimezoneSelect } from "@/components/timezone-select";
-import { use, useState, useEffect } from "react";
+import { useHeartRateWs } from "@/lib/ws";
+import { use, useState, useEffect, useMemo } from "react";
 import Link from "next/link";
 
 export default function UserDetailPage({
@@ -22,11 +23,9 @@ export default function UserDetailPage({
     queryFn: () => getUser(id),
   });
 
-  const { data: latestHr } = useQuery({
-    queryKey: ["latest-hr", id],
-    queryFn: () => getLatestHeartRate(id).catch(() => null),
-    refetchInterval: 5000,
-  });
+  const userIds = useMemo(() => [id], [id]);
+  const { data: liveHrData, reconnectCount } = useHeartRateWs(userIds);
+  const latestHr = liveHrData.get(id) ?? null;
 
   const [editName, setEditName] = useState("");
   const [editTimezone, setEditTimezone] = useState("");
@@ -64,7 +63,7 @@ export default function UserDetailPage({
               {latestHr.bpm} BPM
             </span>
             <span className="text-sm text-gray-400">
-              {new Date(latestHr.timestamp * 1000).toLocaleTimeString("ja-JP", {
+              {new Date(latestHr.recorded_at * 1000).toLocaleTimeString("ja-JP", {
                 timeZone: user?.timezone,
                 hour: "2-digit",
                 minute: "2-digit",
@@ -77,7 +76,7 @@ export default function UserDetailPage({
 
       <section className="mb-8">
         <h2 className="text-lg font-semibold mb-3">Heart Rate</h2>
-        <HeartRateChart userId={id} />
+        <HeartRateChart userId={id} latestHr={latestHr} wsReconnectCount={reconnectCount} />
       </section>
 
       {user && (

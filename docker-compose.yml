@@ -11,15 +11,23 @@ services:
       - "5432"
     restart: unless-stopped
 
+  redis:
+    image: redis:7-alpine
+    expose:
+      - "6379"
+    restart: unless-stopped
+
   backend:
     build: ./apps/backend
     environment:
       - DATABASE_URL=postgres://hrmonitor:hrmonitor@timescaledb:5432/hrmonitor
+      - REDIS_URL=redis://redis:6379
       - RUST_LOG=hrmonitor_backend=info
     expose:
       - "3001"
     depends_on:
       - timescaledb
+      - redis
     restart: unless-stopped
 
   frontend:

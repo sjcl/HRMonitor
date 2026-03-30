@@ -2,10 +2,11 @@
 
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { getUsers, createUser } from "@/lib/api";
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import Link from "next/link";
 import { AllUsersHeartRateChart } from "@/components/all-users-heart-rate-chart";
 import { TimezoneSelect, getBrowserTimezone } from "@/components/timezone-select";
+import { useHeartRateWs } from "@/lib/ws";
 
 export default function UsersPage() {
   const queryClient = useQueryClient();
@@ -16,8 +17,11 @@ export default function UsersPage() {
   const { data: users, isLoading } = useQuery({
     queryKey: ["users"],
     queryFn: getUsers,
-    refetchInterval: 5000,
+    staleTime: Infinity,
   });
+
+  const userIds = useMemo(() => (users ?? []).map((u) => u.id), [users]);
+  const { data: liveHr, reconnectCount } = useHeartRateWs(userIds);
 
   const createMutation = useMutation({
     mutationFn: ({ name, timezone }: { name: string; timezone: string }) =>
@@ -72,7 +76,7 @@ export default function UsersPage() {
         </form>
       )}
 
-      <AllUsersHeartRateChart />
+      <AllUsersHeartRateChart liveHr={liveHr} wsReconnectCount={reconnectCount} />
 
       {isLoading ? (
         <p className="text-gray-400">Loading...</p>
@@ -83,6 +87,7 @@ export default function UsersPage() {
               <tr>
                 <th className="text-left px-4 py-3 text-sm text-gray-400">Name</th>
                 <th className="text-right px-4 py-3 text-sm text-gray-400">Latest BPM</th>
+                <th className="text-right px-4 py-3 text-sm text-gray-400">Time</th>
                 <th className="text-right px-4 py-3 text-sm text-gray-400">Pulsoid</th>
               </tr>
             </thead>
@@ -101,7 +106,10 @@ export default function UsersPage() {
                     </Link>
                   </td>
                   <td className="px-4 py-3 text-right">
-                    <BpmBadge bpm={user.latest_bpm} />
+                    <BpmBadge bpm={liveHr.get(user.id)?.bpm ?? user.latest_bpm} />
+                  </td>
+                  <td className="px-4 py-3 text-right text-sm text-gray-400">
+                    <RecordedAtLabel epochSecs={liveHr.get(user.id)?.recorded_at ?? null} />
                   </td>
                   <td className="px-4 py-3 text-right">
                     {user.has_pulsoid_token ? (
@@ -114,7 +122,7 @@ export default function UsersPage() {
               ))}
               {users?.length === 0 && (
                 <tr>
-                  <td colSpan={3} className="px-4 py-8 text-center text-gray-500">
+                  <td colSpan={4} className="px-4 py-8 text-center text-gray-500">
                     No users yet
                   </td>
                 </tr>
@@ -124,6 +132,16 @@ export default function UsersPage() {
         </div>
       )}
     </div>
+  );
+}
+
+function RecordedAtLabel({ epochSecs }: { epochSecs: number | null }) {
+  if (epochSecs === null) return <span className="text-gray-600">--</span>;
+  const d = new Date(epochSecs * 1000);
+  return (
+    <span className="font-mono">
+      {d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+    </span>
   );
 }
 
