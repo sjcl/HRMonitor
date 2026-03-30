@@ -161,5 +161,20 @@ pub async fn latest_heart_rate(
     .await?
     .ok_or_else(|| AppError::NotFound("No heart rate data found".into()))?;
 
+    // Write back to Redis
+    {
+        let update = LatestHeartRateUpdate {
+            user_id: user_id.clone(),
+            bpm: record.bpm,
+            recorded_at: record.timestamp,
+            received_at: record.timestamp,
+        };
+        if let Ok(json) = serde_json::to_string(&update) {
+            let mut redis = state.redis.lock().await;
+            let key = format!("latest_bpm:{user_id}");
+            let _: Result<(), _> = redis.set(&key, &json).await;
+        }
+    }
+
     Ok(Json(record))
 }

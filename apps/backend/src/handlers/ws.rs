@@ -96,7 +96,39 @@ async fn read_snapshot(
         let key = format!("latest_bpm:{user_id}");
         let value: Option<String> = redis.get(&key).await.unwrap_or(None);
         let parsed = value.and_then(|v| serde_json::from_str::<LatestHeartRateUpdate>(&v).ok());
-        results.push(parsed);
+
+        let entry = match parsed {
+            Some(v) => Some(v),
+            None => {
+                // Fall back to DB
+                let from_db = sqlx::query_as::<_, (i32, i64)>(
+                    "SELECT bpm, EXTRACT(EPOCH FROM recorded_at)::BIGINT as recorded_at \
+                     FROM heart_rate_records WHERE user_id = $1 \
+                     ORDER BY recorded_at DESC LIMIT 1",
+                )
+                .bind(user_id)
+                .fetch_optional(&state.db)
+                .await
+                .ok()
+                .flatten()
+                .map(|(bpm, recorded_at)| LatestHeartRateUpdate {
+                    user_id: user_id.clone(),
+                    bpm,
+                    recorded_at,
+                    received_at: recorded_at,
+                });
+
+                // Write back to Redis (cache-aside)
+                if let Some(ref update) = from_db {
+                    if let Ok(json) = serde_json::to_string(update) {
+                        let _: Result<(), _> = redis.set(&key, &json).await;
+                    }
+                }
+
+                from_db
+            }
+        };
+        results.push(entry);
     }
 
     results
