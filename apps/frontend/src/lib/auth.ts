@@ -10,8 +10,6 @@ import type {
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
-const allowNewSignups = process.env.ALLOW_NEW_SIGNUPS === "true";
-
 function toAdapterUser(row: Record<string, unknown>): AdapterUser {
   return {
     id: row.id as string,
@@ -25,9 +23,6 @@ function toAdapterUser(row: Record<string, unknown>): AdapterUser {
 function pgAdapter(): Adapter {
   return {
     async createUser(user) {
-      if (!allowNewSignups) {
-        throw new Error("New signups are disabled");
-      }
       const result = await pool.query(
         `INSERT INTO users (display_name, primary_email, timezone)
          VALUES ($1, $2, 'UTC')
@@ -172,15 +167,6 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
           account.providerAccountId,
         ]
       );
-
-      // Block new signups during migration period
-      if (!allowNewSignups) {
-        const existing = await pool.query(
-          "SELECT 1 FROM accounts WHERE provider = $1 AND provider_account_id = $2",
-          [account.provider, account.providerAccountId]
-        );
-        if (existing.rowCount === 0) return false;
-      }
 
       return true;
     },

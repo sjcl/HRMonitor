@@ -43,7 +43,6 @@ services:
       - AUTH_URL=${AUTH_URL:?AUTH_URL must be set}
       - AUTH_TRUST_HOST=true
       - HOSTNAME=0.0.0.0
-      - ALLOW_NEW_SIGNUPS=${ALLOW_NEW_SIGNUPS:-false}
     expose:
       - "3000"
     volumes:

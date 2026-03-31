@@ -62,7 +62,6 @@ docker compose up --build
   - Backend (Rust) は Cookie からセッショントークンを読み、sessions テーブルで認証
   - `/api/auth/*` は nginx が frontend にプロキシ、他の `/api/*` は backend にプロキシ
   - users (1:N) accounts (1:N) sessions のリレーション
-  - `ALLOW_NEW_SIGNUPS` 環境変数で新規登録の開閉を制御
 - Backend, Frontend は Docker 内部ネットワーク限定 (expose のみ、ports なし)
 - nginx が唯一のパブリックエントリポイント (静的ファイル配信 + リバースプロキシ)
 - cloudflared トンネルで nginx を公開
