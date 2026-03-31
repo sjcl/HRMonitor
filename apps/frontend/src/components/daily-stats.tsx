@@ -2,9 +2,10 @@
 
 import { useState, useMemo, memo } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { getDailyStats, getHeartRatesByDate } from "@/lib/api";
+import { getDailyStats, getMinuteStatsByDate } from "@/lib/api";
 import {
-  LineChart,
+  ComposedChart,
+  Area,
   Line,
   XAxis,
   YAxis,
@@ -134,8 +135,8 @@ export const DailyStats = memo(function DailyStats({
     refetch: refetchRecords,
     isFetching: isFetchingRecords,
   } = useQuery({
-    queryKey: ["daily-heart-rates", userId, timezone, selectedDate],
-    queryFn: () => getHeartRatesByDate(userId, selectedDate),
+    queryKey: ["daily-minute-stats", userId, timezone, selectedDate],
+    queryFn: () => getMinuteStatsByDate(userId, selectedDate),
     refetchOnWindowFocus: false,
   });
 
@@ -167,7 +168,10 @@ export const DailyStats = memo(function DailyStats({
         .sort((a, b) => a.timestamp - b.timestamp)
         .map((r) => ({
           time: r.timestamp * 1000,
-          bpm: r.bpm,
+          avg_bpm: Math.round(r.avg_bpm * 10) / 10,
+          min_bpm: r.min_bpm,
+          max_bpm: r.max_bpm,
+          band: r.max_bpm - r.min_bpm,
         })),
     [records],
   );
@@ -288,7 +292,7 @@ export const DailyStats = memo(function DailyStats({
         </div>
       ) : (
         <ResponsiveContainer width="100%" height={300}>
-          <LineChart data={chartData}>
+          <ComposedChart data={chartData}>
             <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
             <XAxis
               dataKey="time"
@@ -307,16 +311,59 @@ export const DailyStats = memo(function DailyStats({
                 border: "1px solid #374151",
                 borderRadius: "8px",
               }}
+              formatter={(value, name) => {
+                const labels: Record<string, string> = {
+                  avg_bpm: "Avg",
+                  min_bpm: "Min",
+                  max_bpm: "Max",
+                };
+                if (labels[name as string]) return [value, labels[name as string]];
+                return [undefined, undefined];
+              }}
+            />
+            <Area
+              type="monotone"
+              dataKey="min_bpm"
+              stackId="minmax"
+              fill="transparent"
+              stroke="none"
+              isAnimationActive={false}
+            />
+            <Area
+              type="monotone"
+              dataKey="band"
+              stackId="minmax"
+              fill="#EF4444"
+              fillOpacity={0.15}
+              stroke="none"
+              isAnimationActive={false}
+              tooltipType="none"
             />
             <Line
               type="monotone"
-              dataKey="bpm"
+              dataKey="avg_bpm"
               stroke="#EF4444"
               strokeWidth={2}
               dot={false}
               isAnimationActive={false}
             />
-          </LineChart>
+            <Line
+              type="monotone"
+              dataKey="min_bpm"
+              stroke="transparent"
+              dot={false}
+              isAnimationActive={false}
+              legendType="none"
+            />
+            <Line
+              type="monotone"
+              dataKey="max_bpm"
+              stroke="transparent"
+              dot={false}
+              isAnimationActive={false}
+              legendType="none"
+            />
+          </ComposedChart>
         </ResponsiveContainer>
       )}
     </div>

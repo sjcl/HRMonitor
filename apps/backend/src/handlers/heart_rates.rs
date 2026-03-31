@@ -158,6 +158,36 @@ pub async fn minute_stats(
     Ok(Json(records))
 }
 
+pub async fn minute_stats_by_date(
+    State(state): State<Arc<AppState>>,
+    Path(user_id): Path<String>,
+    Query(params): Query<HeartRateByDateQuery>,
+) -> Result<Json<Vec<MinuteStatsResponse>>, AppError> {
+    parse_date(&params.date)?;
+    check_user_exists(&state.db, &user_id).await?;
+
+    let records: Vec<MinuteStatsResponse> = sqlx::query_as(
+        "WITH tz AS (SELECT timezone FROM users WHERE id = $1)
+         SELECT
+             EXTRACT(EPOCH FROM bucket)::BIGINT AS timestamp,
+             avg_bpm,
+             min_bpm,
+             max_bpm,
+             sample_count
+         FROM heart_rate_1m, tz
+         WHERE user_id = $1
+           AND bucket >= ($2::date::timestamp AT TIME ZONE tz.timezone)
+           AND bucket <  (($2::date + INTERVAL '1 day')::timestamp AT TIME ZONE tz.timezone)
+         ORDER BY bucket",
+    )
+    .bind(&user_id)
+    .bind(&params.date)
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(Json(records))
+}
+
 pub async fn latest_heart_rate(
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<String>,

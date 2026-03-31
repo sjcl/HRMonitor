@@ -1,3 +1,4 @@
+-- no-transaction
 CREATE MATERIALIZED VIEW heart_rate_1m
 WITH (timescaledb.continuous) AS
 SELECT
@@ -11,8 +12,13 @@ FROM heart_rate_records
 GROUP BY user_id, bucket
 WITH NO DATA;
 
+ALTER MATERIALIZED VIEW heart_rate_1m
+    SET (timescaledb.materialized_only = false);
+
 SELECT add_continuous_aggregate_policy('heart_rate_1m',
-    start_offset    => INTERVAL '10 minutes',
-    end_offset      => INTERVAL '1 minute',
+    start_offset      => INTERVAL '5 minutes',
+    end_offset        => INTERVAL '1 minute',
     schedule_interval => INTERVAL '1 minute'
 );
+
+CALL refresh_continuous_aggregate('heart_rate_1m', NULL, NULL);

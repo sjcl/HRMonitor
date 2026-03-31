@@ -105,6 +105,26 @@ export function getDailyStats(userId: string, date: string) {
   );
 }
 
+export interface MinuteStats {
+  timestamp: number;
+  avg_bpm: number;
+  min_bpm: number;
+  max_bpm: number;
+  sample_count: number;
+}
+
+export function getMinuteStats(userId: string, period: string) {
+  return fetchJson<MinuteStats[]>(
+    `/api/users/${userId}/heart-rates/minute-stats?period=${period}`
+  );
+}
+
+export function getMinuteStatsByDate(userId: string, date: string) {
+  return fetchJson<MinuteStats[]>(
+    `/api/users/${userId}/heart-rates/minute-stats/by-date?date=${date}`
+  );
+}
+
 export function getHeartRates(userId: string, period: string) {
   return fetchJson<HeartRateRecord[]>(
     `/api/users/${userId}/heart-rates?period=${period}`

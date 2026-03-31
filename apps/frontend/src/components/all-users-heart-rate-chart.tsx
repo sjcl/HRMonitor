@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef, useMemo } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { getUsers, getHeartRates } from "@/lib/api";
+import { getUsers, getHeartRates, getMinuteStats } from "@/lib/api";
 import { LatestHeartRate } from "@/lib/ws";
 import {
   LineChart,
@@ -56,6 +56,7 @@ export function AllUsersHeartRateChart({
 }) {
   const [range, setRange] = useState<(typeof PRESETS)[number]>(PRESETS[2]);
   const isRealtime = range.seconds <= 3600;
+  const useMinuteStats = range.seconds >= 10800;
   const queryClient = useQueryClient();
 
   const { data: users, isPending: isUsersPending } = useQuery({
@@ -69,7 +70,7 @@ export function AllUsersHeartRateChart({
     .sort()
     .join(",");
 
-  const { data: allRecords, isPending: isRecordsPending } = useQuery({
+  const { data: allRecords, isPending: isRecordsPendingRaw } = useQuery({
     queryKey: ["all-heart-rates", userIds, range.label],
     queryFn: async () => {
       if (!users?.length) return [];
@@ -82,13 +83,38 @@ export function AllUsersHeartRateChart({
       );
       return results;
     },
-    enabled: !!users?.length,
+    enabled: !!users?.length && !useMinuteStats,
     refetchInterval: isRealtime ? false : 60_000,
     refetchOnMount: isRealtime ? "always" : true,
     refetchOnWindowFocus: isRealtime ? "always" : true,
     refetchOnReconnect: isRealtime ? "always" : true,
     staleTime: isRealtime ? Infinity : undefined,
   });
+
+  const { data: allMinuteRecords, isPending: isRecordsPendingMinute } =
+    useQuery({
+      queryKey: ["all-minute-stats", userIds, range.label],
+      queryFn: async () => {
+        if (!users?.length) return [];
+        const results = await Promise.all(
+          users.map(async (u) => ({
+            userId: u.id,
+            name: u.name,
+            records: await getMinuteStats(u.id, range.label),
+          })),
+        );
+        return results;
+      },
+      enabled: !!users?.length && useMinuteStats,
+      refetchInterval: 60_000,
+      refetchOnMount: true,
+      refetchOnWindowFocus: true,
+      refetchOnReconnect: true,
+    });
+
+  const isRecordsPending = useMinuteStats
+    ? isRecordsPendingMinute
+    : isRecordsPendingRaw;
 
   // Refetch on WS reconnect
   const prevReconnectCount = useRef(wsReconnectCount);
@@ -168,6 +194,42 @@ export function AllUsersHeartRateChart({
   };
 
   const { chartData, userMeta } = useMemo(() => {
+    if (useMinuteStats) {
+      // Minute-stats mode: use avg_bpm, bucket = 60s
+      const BUCKET_SIZE = 60;
+      const bucketMap = new Map<number, Record<string, unknown>>();
+      const meta: { id: string; name: string }[] = [];
+
+      if (allMinuteRecords?.length) {
+        for (const { userId, name, records } of allMinuteRecords) {
+          meta.push({ id: userId, name });
+          for (const r of records) {
+            const bucket =
+              Math.round(r.timestamp / BUCKET_SIZE) * BUCKET_SIZE;
+            if (!bucketMap.has(bucket))
+              bucketMap.set(bucket, { _ts: bucket });
+            const row = bucketMap.get(bucket)!;
+            row[userId] = Math.round(r.avg_bpm * 10) / 10;
+          }
+        }
+      }
+
+      const data = [...bucketMap.values()]
+        .sort((a, b) => (a._ts as number) - (b._ts as number))
+        .map((row) => {
+          const clean: Record<string, unknown> = {
+            timestamp: (row._ts as number) * 1000,
+          };
+          for (const [k, v] of Object.entries(row)) {
+            if (!k.startsWith("_")) clean[k] = v;
+          }
+          return clean;
+        });
+
+      return { chartData: data, userMeta: meta };
+    }
+
+    // Raw mode: same as before
     const now = Date.now() / 1000;
     const cutoff = isRealtime ? now - range.seconds : 0;
 
@@ -175,7 +237,6 @@ export function AllUsersHeartRateChart({
     const bucketMap = new Map<number, Record<string, unknown>>();
     const meta: { id: string; name: string }[] = [];
 
-    // API data — cutoff before bucketing, latest-wins per bucket
     if (allRecords?.length) {
       for (const { userId, name, records } of allRecords) {
         meta.push({ id: userId, name });
@@ -212,7 +273,6 @@ export function AllUsersHeartRateChart({
       }
     }
 
-    // Clean tracking keys before render
     const data = [...bucketMap.values()]
       .sort((a, b) => (a._ts as number) - (b._ts as number))
       .map((row) => {
@@ -226,7 +286,14 @@ export function AllUsersHeartRateChart({
       });
 
     return { chartData: data, userMeta: meta };
-  }, [allRecords, wsBuffers, isRealtime, range.seconds]);
+  }, [
+    allRecords,
+    allMinuteRecords,
+    wsBuffers,
+    isRealtime,
+    range.seconds,
+    useMinuteStats,
+  ]);
 
   const xTicks = useMemo(
     () => computeTicks(chartData as Array<{ timestamp: number }>),

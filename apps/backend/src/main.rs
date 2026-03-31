@@ -80,6 +80,10 @@ async fn main() {
             get(handlers::heart_rates::minute_stats),
         )
         .route(
+            "/api/users/{id}/heart-rates/minute-stats/by-date",
+            get(handlers::heart_rates::minute_stats_by_date),
+        )
+        .route(
             "/api/users/{id}/heart-rates/daily-stats",
             get(handlers::heart_rates::daily_stats),
         )

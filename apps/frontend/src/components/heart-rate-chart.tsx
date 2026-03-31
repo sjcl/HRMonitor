@@ -2,10 +2,11 @@
 
 import { useState, useEffect, useRef, useMemo } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { getHeartRates } from "@/lib/api";
+import { getHeartRates, getMinuteStats } from "@/lib/api";
 import { LatestHeartRate } from "@/lib/ws";
 import {
-  LineChart,
+  ComposedChart,
+  Area,
   Line,
   XAxis,
   YAxis,
@@ -44,17 +45,31 @@ export function HeartRateChart({
 }) {
   const [range, setRange] = useState<(typeof PRESETS)[number]>(PRESETS[2]);
   const isRealtime = range.seconds <= 3600;
+  const useMinuteStats = range.seconds >= 10800;
   const queryClient = useQueryClient();
 
-  const { data: records, isPending } = useQuery({
+  const { data: records, isPending: isPendingRaw } = useQuery({
     queryKey: ["heart-rates", userId, range.label],
     queryFn: () => getHeartRates(userId, range.label),
+    enabled: !useMinuteStats,
     refetchInterval: isRealtime ? false : 60_000,
     refetchOnMount: isRealtime ? "always" : true,
     refetchOnWindowFocus: isRealtime ? "always" : true,
     refetchOnReconnect: isRealtime ? "always" : true,
     staleTime: isRealtime ? Infinity : undefined,
   });
+
+  const { data: minuteRecords, isPending: isPendingMinute } = useQuery({
+    queryKey: ["minute-stats", userId, range.label],
+    queryFn: () => getMinuteStats(userId, range.label),
+    enabled: useMinuteStats,
+    refetchInterval: 60_000,
+    refetchOnMount: true,
+    refetchOnWindowFocus: true,
+    refetchOnReconnect: true,
+  });
+
+  const isPending = useMinuteStats ? isPendingMinute : isPendingRaw;
 
   // Refetch on WS reconnect to fill gaps
   const prevReconnectCount = useRef(wsReconnectCount);
@@ -117,8 +132,9 @@ export function HeartRateChart({
         });
   };
 
-  // Merge API + WS data with moving window cutoff
-  const chartData = useMemo(() => {
+  // Merge API + WS data with moving window cutoff (raw mode)
+  const rawChartData = useMemo(() => {
+    if (useMinuteStats) return [];
     const now = Date.now() / 1000;
     const cutoff = isRealtime ? now - range.seconds : 0;
 
@@ -138,9 +154,25 @@ export function HeartRateChart({
         timestamp: r.timestamp * 1000,
         bpm: r.bpm,
       }));
-  }, [records, wsBuffer, isRealtime, range.seconds]);
+  }, [records, wsBuffer, isRealtime, range.seconds, useMinuteStats]);
 
-  const xTicks = useMemo(() => computeTicks(chartData), [chartData]);
+  // Minute-stats chart data (aggregate mode)
+  const minuteChartData = useMemo(() => {
+    if (!useMinuteStats) return [];
+    return (minuteRecords ?? []).map((r) => ({
+      timestamp: r.timestamp * 1000,
+      avg_bpm: Math.round(r.avg_bpm * 10) / 10,
+      min_bpm: r.min_bpm,
+      max_bpm: r.max_bpm,
+      band: r.max_bpm - r.min_bpm,
+    }));
+  }, [minuteRecords, useMinuteStats]);
+
+  const chartData = useMinuteStats ? minuteChartData : rawChartData;
+  const xTicks = useMemo(
+    () => computeTicks(chartData as Array<{ timestamp: number }>),
+    [chartData],
+  );
 
   return (
     <div className="border border-gray-800 rounded-lg p-4">
@@ -168,7 +200,7 @@ export function HeartRateChart({
         </div>
       ) : (
         <ResponsiveContainer width="100%" height={300}>
-          <LineChart data={chartData}>
+          <ComposedChart data={chartData as Record<string, unknown>[]}>
             <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
             <XAxis
               dataKey="timestamp"
@@ -187,16 +219,75 @@ export function HeartRateChart({
                 border: "1px solid #374151",
                 borderRadius: "8px",
               }}
+              formatter={(value, name) => {
+                if (useMinuteStats) {
+                  const labels: Record<string, string> = {
+                    avg_bpm: "Avg",
+                    min_bpm: "Min",
+                    max_bpm: "Max",
+                  };
+                  if (labels[name as string]) return [value, labels[name as string]];
+                  return [undefined, undefined];
+                }
+                return [value, "BPM"];
+              }}
             />
-            <Line
-              type="monotone"
-              dataKey="bpm"
-              stroke="#EF4444"
-              strokeWidth={2}
-              dot={false}
-              isAnimationActive={false}
-            />
-          </LineChart>
+            {useMinuteStats ? (
+              <>
+                <Area
+                  type="monotone"
+                  dataKey="min_bpm"
+                  stackId="minmax"
+                  fill="transparent"
+                  stroke="none"
+                  isAnimationActive={false}
+                />
+                <Area
+                  type="monotone"
+                  dataKey="band"
+                  stackId="minmax"
+                  fill="#EF4444"
+                  fillOpacity={0.15}
+                  stroke="none"
+                  isAnimationActive={false}
+                  tooltipType="none"
+                />
+                <Line
+                  type="monotone"
+                  dataKey="avg_bpm"
+                  stroke="#EF4444"
+                  strokeWidth={2}
+                  dot={false}
+                  isAnimationActive={false}
+                />
+                <Line
+                  type="monotone"
+                  dataKey="min_bpm"
+                  stroke="transparent"
+                  dot={false}
+                  isAnimationActive={false}
+                  legendType="none"
+                />
+                <Line
+                  type="monotone"
+                  dataKey="max_bpm"
+                  stroke="transparent"
+                  dot={false}
+                  isAnimationActive={false}
+                  legendType="none"
+                />
+              </>
+            ) : (
+              <Line
+                type="monotone"
+                dataKey="bpm"
+                stroke="#EF4444"
+                strokeWidth={2}
+                dot={false}
+                isAnimationActive={false}
+              />
+            )}
+          </ComposedChart>
         </ResponsiveContainer>
       )}
     </div>
