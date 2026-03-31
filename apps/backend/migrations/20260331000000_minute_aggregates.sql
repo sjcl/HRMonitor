@@ -1,4 +1,3 @@
--- no-transaction
 CREATE MATERIALIZED VIEW heart_rate_1m
 WITH (timescaledb.continuous) AS
 SELECT
@@ -20,5 +19,3 @@ SELECT add_continuous_aggregate_policy('heart_rate_1m',
     end_offset        => INTERVAL '1 minute',
     schedule_interval => INTERVAL '1 minute'
 );
-
-CALL refresh_continuous_aggregate('heart_rate_1m', NULL, NULL);
