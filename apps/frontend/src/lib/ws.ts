@@ -73,90 +73,100 @@ export function useHeartRateWs(
     });
   }, []);
 
-  const connect = useCallback(async () => {
-    if (typeof window === "undefined") return;
-
-    // Clear any pending reconnect timer
-    if (reconnectTimerRef.current) {
-      clearTimeout(reconnectTimerRef.current);
-      reconnectTimerRef.current = null;
-    }
-
-    // Check session before connecting — prevents infinite reconnect loop on auth failure
-    const hasSession = await checkSession();
-    if (!hasSession) {
-      window.location.href = "/login";
-      return;
-    }
-
-    const ws = new WebSocket(buildWsUrl());
-    wsRef.current = ws;
-
-    ws.onopen = () => {
-      if (hasConnectedRef.current && wasDisconnectedRef.current) {
-        setReconnectCount((c) => c + 1);
-      }
-      hasConnectedRef.current = true;
-      wasDisconnectedRef.current = false;
-      backoffRef.current = 1000;
-
-      const ids = userIdsRef.current;
-      if (ids.length > 0) {
-        ws.send(JSON.stringify({ type: "subscribe", user_ids: ids }));
-        subscribedRef.current = new Set(ids);
-      }
-    };
-
-    ws.onmessage = (event) => {
-      if (ws !== wsRef.current) return;
-      try {
-        const msg: ServerMessage = JSON.parse(event.data);
-        if (msg.type === "snapshot") {
-          // Snapshots are infrequent — apply immediately
-          setData((prev) => {
-            const next = new Map(prev);
-            for (const [userId, item] of Object.entries(msg.data)) {
-              if (item) {
-                next.set(userId, item);
-              } else {
-                next.delete(userId);
-              }
-            }
-            return next;
-          });
-        } else if (msg.type === "update") {
-          // Batch updates and flush once per animation frame
-          pendingUpdatesRef.current.set(msg.data.user_id, msg.data);
-          if (rafRef.current === null) {
-            rafRef.current = requestAnimationFrame(flushUpdates);
-          }
-        }
-      } catch {
-        // Ignore malformed messages
-      }
-    };
-
-    ws.onclose = () => {
-      if (ws !== wsRef.current) return;
-      wsRef.current = null;
-      wasDisconnectedRef.current = true;
-      const delay = backoffRef.current;
-      reconnectTimerRef.current = setTimeout(() => {
-        reconnectTimerRef.current = null;
-        backoffRef.current = Math.min(backoffRef.current * 2, 30000);
-        connect();
-      }, delay);
-    };
-
-    ws.onerror = () => {
-      ws.close();
-    };
-  }, []);
-
   // Connect on mount only
   useEffect(() => {
+    let cancelled = false;
+
+    async function connect() {
+      if (typeof window === "undefined") return;
+
+      // Clear any pending reconnect timer
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+
+      // Check session before connecting — prevents infinite reconnect loop on auth failure
+      const hasSession = await checkSession();
+      if (cancelled) return;
+      if (!hasSession) {
+        window.location.href = "/login";
+        return;
+      }
+
+      const ws = new WebSocket(buildWsUrl());
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        if (cancelled || ws !== wsRef.current) {
+          ws.close();
+          return;
+        }
+        if (hasConnectedRef.current && wasDisconnectedRef.current) {
+          setReconnectCount((c) => c + 1);
+        }
+        hasConnectedRef.current = true;
+        wasDisconnectedRef.current = false;
+        backoffRef.current = 1000;
+
+        const ids = userIdsRef.current;
+        if (ids.length > 0) {
+          ws.send(JSON.stringify({ type: "subscribe", user_ids: ids }));
+          subscribedRef.current = new Set(ids);
+        }
+      };
+
+      ws.onmessage = (event) => {
+        if (ws !== wsRef.current) return;
+        try {
+          const msg: ServerMessage = JSON.parse(event.data);
+          if (msg.type === "snapshot") {
+            // Snapshots are infrequent — apply immediately
+            setData((prev) => {
+              const next = new Map(prev);
+              for (const [userId, item] of Object.entries(msg.data)) {
+                if (item) {
+                  next.set(userId, item);
+                } else {
+                  next.delete(userId);
+                }
+              }
+              return next;
+            });
+          } else if (msg.type === "update") {
+            // Batch updates and flush once per animation frame
+            pendingUpdatesRef.current.set(msg.data.user_id, msg.data);
+            if (rafRef.current === null) {
+              rafRef.current = requestAnimationFrame(flushUpdates);
+            }
+          }
+        } catch {
+          // Ignore malformed messages
+        }
+      };
+
+      ws.onclose = () => {
+        if (ws !== wsRef.current) return;
+        if (cancelled) return;
+        wsRef.current = null;
+        wasDisconnectedRef.current = true;
+        const delay = backoffRef.current;
+        reconnectTimerRef.current = setTimeout(() => {
+          reconnectTimerRef.current = null;
+          backoffRef.current = Math.min(backoffRef.current * 2, 30000);
+          connect();
+        }, delay);
+      };
+
+      ws.onerror = () => {
+        ws.close();
+      };
+    }
+
     connect();
+
     return () => {
+      cancelled = true;
       if (reconnectTimerRef.current) {
         clearTimeout(reconnectTimerRef.current);
         reconnectTimerRef.current = null;
@@ -169,7 +179,7 @@ export function useHeartRateWs(
       wsRef.current = null;
       ws?.close();
     };
-  }, [connect]);
+  }, [flushUpdates]);
 
   // Handle subscription changes while connected
   useEffect(() => {
