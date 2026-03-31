@@ -164,7 +164,7 @@ export function HeartRateChart({
       avg_bpm: Math.round(r.avg_bpm * 10) / 10,
       min_bpm: r.min_bpm,
       max_bpm: r.max_bpm,
-      band: r.max_bpm - r.min_bpm,
+      bpmRange: [r.min_bpm, r.max_bpm] as [number, number],
     }));
   }, [minuteRecords, useMinuteStats]);
 
@@ -212,42 +212,50 @@ export function HeartRateChart({
               fontSize={12}
             />
             <YAxis domain={[40, 200]} stroke="#9CA3AF" fontSize={12} />
-            <Tooltip
-              labelFormatter={(value) => formatTimestamp(value as number)}
-              contentStyle={{
-                backgroundColor: "#1F2937",
-                border: "1px solid #374151",
-                borderRadius: "8px",
-              }}
-              formatter={(value, name) => {
-                if (useMinuteStats) {
-                  const labels: Record<string, string> = {
-                    avg_bpm: "Avg",
-                    min_bpm: "Min",
-                    max_bpm: "Max",
-                  };
-                  if (labels[name as string]) return [value, labels[name as string]];
-                  return [undefined, undefined];
-                }
-                return [value, "BPM"];
-              }}
-            />
+            {useMinuteStats ? (
+              <Tooltip
+                content={({ active, payload }) => {
+                  if (!active || !payload?.length) return null;
+                  const d = payload[0]?.payload;
+                  if (!d) return null;
+                  return (
+                    <div
+                      style={{
+                        backgroundColor: "#1F2937",
+                        border: "1px solid #374151",
+                        borderRadius: "8px",
+                        padding: "8px 12px",
+                        fontSize: "14px",
+                      }}
+                    >
+                      <div style={{ color: "#9CA3AF", marginBottom: 4 }}>
+                        {formatTimestamp(d.timestamp)}
+                      </div>
+                      <div style={{ color: "#EF4444" }}>Avg: {d.avg_bpm} BPM</div>
+                      <div style={{ color: "#9CA3AF" }}>Min: {d.min_bpm} BPM</div>
+                      <div style={{ color: "#9CA3AF" }}>Max: {d.max_bpm} BPM</div>
+                    </div>
+                  );
+                }}
+              />
+            ) : (
+              <Tooltip
+                labelFormatter={(value) => formatTimestamp(value as number)}
+                contentStyle={{
+                  backgroundColor: "#1F2937",
+                  border: "1px solid #374151",
+                  borderRadius: "8px",
+                }}
+                formatter={(value) => [value, "BPM"]}
+              />
+            )}
             {useMinuteStats ? (
               <>
                 <Area
                   type="monotone"
-                  dataKey="min_bpm"
-                  stackId="minmax"
-                  fill="transparent"
-                  stroke="none"
-                  isAnimationActive={false}
-                />
-                <Area
-                  type="monotone"
-                  dataKey="band"
-                  stackId="minmax"
+                  dataKey="bpmRange"
                   fill="#EF4444"
-                  fillOpacity={0.15}
+                  fillOpacity={0.5}
                   stroke="none"
                   isAnimationActive={false}
                   tooltipType="none"
@@ -259,22 +267,6 @@ export function HeartRateChart({
                   strokeWidth={2}
                   dot={false}
                   isAnimationActive={false}
-                />
-                <Line
-                  type="monotone"
-                  dataKey="min_bpm"
-                  stroke="transparent"
-                  dot={false}
-                  isAnimationActive={false}
-                  legendType="none"
-                />
-                <Line
-                  type="monotone"
-                  dataKey="max_bpm"
-                  stroke="transparent"
-                  dot={false}
-                  isAnimationActive={false}
-                  legendType="none"
                 />
               </>
             ) : (
