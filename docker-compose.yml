@@ -1,6 +1,6 @@
 services:
   timescaledb:
-    image: timescale/timescaledb:latest-pg17
+    image: timescale/timescaledb:2.26.1-pg17
     environment:
       - POSTGRES_USER=hrmonitor
       - POSTGRES_PASSWORD=hrmonitor
@@ -12,7 +12,7 @@ services:
     restart: unless-stopped
 
   redis:
-    image: redis:8-alpine
+    image: redis:8.6.2-alpine
     expose:
       - "6379"
     restart: unless-stopped
