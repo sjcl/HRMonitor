@@ -2,7 +2,7 @@
 
 export interface UserListItem {
   id: string;
-  name: string;
+  display_name: string;
   latest_bpm: number | null;
   has_pulsoid_token: boolean;
   created_at: number;
@@ -10,7 +10,7 @@ export interface UserListItem {
 
 export interface User {
   id: string;
-  name: string;
+  display_name: string;
   timezone: string;
   created_at: number;
   updated_at: number;
@@ -30,6 +30,10 @@ export interface HeartRateRecord {
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init);
+  if (res.status === 401) {
+    window.location.href = "/login";
+    throw new Error("Unauthorized");
+  }
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || `HTTP ${res.status}`);
@@ -46,15 +50,7 @@ export function getUser(id: string) {
   return fetchJson<User>(`/api/users/${id}`);
 }
 
-export function createUser(name: string, timezone: string) {
-  return fetchJson<User>("/api/users", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name, timezone }),
-  });
-}
-
-export function updateUser(id: string, data: { name?: string; timezone?: string }) {
+export function updateUser(id: string, data: { display_name?: string; timezone?: string }) {
   return fetchJson<User>(`/api/users/${id}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },

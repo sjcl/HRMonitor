@@ -23,6 +23,8 @@ services:
       - DATABASE_URL=postgres://hrmonitor:hrmonitor@timescaledb:5432/hrmonitor
       - REDIS_URL=redis://redis:6379
       - RUST_LOG=hrmonitor_backend=info
+      - AUTH_SESSION_COOKIE_NAME=${AUTH_SESSION_COOKIE_NAME:-authjs.session-token}
+      - AUTH_SESSION_COOKIE_NAME_SECURE=${AUTH_SESSION_COOKIE_NAME_SECURE:-__Secure-authjs.session-token}
     expose:
       - "3001"
     depends_on:
@@ -35,11 +37,19 @@ services:
       context: ./apps/frontend
       args:
         REACT_PROFILING: ${REACT_PROFILING:-false}
+    environment:
+      - DATABASE_URL=postgres://hrmonitor:hrmonitor@timescaledb:5432/hrmonitor
+      - AUTH_SECRET=${AUTH_SECRET}
+      - AUTH_DISCORD_ID=${DISCORD_CLIENT_ID}
+      - AUTH_DISCORD_SECRET=${DISCORD_CLIENT_SECRET}
+      - AUTH_TRUST_HOST=true
+      - ALLOW_NEW_SIGNUPS=${ALLOW_NEW_SIGNUPS:-false}
     expose:
       - "3000"
     volumes:
       - static-assets:/static-export
     depends_on:
+      - timescaledb
       - backend
     restart: unless-stopped
 

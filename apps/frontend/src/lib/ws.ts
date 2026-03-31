@@ -26,6 +26,17 @@ function buildWsUrl(): string {
   return `${proto}//${location.host}/api/ws/heart-rates`;
 }
 
+async function checkSession(): Promise<boolean> {
+  try {
+    const res = await fetch("/api/auth/session");
+    if (!res.ok) return false;
+    const data = await res.json();
+    return !!data?.user;
+  } catch {
+    return false;
+  }
+}
+
 export function useHeartRateWs(
   userIds: string[],
 ): { data: Map<string, LatestHeartRate>; reconnectCount: number } {
@@ -62,13 +73,20 @@ export function useHeartRateWs(
     });
   }, []);
 
-  const connect = useCallback(() => {
+  const connect = useCallback(async () => {
     if (typeof window === "undefined") return;
 
     // Clear any pending reconnect timer
     if (reconnectTimerRef.current) {
       clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
+    }
+
+    // Check session before connecting — prevents infinite reconnect loop on auth failure
+    const hasSession = await checkSession();
+    if (!hasSession) {
+      window.location.href = "/login";
+      return;
     }
 
     const ws = new WebSocket(buildWsUrl());

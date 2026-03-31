@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import { Providers } from "./providers";
+import { Navbar } from "@/components/navbar";
 
 export const metadata: Metadata = {
   title: "HR Monitor",
@@ -16,11 +17,7 @@ export default function RootLayout({
     <html lang="en">
       <body className="bg-gray-950 text-gray-100 min-h-screen">
         <Providers>
-          <nav className="border-b border-gray-800 px-6 py-4">
-            <a href="/users" className="text-xl font-bold">
-              HR Monitor
-            </a>
-          </nav>
+          <Navbar />
           <main className="max-w-5xl mx-auto p-6">{children}</main>
         </Providers>
       </body>

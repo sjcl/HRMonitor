@@ -1,3 +1,4 @@
+mod auth;
 mod broadcast;
 mod db;
 mod error;
@@ -7,11 +8,13 @@ mod worker;
 mod worker_manager;
 
 use axum::Router;
+use axum::middleware;
 use axum::routing::get;
 use std::sync::Arc;
 use tokio::sync::broadcast as tokio_broadcast;
 use tower_http::cors::CorsLayer;
 
+use auth::AuthConfig;
 use broadcast::LatestHeartRateUpdate;
 use worker_manager::WorkerManager;
 
@@ -20,6 +23,7 @@ pub struct AppState {
     pub redis: tokio::sync::Mutex<redis::aio::MultiplexedConnection>,
     pub worker_manager: Arc<WorkerManager>,
     pub hr_broadcast: tokio_broadcast::Sender<LatestHeartRateUpdate>,
+    pub auth_config: AuthConfig,
 }
 
 #[tokio::main]
@@ -53,18 +57,49 @@ async fn main() {
     let worker_manager = WorkerManager::new(pool.clone(), redis_conn.clone(), hr_tx.clone());
     worker_manager.start_all_active().await;
 
+    let auth_config = AuthConfig::from_env();
+    tracing::info!(
+        cookie_name = %auth_config.cookie_name,
+        cookie_name_secure = %auth_config.cookie_name_secure,
+        "Auth config loaded"
+    );
+
     let state = Arc::new(AppState {
-        db: pool,
+        db: pool.clone(),
         redis: tokio::sync::Mutex::new(redis_conn),
         worker_manager,
         hr_broadcast: hr_tx,
+        auth_config,
     });
 
-    let app = Router::new()
-        .route(
-            "/api/users",
-            get(handlers::users::list_users).post(handlers::users::create_user),
-        )
+    // Spawn session cleanup task (runs every hour)
+    let cleanup_pool = pool;
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            match sqlx::query("DELETE FROM sessions WHERE expires < now()")
+                .execute(&cleanup_pool)
+                .await
+            {
+                Ok(result) => {
+                    if result.rows_affected() > 0 {
+                        tracing::info!(
+                            count = result.rows_affected(),
+                            "Cleaned up expired sessions"
+                        );
+                    }
+                }
+                Err(e) => tracing::error!("Session cleanup failed: {e}"),
+            }
+        }
+    });
+
+    // Public routes (no auth required)
+    let public_routes = Router::new().route("/healthz", get(|| async { "ok" }));
+
+    // Protected routes (auth required)
+    let protected_routes = Router::new()
+        .route("/api/users", get(handlers::users::list_users))
         .route(
             "/api/users/{id}",
             get(handlers::users::get_user).patch(handlers::users::update_user),
@@ -100,6 +135,14 @@ async fn main() {
             get(handlers::heart_rates::latest_heart_rate),
         )
         .route("/api/ws/heart-rates", get(handlers::ws::heart_rate_ws))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_auth,
+        ));
+
+    let app = Router::new()
+        .merge(public_routes)
+        .merge(protected_routes)
         .layer(CorsLayer::permissive())
         .with_state(state);
 
