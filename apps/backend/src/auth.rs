@@ -12,13 +12,11 @@ pub struct AuthConfig {
     pub cookie_name_secure: String,
 }
 
-impl AuthConfig {
-    pub fn from_env() -> Self {
+impl Default for AuthConfig {
+    fn default() -> Self {
         Self {
-            cookie_name: std::env::var("AUTH_SESSION_COOKIE_NAME")
-                .unwrap_or_else(|_| "authjs.session-token".into()),
-            cookie_name_secure: std::env::var("AUTH_SESSION_COOKIE_NAME_SECURE")
-                .unwrap_or_else(|_| "__Secure-authjs.session-token".into()),
+            cookie_name: "authjs.session-token".into(),
+            cookie_name_secure: "__Secure-authjs.session-token".into(),
         }
     }
 }

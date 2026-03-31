@@ -23,8 +23,6 @@ services:
       - DATABASE_URL=postgres://hrmonitor:hrmonitor@timescaledb:5432/hrmonitor
       - REDIS_URL=redis://redis:6379
       - RUST_LOG=hrmonitor_backend=info
-      - AUTH_SESSION_COOKIE_NAME=${AUTH_SESSION_COOKIE_NAME:-authjs.session-token}
-      - AUTH_SESSION_COOKIE_NAME_SECURE=${AUTH_SESSION_COOKIE_NAME_SECURE:-__Secure-authjs.session-token}
     expose:
       - "3001"
     depends_on:

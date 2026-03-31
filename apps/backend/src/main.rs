@@ -57,7 +57,7 @@ async fn main() {
     let worker_manager = WorkerManager::new(pool.clone(), redis_conn.clone(), hr_tx.clone());
     worker_manager.start_all_active().await;
 
-    let auth_config = AuthConfig::from_env();
+    let auth_config = AuthConfig::default();
     tracing::info!(
         cookie_name = %auth_config.cookie_name,
         cookie_name_secure = %auth_config.cookie_name_secure,
