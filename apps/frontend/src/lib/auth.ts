@@ -151,6 +151,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
   providers: [
     Discord({
       authorization: { params: { scope: "identify" } },
+      checks: ["state", "pkce"],
     }),
   ],
   session: { strategy: "database" },
