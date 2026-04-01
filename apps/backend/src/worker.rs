@@ -6,54 +6,109 @@ use tokio::sync::broadcast::Sender;
 use tokio_tungstenite::connect_async;
 
 use crate::broadcast::LatestHeartRateUpdate;
-use crate::models::{PulsoidMessage, UserRow};
+use crate::models::{PulsoidConnectionRow, PulsoidMessage};
+use crate::pulsoid_oauth::PulsoidOAuthConfig;
+use crate::token_encryption::TokenEncryption;
 
 const PULSOID_WS_URL: &str = "wss://dev.pulsoid.net/api/v1/data/real_time";
+const REFRESH_SAFETY_MARGIN_SECS: i64 = 60;
 
 pub async fn run_worker(
     db: PgPool,
     redis: redis::aio::MultiplexedConnection,
     hr_tx: Sender<LatestHeartRateUpdate>,
-    user: UserRow,
+    user_id: String,
 ) {
-    let access_token = user.pulsoid_access_token.as_ref().unwrap();
     let mut backoff = Duration::from_secs(1);
     let max_backoff = Duration::from_secs(60);
 
     loop {
+        // Fetch connection from DB
+        let conn: Option<PulsoidConnectionRow> = sqlx::query_as(
+            "SELECT id, user_id, access_token, refresh_token, key_version,
+                    EXTRACT(EPOCH FROM token_expires_at)::BIGINT as token_expires_at,
+                    EXTRACT(EPOCH FROM last_connected_at)::BIGINT as last_connected_at,
+                    last_error
+             FROM pulsoid_connections WHERE user_id = $1",
+        )
+        .bind(&user_id)
+        .fetch_optional(&db)
+        .await
+        .ok()
+        .flatten();
+
+        let conn = match conn {
+            Some(c) => c,
+            None => {
+                tracing::info!(user_id = %user_id, "No pulsoid connection found, worker exiting");
+                return;
+            }
+        };
+
+        // Load encryption from env each loop iteration would be wasteful;
+        // instead we construct once. Since we're in a spawned task, we read from env.
+        let encryption = TokenEncryption::from_env();
+        let oauth_config = PulsoidOAuthConfig::from_env();
+
+        // Decrypt access token
+        let access_token = match encryption.decrypt(&conn.access_token, conn.key_version as u32) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::error!(user_id = %user_id, "Failed to decrypt access token: {e}");
+                update_last_error(&db, &user_id, "Failed to decrypt access token").await;
+                return;
+            }
+        };
+
+        // Check token expiry and refresh if needed
+        let access_token = if is_token_expired(conn.token_expires_at) {
+            match try_refresh(&db, &encryption, &oauth_config, &conn, &user_id).await {
+                Ok(new_token) => new_token,
+                Err(e) => {
+                    tracing::warn!(user_id = %user_id, "Token refresh failed: {e}");
+                    update_last_error(&db, &user_id, &format!("Token refresh failed: {e}")).await;
+                    return;
+                }
+            }
+        } else {
+            access_token
+        };
+
         let url = format!("{PULSOID_WS_URL}?access_token={access_token}");
-        tracing::info!(user_id = %user.id, "Connecting to Pulsoid WebSocket");
+        tracing::info!(user_id = %user_id, "Connecting to Pulsoid WebSocket");
 
         match connect_async(&url).await {
             Ok((ws_stream, _)) => {
                 backoff = Duration::from_secs(1);
 
                 let now = chrono_now();
-                let _ = sqlx::query("UPDATE users SET pulsoid_last_connected_at = to_timestamp($1), pulsoid_last_error = NULL, updated_at = to_timestamp($2) WHERE id = $3")
-                    .bind(now)
-                    .bind(now)
-                    .bind(&user.id)
-                    .execute(&db)
-                    .await;
+                let _ = sqlx::query(
+                    "UPDATE pulsoid_connections SET last_connected_at = to_timestamp($1), last_error = NULL WHERE user_id = $2",
+                )
+                .bind(now)
+                .bind(&user_id)
+                .execute(&db)
+                .await;
 
-                tracing::info!(user_id = %user.id, "Connected to Pulsoid WebSocket");
+                tracing::info!(user_id = %user_id, "Connected to Pulsoid WebSocket");
 
                 let (_, mut read) = ws_stream.split();
 
                 while let Some(msg) = read.next().await {
                     match msg {
                         Ok(tokio_tungstenite::tungstenite::Message::Text(text)) => {
-                            if let Err(e) = handle_message(&db, &redis, &hr_tx, &user, &text).await
+                            if let Err(e) =
+                                handle_message(&db, &redis, &hr_tx, &user_id, &text).await
                             {
-                                tracing::warn!(user_id = %user.id, "Failed to handle message: {e}");
+                                tracing::warn!(user_id = %user_id, "Failed to handle message: {e}");
                             }
                         }
                         Ok(tokio_tungstenite::tungstenite::Message::Close(_)) => {
-                            tracing::info!(user_id = %user.id, "WebSocket closed by server");
+                            tracing::info!(user_id = %user_id, "WebSocket closed by server");
                             break;
                         }
                         Err(e) => {
-                            tracing::warn!(user_id = %user.id, "WebSocket error: {e}");
+                            tracing::warn!(user_id = %user_id, "WebSocket error: {e}");
                             break;
                         }
                         _ => {}
@@ -62,29 +117,83 @@ pub async fn run_worker(
             }
             Err(e) => {
                 let error_msg = format!("{e}");
-                tracing::warn!(user_id = %user.id, "Failed to connect: {error_msg}");
-
-                let now = chrono_now();
-                let _ = sqlx::query("UPDATE users SET pulsoid_last_error = $1, updated_at = to_timestamp($2) WHERE id = $3")
-                    .bind(&error_msg)
-                    .bind(now)
-                    .bind(&user.id)
-                    .execute(&db)
-                    .await;
+                tracing::warn!(user_id = %user_id, "Failed to connect: {error_msg}");
+                update_last_error(&db, &user_id, &error_msg).await;
             }
         }
 
-        tracing::info!(user_id = %user.id, backoff_secs = backoff.as_secs(), "Reconnecting after backoff");
+        tracing::info!(user_id = %user_id, backoff_secs = backoff.as_secs(), "Reconnecting after backoff");
         tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(max_backoff);
     }
+}
+
+fn is_token_expired(token_expires_at: i64) -> bool {
+    let now = chrono_now();
+    now >= token_expires_at - REFRESH_SAFETY_MARGIN_SECS
+}
+
+async fn try_refresh(
+    db: &PgPool,
+    encryption: &TokenEncryption,
+    oauth_config: &PulsoidOAuthConfig,
+    conn: &PulsoidConnectionRow,
+    user_id: &str,
+) -> Result<String, String> {
+    let refresh_token_plain = encryption
+        .decrypt(&conn.refresh_token, conn.key_version as u32)
+        .map_err(|e| format!("Failed to decrypt refresh token: {e}"))?;
+
+    let token_resp = oauth_config
+        .refresh_token(&refresh_token_plain)
+        .await
+        .map_err(|e| format!("{e}"))?;
+
+    let new_access = &token_resp.access_token;
+
+    // Encrypt new tokens
+    let (enc_access, key_version) = encryption.encrypt(new_access);
+
+    // If refresh_token came back, use it; otherwise keep the old one
+    let enc_refresh = if let Some(ref new_rt) = token_resp.refresh_token {
+        encryption.encrypt(new_rt).0
+    } else {
+        conn.refresh_token.clone()
+    };
+
+    // Update DB
+    sqlx::query(
+        "UPDATE pulsoid_connections
+         SET access_token = $1, refresh_token = $2, key_version = $3,
+             token_expires_at = now() + make_interval(secs => $4), last_error = NULL
+         WHERE user_id = $5",
+    )
+    .bind(&enc_access)
+    .bind(&enc_refresh)
+    .bind(key_version as i32)
+    .bind(token_resp.expires_in as f64)
+    .bind(user_id)
+    .execute(db)
+    .await
+    .map_err(|e| format!("Failed to save refreshed tokens: {e}"))?;
+
+    tracing::info!(user_id = %user_id, "Token refreshed successfully");
+    Ok(new_access.clone())
+}
+
+async fn update_last_error(db: &PgPool, user_id: &str, error: &str) {
+    let _ = sqlx::query("UPDATE pulsoid_connections SET last_error = $1 WHERE user_id = $2")
+        .bind(error)
+        .bind(user_id)
+        .execute(db)
+        .await;
 }
 
 async fn handle_message(
     db: &PgPool,
     redis: &redis::aio::MultiplexedConnection,
     hr_tx: &Sender<LatestHeartRateUpdate>,
-    user: &UserRow,
+    user_id: &str,
     text: &str,
 ) -> Result<(), String> {
     let msg: PulsoidMessage =
@@ -105,7 +214,7 @@ async fn handle_message(
     sqlx::query(
         "INSERT INTO heart_rate_records (user_id, recorded_at, bpm, received_at) VALUES ($1, to_timestamp($2), $3, to_timestamp($4))"
     )
-    .bind(&user.id)
+    .bind(user_id)
     .bind(recorded_at)
     .bind(bpm)
     .bind(now)
@@ -114,7 +223,7 @@ async fn handle_message(
     .map_err(|e| format!("DB insert error: {e}"))?;
 
     let update = LatestHeartRateUpdate {
-        user_id: user.id.clone(),
+        user_id: user_id.to_string(),
         bpm,
         recorded_at,
         received_at: now,
@@ -122,10 +231,10 @@ async fn handle_message(
 
     // Write to Redis
     let redis_value = serde_json::to_string(&update).unwrap();
-    let key = format!("latest_bpm:{}", user.id);
+    let key = format!("latest_bpm:{user_id}");
     let mut redis_conn = redis.clone();
     if let Err(e) = redis_conn.set::<_, _, ()>(&key, &redis_value).await {
-        tracing::warn!(user_id = %user.id, "Failed to write to Redis: {e}");
+        tracing::warn!(user_id = %user_id, "Failed to write to Redis: {e}");
     }
 
     // Broadcast to WebSocket subscribers (ignore error if no receivers)

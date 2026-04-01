@@ -9,11 +9,20 @@ pub struct UserRow {
     pub display_name: String,
     pub timezone: String,
     pub avatar_url: Option<String>,
-    pub pulsoid_access_token: Option<String>,
-    pub pulsoid_last_connected_at: Option<i64>,
-    pub pulsoid_last_error: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct PulsoidConnectionRow {
+    pub id: String,
+    pub user_id: String,
+    pub access_token: Vec<u8>,
+    pub refresh_token: Vec<u8>,
+    pub key_version: i32,
+    pub token_expires_at: i64,
+    pub last_connected_at: Option<i64>,
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, FromRow, Serialize)]
@@ -55,11 +64,6 @@ pub struct HeartRateRecord {
 pub struct UpdateUserRequest {
     pub display_name: Option<String>,
     pub timezone: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct SetPulsoidTokenRequest {
-    pub access_token: String,
 }
 
 #[derive(Debug, Deserialize)]

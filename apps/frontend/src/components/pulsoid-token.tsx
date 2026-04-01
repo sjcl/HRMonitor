@@ -1,12 +1,31 @@
 "use client";
 
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { getPulsoidToken, setPulsoidToken, deletePulsoidToken } from "@/lib/api";
-import { useState } from "react";
+import { getPulsoidToken, createPulsoidConnect, deletePulsoidToken } from "@/lib/api";
+import { useEffect } from "react";
 
-export function PulsoidToken({ userId }: { userId: string }) {
+const RESULT_MESSAGES: Record<string, { text: string; color: string }> = {
+  connected: { text: "Pulsoid connected successfully.", color: "text-green-400" },
+  denied: { text: "Pulsoid authorization was denied.", color: "text-yellow-400" },
+  exchange_failed: { text: "Connection failed. Please try again.", color: "text-red-400" },
+  invalid_state: { text: "Security verification failed. Please try again.", color: "text-red-400" },
+};
+
+export function PulsoidToken({
+  userId,
+  oauthResult,
+}: {
+  userId: string;
+  oauthResult?: string | null;
+}) {
   const queryClient = useQueryClient();
-  const [accessToken, setAccessToken] = useState("");
+
+  // Clear the query param from URL after displaying
+  useEffect(() => {
+    if (oauthResult) {
+      window.history.replaceState({}, "", "/settings");
+    }
+  }, [oauthResult]);
 
   const { data: token, isLoading } = useQuery({
     queryKey: ["pulsoid-token", userId],
@@ -15,11 +34,9 @@ export function PulsoidToken({ userId }: { userId: string }) {
   });
 
   const connectMutation = useMutation({
-    mutationFn: () => setPulsoidToken(userId, accessToken.trim()),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["pulsoid-token", userId] });
-      queryClient.invalidateQueries({ queryKey: ["users"] });
-      setAccessToken("");
+    mutationFn: () => createPulsoidConnect("/settings"),
+    onSuccess: (data) => {
+      window.location.href = `/api/oauth/pulsoid/connect/${data.request_id}`;
     },
   });
 
@@ -35,44 +52,36 @@ export function PulsoidToken({ userId }: { userId: string }) {
     return <p className="text-gray-500">Loading...</p>;
   }
 
-  // Token not configured — show connect form
+  const resultMessage = oauthResult ? RESULT_MESSAGES[oauthResult] : null;
+
+  // Token not configured — show connect button
   if (token === null || token === undefined) {
     return (
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (accessToken.trim()) connectMutation.mutate();
-        }}
-        className="border border-gray-800 rounded-lg p-4 space-y-3"
-      >
-        <p className="text-gray-500 text-sm">No Pulsoid token configured</p>
-        <input
-          type="password"
-          value={accessToken}
-          onChange={(e) => setAccessToken(e.target.value)}
-          placeholder="Pulsoid Access Token"
-          className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm"
-          required
-        />
+      <div className="border border-gray-800 rounded-lg p-4 space-y-3">
+        {resultMessage && (
+          <p className={`text-sm ${resultMessage.color}`}>{resultMessage.text}</p>
+        )}
+        <p className="text-gray-500 text-sm">No Pulsoid connection configured</p>
         {connectMutation.error && (
-          <p className="text-red-400 text-sm">
-            {connectMutation.error.message}
-          </p>
+          <p className="text-red-400 text-sm">{connectMutation.error.message}</p>
         )}
         <button
-          type="submit"
+          onClick={() => connectMutation.mutate()}
           disabled={connectMutation.isPending}
           className="bg-green-600 hover:bg-green-700 px-4 py-2 rounded text-sm disabled:opacity-50"
         >
-          Connect
+          {connectMutation.isPending ? "Connecting..." : "Connect Pulsoid"}
         </button>
-      </form>
+      </div>
     );
   }
 
   // Token configured — show status
   return (
-    <div className="border border-gray-800 rounded-lg p-4">
+    <div className="border border-gray-800 rounded-lg p-4 space-y-3">
+      {resultMessage && (
+        <p className={`text-sm ${resultMessage.color}`}>{resultMessage.text}</p>
+      )}
       <div className="flex items-center justify-between">
         <div>
           <div className="text-sm text-gray-400">

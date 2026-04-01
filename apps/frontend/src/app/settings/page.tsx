@@ -5,13 +5,23 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { getUser, updateUser } from "@/lib/api";
 import { PulsoidToken } from "@/components/pulsoid-token";
 import { TimezoneSelect } from "@/components/timezone-select";
-import { redirect } from "next/navigation";
-import { useState, useEffect } from "react";
+import { redirect, useSearchParams } from "next/navigation";
+import { useState, useEffect, Suspense } from "react";
 
 export default function SettingsPage() {
+  return (
+    <Suspense>
+      <SettingsContent />
+    </Suspense>
+  );
+}
+
+function SettingsContent() {
   const { data: session, status } = useSession();
   const userId = session?.user?.id;
   const queryClient = useQueryClient();
+  const searchParams = useSearchParams();
+  const oauthResult = searchParams.get("pulsoid");
 
   const { data: user } = useQuery({
     queryKey: ["user", userId],
@@ -88,7 +98,7 @@ export default function SettingsPage() {
 
       <section className="mb-8">
         <h2 className="text-lg font-semibold mb-3">Pulsoid</h2>
-        <PulsoidToken userId={userId} />
+        <PulsoidToken userId={userId} oauthResult={oauthResult} />
       </section>
     </div>
   );
