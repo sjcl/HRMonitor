@@ -3,6 +3,7 @@
 export interface UserListItem {
   id: string;
   display_name: string;
+  avatar_url: string | null;
   latest_bpm: number | null;
   has_pulsoid_token: boolean;
   created_at: number;
@@ -11,6 +12,7 @@ export interface UserListItem {
 export interface User {
   id: string;
   display_name: string;
+  avatar_url: string | null;
   timezone: string;
   created_at: number;
   updated_at: number;

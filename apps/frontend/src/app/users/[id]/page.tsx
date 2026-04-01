@@ -9,6 +9,7 @@ import { TimezoneSelect } from "@/components/timezone-select";
 import { useHeartRateWs } from "@/lib/ws";
 import { use, useState, useEffect, useMemo } from "react";
 import Link from "next/link";
+import { UserAvatar } from "@/components/user-avatar";
 
 export default function UserDetailPage({
   params,
@@ -56,6 +57,7 @@ export default function UserDetailPage({
       </Link>
 
       <div className="flex items-center gap-4 mt-4 mb-6">
+        <UserAvatar src={user?.avatar_url} name={user?.display_name ?? ""} size="lg" />
         <h1 className="text-2xl font-bold">{user?.display_name ?? "Loading..."}</h1>
         {latestHr && (
           <>

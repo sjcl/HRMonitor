@@ -5,6 +5,7 @@ import { getUsers, type UserListItem } from "@/lib/api";
 import { useMemo, memo } from "react";
 import Link from "next/link";
 import { AllUsersHeartRateChart } from "@/components/all-users-heart-rate-chart";
+import { UserAvatar } from "@/components/user-avatar";
 import { useHeartRateWs, type LatestHeartRate } from "@/lib/ws";
 
 export default function UsersPage() {
@@ -73,8 +74,9 @@ const UserRow = memo(function UserRow({
       <td className="px-4 py-3">
         <Link
           href={`/users/${user.id}`}
-          className="text-blue-400 hover:underline"
+          className="text-blue-400 hover:underline flex items-center gap-2"
         >
+          <UserAvatar src={user.avatar_url} name={user.display_name} size="sm" />
           {user.display_name}
         </Link>
       </td>

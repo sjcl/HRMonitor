@@ -12,6 +12,7 @@ use crate::models::{UpdateUserRequest, User, UserListItem, UserRow};
 struct UserListRow {
     id: String,
     display_name: String,
+    avatar_url: Option<String>,
     has_pulsoid_token: bool,
     created_at: i64,
 }
@@ -23,9 +24,11 @@ pub async fn list_users(
         "SELECT
             u.id,
             u.display_name,
+            a.provider_image as avatar_url,
             EXTRACT(EPOCH FROM u.created_at)::BIGINT as created_at,
             (u.pulsoid_access_token IS NOT NULL) as has_pulsoid_token
         FROM users u
+        LEFT JOIN accounts a ON a.user_id = u.id AND a.provider = 'discord'
         ORDER BY u.created_at DESC",
     )
     .fetch_all(&state.db)
@@ -55,6 +58,7 @@ pub async fn list_users(
         users.push(UserListItem {
             id: row.id,
             display_name: row.display_name,
+            avatar_url: row.avatar_url,
             latest_bpm,
             has_pulsoid_token: row.has_pulsoid_token,
             created_at: row.created_at,
@@ -117,12 +121,16 @@ pub async fn get_user(
     Path(id): Path<String>,
 ) -> Result<Json<User>, AppError> {
     let row: UserRow = sqlx::query_as(
-        "SELECT id, display_name, timezone, pulsoid_access_token,
-                EXTRACT(EPOCH FROM pulsoid_last_connected_at)::BIGINT as pulsoid_last_connected_at,
-                pulsoid_last_error,
-                EXTRACT(EPOCH FROM created_at)::BIGINT as created_at,
-                EXTRACT(EPOCH FROM updated_at)::BIGINT as updated_at
-         FROM users WHERE id = $1",
+        "SELECT u.id, u.display_name, u.timezone,
+                a.provider_image as avatar_url,
+                u.pulsoid_access_token,
+                EXTRACT(EPOCH FROM u.pulsoid_last_connected_at)::BIGINT as pulsoid_last_connected_at,
+                u.pulsoid_last_error,
+                EXTRACT(EPOCH FROM u.created_at)::BIGINT as created_at,
+                EXTRACT(EPOCH FROM u.updated_at)::BIGINT as updated_at
+         FROM users u
+         LEFT JOIN accounts a ON a.user_id = u.id AND a.provider = 'discord'
+         WHERE u.id = $1",
     )
     .bind(&id)
     .fetch_optional(&state.db)
@@ -160,12 +168,16 @@ pub async fn update_user(
     }
 
     let row: UserRow = sqlx::query_as(
-        "SELECT id, display_name, timezone, pulsoid_access_token,
-                EXTRACT(EPOCH FROM pulsoid_last_connected_at)::BIGINT as pulsoid_last_connected_at,
-                pulsoid_last_error,
-                EXTRACT(EPOCH FROM created_at)::BIGINT as created_at,
-                EXTRACT(EPOCH FROM updated_at)::BIGINT as updated_at
-         FROM users WHERE id = $1",
+        "SELECT u.id, u.display_name, u.timezone,
+                a.provider_image as avatar_url,
+                u.pulsoid_access_token,
+                EXTRACT(EPOCH FROM u.pulsoid_last_connected_at)::BIGINT as pulsoid_last_connected_at,
+                u.pulsoid_last_error,
+                EXTRACT(EPOCH FROM u.created_at)::BIGINT as created_at,
+                EXTRACT(EPOCH FROM u.updated_at)::BIGINT as updated_at
+         FROM users u
+         LEFT JOIN accounts a ON a.user_id = u.id AND a.provider = 'discord'
+         WHERE u.id = $1",
     )
     .bind(&id)
     .fetch_one(&state.db)

@@ -1,6 +1,7 @@
 "use client";
 
 import { useSession, signOut } from "next-auth/react";
+import { UserAvatar } from "@/components/user-avatar";
 
 export function Navbar() {
   const { data: session } = useSession();
@@ -12,9 +13,12 @@ export function Navbar() {
       </a>
       {session?.user && (
         <div className="flex items-center gap-4">
-          <span className="text-sm text-gray-400">
-            {session.user.name}
-          </span>
+          <div className="flex items-center gap-2">
+            <UserAvatar src={session.user.image} name={session.user.name ?? ""} size="sm" />
+            <span className="text-sm text-gray-400">
+              {session.user.name}
+            </span>
+          </div>
           <button
             onClick={() => signOut({ redirectTo: "/login" })}
             className="text-sm text-gray-400 hover:text-gray-200"

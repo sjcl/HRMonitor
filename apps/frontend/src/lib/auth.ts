@@ -17,7 +17,7 @@ function toAdapterUser(row: Record<string, unknown>): AdapterUser {
     name: (row.display_name as string) ?? null,
     email: (row.primary_email as string) ?? "",
     emailVerified: null,
-    image: null,
+    image: (row.provider_image as string) ?? null,
   };
 }
 
@@ -48,7 +48,10 @@ function pgAdapter(): Adapter {
 
     async getUser(id) {
       const result = await pool.query(
-        "SELECT id, display_name, primary_email FROM users WHERE id = $1",
+        `SELECT u.id, u.display_name, u.primary_email, a.provider_image
+         FROM users u
+         LEFT JOIN accounts a ON a.user_id = u.id AND a.provider = 'discord'
+         WHERE u.id = $1`,
         [id]
       );
       return result.rows[0] ? toAdapterUser(result.rows[0]) : null;
@@ -61,7 +64,7 @@ function pgAdapter(): Adapter {
 
     async getUserByAccount({ provider, providerAccountId }) {
       const result = await pool.query(
-        `SELECT u.id, u.display_name, u.primary_email
+        `SELECT u.id, u.display_name, u.primary_email, a.provider_image
          FROM users u
          JOIN accounts a ON a.user_id = u.id
          WHERE a.provider = $1 AND a.provider_account_id = $2`,
@@ -117,9 +120,11 @@ function pgAdapter(): Adapter {
       const result = await pool.query(
         `SELECT
           s.session_token, s.user_id, s.expires,
-          u.id, u.display_name, u.primary_email
+          u.id, u.display_name, u.primary_email,
+          a.provider_image
          FROM sessions s
          JOIN users u ON s.user_id = u.id
+         LEFT JOIN accounts a ON a.user_id = u.id AND a.provider = 'discord'
          WHERE s.session_token = $1 AND s.expires > now()`,
         [sessionToken]
       );

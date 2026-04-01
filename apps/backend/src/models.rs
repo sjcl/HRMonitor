@@ -8,6 +8,7 @@ pub struct UserRow {
     pub id: String,
     pub display_name: String,
     pub timezone: String,
+    pub avatar_url: Option<String>,
     pub pulsoid_access_token: Option<String>,
     pub pulsoid_last_connected_at: Option<i64>,
     pub pulsoid_last_error: Option<String>,
@@ -20,6 +21,7 @@ pub struct User {
     pub id: String,
     pub display_name: String,
     pub timezone: String,
+    pub avatar_url: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -30,6 +32,7 @@ impl From<UserRow> for User {
             id: r.id,
             display_name: r.display_name,
             timezone: r.timezone,
+            avatar_url: r.avatar_url,
             created_at: r.created_at,
             updated_at: r.updated_at,
         }
@@ -80,6 +83,7 @@ pub struct DailyStatsQuery {
 pub struct UserListItem {
     pub id: String,
     pub display_name: String,
+    pub avatar_url: Option<String>,
     pub latest_bpm: Option<i32>,
     pub has_pulsoid_token: bool,
     pub created_at: i64,
