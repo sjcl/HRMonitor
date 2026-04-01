@@ -1,9 +1,11 @@
 use axum::Json;
+use axum::Extension;
 use axum::extract::{Path, State};
 use redis::AsyncCommands;
 use std::sync::Arc;
 
 use crate::AppState;
+use crate::auth::{AuthenticatedUser, ensure_self};
 use crate::broadcast::LatestHeartRateUpdate;
 use crate::error::AppError;
 use crate::models::{UpdateUserRequest, User, UserListItem, UserRow};
@@ -143,8 +145,11 @@ pub async fn get_user(
 pub async fn update_user(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Extension(auth_user): Extension<AuthenticatedUser>,
     Json(body): Json<UpdateUserRequest>,
 ) -> Result<Json<User>, AppError> {
+    ensure_self(&auth_user, &id)?;
+
     if let Some(ref display_name) = body.display_name
         && display_name.trim().is_empty()
     {

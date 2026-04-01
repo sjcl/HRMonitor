@@ -5,6 +5,7 @@ use axum::response::Response;
 use std::sync::Arc;
 
 use crate::AppState;
+use crate::error::AppError;
 
 #[derive(Debug, Clone)]
 pub struct AuthConfig {
@@ -67,6 +68,15 @@ pub async fn require_auth(
         }
         None => Err(StatusCode::UNAUTHORIZED),
     }
+}
+
+pub fn ensure_self(auth_user: &AuthenticatedUser, target_id: &str) -> Result<(), AppError> {
+    if auth_user.id != target_id {
+        return Err(AppError::Forbidden(
+            "Cannot modify another user's resources".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn parse_cookie<'a>(header: &'a str, name: &str) -> Option<&'a str> {
