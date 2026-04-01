@@ -210,14 +210,14 @@ pub async fn callback(
 
     // 8. UPSERT into pulsoid_connections
     let upsert_result = sqlx::query(
-        "INSERT INTO pulsoid_connections (user_id, access_token, refresh_token, key_version, token_expires_at, last_connected_at, last_error)
-         VALUES ($1, $2, $3, $4, now() + make_interval(secs => $5), now(), NULL)
+        "INSERT INTO pulsoid_connections (user_id, access_token, refresh_token, key_version, token_expires_at, last_error)
+         VALUES ($1, $2, $3, $4, now() + make_interval(secs => $5), NULL)
          ON CONFLICT (user_id) DO UPDATE SET
             access_token = EXCLUDED.access_token,
             refresh_token = EXCLUDED.refresh_token,
             key_version = EXCLUDED.key_version,
             token_expires_at = EXCLUDED.token_expires_at,
-            last_connected_at = EXCLUDED.last_connected_at,
+            last_connected_at = NULL,
             last_error = NULL",
     )
     .bind(&user_id)
@@ -239,6 +239,6 @@ pub async fn callback(
         .notify_connection_changed(&user_id)
         .await;
 
-    tracing::info!(user_id = %user_id, "Pulsoid connected successfully");
-    Redirect::to(&format!("{return_to}?pulsoid=connected")).into_response()
+    tracing::info!(user_id = %user_id, "Pulsoid authorized successfully");
+    Redirect::to(&format!("{return_to}?pulsoid=authorized")).into_response()
 }

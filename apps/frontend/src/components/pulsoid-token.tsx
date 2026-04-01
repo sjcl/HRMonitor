@@ -5,7 +5,7 @@ import { getPulsoidToken, createPulsoidConnect, deletePulsoidToken } from "@/lib
 import { useEffect } from "react";
 
 const RESULT_MESSAGES: Record<string, { text: string; color: string }> = {
-  connected: { text: "Pulsoid connected successfully.", color: "text-green-400" },
+  authorized: { text: "Pulsoid authorized. Connecting...", color: "text-blue-400" },
   denied: { text: "Pulsoid authorization was denied.", color: "text-yellow-400" },
   exchange_failed: { text: "Connection failed. Please try again.", color: "text-red-400" },
   invalid_state: { text: "Security verification failed. Please try again.", color: "text-red-400" },
@@ -85,19 +85,20 @@ export function PulsoidToken({
       <div className="flex items-center justify-between">
         <div>
           <div className="text-sm text-gray-400">
-            <span className="text-green-400">Connected</span>
-            {token.last_connected_at && (
-              <span className="ml-3">
-                Last connected:{" "}
-                {new Date(token.last_connected_at * 1000).toLocaleString()}
-              </span>
+            {token.last_error ? (
+              <span className="text-red-400">Error: {token.last_error}</span>
+            ) : token.last_connected_at ? (
+              <>
+                <span className="text-green-400">Connected</span>
+                <span className="ml-3">
+                  Last connected:{" "}
+                  {new Date(token.last_connected_at * 1000).toLocaleString()}
+                </span>
+              </>
+            ) : (
+              <span className="text-yellow-400">Connecting...</span>
             )}
           </div>
-          {token.last_error && (
-            <div className="text-sm text-red-400 mt-1">
-              Error: {token.last_error}
-            </div>
-          )}
         </div>
         <button
           onClick={() => {
