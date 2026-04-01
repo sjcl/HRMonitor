@@ -43,6 +43,7 @@ export default function SettingsPage() {
 
   if (status === "loading") return null;
   if (status === "unauthenticated") redirect("/login");
+  if (!userId) return null;
 
   return (
     <div>
