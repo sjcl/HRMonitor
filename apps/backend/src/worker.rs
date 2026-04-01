@@ -24,7 +24,7 @@ pub async fn run_worker(
 
     loop {
         // Fetch connection from DB
-        let conn: Option<PulsoidConnectionRow> = sqlx::query_as(
+        let conn: Option<PulsoidConnectionRow> = match sqlx::query_as(
             "SELECT id, user_id, access_token, refresh_token, key_version,
                     EXTRACT(EPOCH FROM token_expires_at)::BIGINT as token_expires_at,
                     EXTRACT(EPOCH FROM last_connected_at)::BIGINT as last_connected_at,
@@ -34,8 +34,16 @@ pub async fn run_worker(
         .bind(&user_id)
         .fetch_optional(&db)
         .await
-        .ok()
-        .flatten();
+        {
+            Ok(row) => row,
+            Err(e) => {
+                tracing::warn!(user_id = %user_id, "DB error fetching pulsoid connection: {e}");
+                tracing::info!(user_id = %user_id, backoff_secs = backoff.as_secs(), "Retrying after backoff");
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(max_backoff);
+                continue;
+            }
+        };
 
         let conn = match conn {
             Some(c) => c,
