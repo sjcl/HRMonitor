@@ -26,6 +26,19 @@ function buildWsUrl(): string {
   return `${proto}//${location.host}/api/ws/heart-rates`;
 }
 
+type SessionStatus = "authenticated" | "unauthenticated" | "error";
+
+async function checkSession(): Promise<SessionStatus> {
+  try {
+    const res = await fetch("/api/auth/session");
+    if (!res.ok) return "error";
+    const data = await res.json();
+    return data?.user ? "authenticated" : "unauthenticated";
+  } catch {
+    return "error";
+  }
+}
+
 export function useHeartRateWs(
   userIds: string[],
 ): { data: Map<string, LatestHeartRate>; reconnectCount: number } {
@@ -62,65 +75,12 @@ export function useHeartRateWs(
     });
   }, []);
 
-  const connect = useCallback(() => {
-    if (typeof window === "undefined") return;
+  // Connect on mount only
+  useEffect(() => {
+    let cancelled = false;
 
-    // Clear any pending reconnect timer
-    if (reconnectTimerRef.current) {
-      clearTimeout(reconnectTimerRef.current);
-      reconnectTimerRef.current = null;
-    }
-
-    const ws = new WebSocket(buildWsUrl());
-    wsRef.current = ws;
-
-    ws.onopen = () => {
-      if (hasConnectedRef.current && wasDisconnectedRef.current) {
-        setReconnectCount((c) => c + 1);
-      }
-      hasConnectedRef.current = true;
-      wasDisconnectedRef.current = false;
-      backoffRef.current = 1000;
-
-      const ids = userIdsRef.current;
-      if (ids.length > 0) {
-        ws.send(JSON.stringify({ type: "subscribe", user_ids: ids }));
-        subscribedRef.current = new Set(ids);
-      }
-    };
-
-    ws.onmessage = (event) => {
-      if (ws !== wsRef.current) return;
-      try {
-        const msg: ServerMessage = JSON.parse(event.data);
-        if (msg.type === "snapshot") {
-          // Snapshots are infrequent — apply immediately
-          setData((prev) => {
-            const next = new Map(prev);
-            for (const [userId, item] of Object.entries(msg.data)) {
-              if (item) {
-                next.set(userId, item);
-              } else {
-                next.delete(userId);
-              }
-            }
-            return next;
-          });
-        } else if (msg.type === "update") {
-          // Batch updates and flush once per animation frame
-          pendingUpdatesRef.current.set(msg.data.user_id, msg.data);
-          if (rafRef.current === null) {
-            rafRef.current = requestAnimationFrame(flushUpdates);
-          }
-        }
-      } catch {
-        // Ignore malformed messages
-      }
-    };
-
-    ws.onclose = () => {
-      if (ws !== wsRef.current) return;
-      wsRef.current = null;
+    function scheduleReconnect() {
+      if (cancelled) return;
       wasDisconnectedRef.current = true;
       const delay = backoffRef.current;
       reconnectTimerRef.current = setTimeout(() => {
@@ -128,17 +88,96 @@ export function useHeartRateWs(
         backoffRef.current = Math.min(backoffRef.current * 2, 30000);
         connect();
       }, delay);
-    };
+    }
 
-    ws.onerror = () => {
-      ws.close();
-    };
-  }, []);
+    async function connect() {
+      if (typeof window === "undefined") return;
 
-  // Connect on mount only
-  useEffect(() => {
+      // Clear any pending reconnect timer
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+
+      // Check session before connecting — prevents infinite reconnect loop on auth failure
+      const sessionStatus = await checkSession();
+      if (cancelled) return;
+      if (sessionStatus === "unauthenticated") {
+        window.location.href = "/login";
+        return;
+      }
+      if (sessionStatus === "error") {
+        // Transient failure — retry with backoff instead of redirecting
+        scheduleReconnect();
+        return;
+      }
+
+      const ws = new WebSocket(buildWsUrl());
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        if (cancelled || ws !== wsRef.current) {
+          ws.close();
+          return;
+        }
+        if (hasConnectedRef.current && wasDisconnectedRef.current) {
+          setReconnectCount((c) => c + 1);
+        }
+        hasConnectedRef.current = true;
+        wasDisconnectedRef.current = false;
+        backoffRef.current = 1000;
+
+        const ids = userIdsRef.current;
+        if (ids.length > 0) {
+          ws.send(JSON.stringify({ type: "subscribe", user_ids: ids }));
+          subscribedRef.current = new Set(ids);
+        }
+      };
+
+      ws.onmessage = (event) => {
+        if (ws !== wsRef.current) return;
+        try {
+          const msg: ServerMessage = JSON.parse(event.data);
+          if (msg.type === "snapshot") {
+            // Snapshots are infrequent — apply immediately
+            setData((prev) => {
+              const next = new Map(prev);
+              for (const [userId, item] of Object.entries(msg.data)) {
+                if (item) {
+                  next.set(userId, item);
+                } else {
+                  next.delete(userId);
+                }
+              }
+              return next;
+            });
+          } else if (msg.type === "update") {
+            // Batch updates and flush once per animation frame
+            pendingUpdatesRef.current.set(msg.data.user_id, msg.data);
+            if (rafRef.current === null) {
+              rafRef.current = requestAnimationFrame(flushUpdates);
+            }
+          }
+        } catch {
+          // Ignore malformed messages
+        }
+      };
+
+      ws.onclose = () => {
+        if (ws !== wsRef.current) return;
+        wsRef.current = null;
+        scheduleReconnect();
+      };
+
+      ws.onerror = () => {
+        ws.close();
+      };
+    }
+
     connect();
+
     return () => {
+      cancelled = true;
       if (reconnectTimerRef.current) {
         clearTimeout(reconnectTimerRef.current);
         reconnectTimerRef.current = null;
@@ -151,7 +190,7 @@ export function useHeartRateWs(
       wsRef.current = null;
       ws?.close();
     };
-  }, [connect]);
+  }, [flushUpdates]);
 
   // Handle subscription changes while connected
   useEffect(() => {

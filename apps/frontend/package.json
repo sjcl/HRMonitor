@@ -10,6 +10,8 @@
   "dependencies": {
     "@tanstack/react-query": "^5",
     "next": "^16.0.0",
+    "next-auth": "^5.0.0-beta.30",
+    "pg": "^8.20.0",
     "react": "^19",
     "react-dom": "^19",
     "recharts": "^3.0.0"
@@ -17,6 +19,7 @@
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "@types/node": "25.5.0",
+    "@types/pg": "^8.20.0",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "tailwindcss": "^4",

@@ -7,7 +7,7 @@ use crate::AppState;
 use crate::error::AppError;
 use crate::models::{PulsoidTokenResponse, SetPulsoidTokenRequest, UserRow};
 
-const SELECT_USER_ROW: &str = "SELECT id, name, timezone, pulsoid_access_token,
+const SELECT_USER_ROW: &str = "SELECT id, display_name, timezone, NULL::TEXT as avatar_url, pulsoid_access_token,
             EXTRACT(EPOCH FROM pulsoid_last_connected_at)::BIGINT as pulsoid_last_connected_at,
             pulsoid_last_error,
             EXTRACT(EPOCH FROM created_at)::BIGINT as created_at,

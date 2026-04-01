@@ -9,6 +9,7 @@ import { TimezoneSelect } from "@/components/timezone-select";
 import { useHeartRateWs } from "@/lib/ws";
 import { use, useState, useEffect, useMemo } from "react";
 import Link from "next/link";
+import { UserAvatar } from "@/components/user-avatar";
 
 export default function UserDetailPage({
   params,
@@ -32,13 +33,13 @@ export default function UserDetailPage({
 
   useEffect(() => {
     if (user) {
-      setEditName(user.name);
+      setEditName(user.display_name);
       setEditTimezone(user.timezone);
     }
   }, [user]);
 
   const updateMutation = useMutation({
-    mutationFn: (data: { name?: string; timezone?: string }) =>
+    mutationFn: (data: { display_name?: string; timezone?: string }) =>
       updateUser(id, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["user", id] });
@@ -47,7 +48,7 @@ export default function UserDetailPage({
   });
 
   const hasChanges =
-    user && (editName !== user.name || editTimezone !== user.timezone);
+    user && (editName !== user.display_name || editTimezone !== user.timezone);
 
   return (
     <div>
@@ -56,7 +57,8 @@ export default function UserDetailPage({
       </Link>
 
       <div className="flex items-center gap-4 mt-4 mb-6">
-        <h1 className="text-2xl font-bold">{user?.name ?? "Loading..."}</h1>
+        <UserAvatar src={user?.avatar_url} name={user?.display_name ?? ""} size="lg" />
+        <h1 className="text-2xl font-bold">{user?.display_name ?? "Loading..."}</h1>
         {latestHr && (
           <>
             <span className="text-3xl font-mono font-bold text-red-400">
@@ -115,7 +117,7 @@ export default function UserDetailPage({
             <button
               onClick={() =>
                 updateMutation.mutate({
-                  name: editName.trim(),
+                  display_name: editName.trim(),
                   timezone: editTimezone,
                 })
               }

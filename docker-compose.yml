@@ -35,11 +35,20 @@ services:
       context: ./apps/frontend
       args:
         REACT_PROFILING: ${REACT_PROFILING:-false}
+    environment:
+      - DATABASE_URL=postgres://hrmonitor:hrmonitor@timescaledb:5432/hrmonitor
+      - AUTH_SECRET=${AUTH_SECRET}
+      - AUTH_DISCORD_ID=${DISCORD_CLIENT_ID}
+      - AUTH_DISCORD_SECRET=${DISCORD_CLIENT_SECRET}
+      - AUTH_URL=${AUTH_URL:?AUTH_URL must be set}
+      - AUTH_TRUST_HOST=true
+      - HOSTNAME=0.0.0.0
     expose:
       - "3000"
     volumes:
       - static-assets:/static-export
     depends_on:
+      - timescaledb
       - backend
     restart: unless-stopped
 

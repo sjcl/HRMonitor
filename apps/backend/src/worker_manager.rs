@@ -32,7 +32,7 @@ impl WorkerManager {
 
     pub async fn start_all_active(&self) {
         let users: Vec<UserRow> = match sqlx::query_as(
-            "SELECT id, name, timezone, pulsoid_access_token,
+            "SELECT id, display_name, timezone, NULL::TEXT as avatar_url, pulsoid_access_token,
                     EXTRACT(EPOCH FROM pulsoid_last_connected_at)::BIGINT as pulsoid_last_connected_at,
                     pulsoid_last_error,
                     EXTRACT(EPOCH FROM created_at)::BIGINT as created_at,

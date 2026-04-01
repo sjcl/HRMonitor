@@ -1,19 +1,14 @@
 "use client";
 
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { getUsers, createUser, type UserListItem } from "@/lib/api";
-import { useState, useMemo, memo } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { getUsers, type UserListItem } from "@/lib/api";
+import { useMemo, memo } from "react";
 import Link from "next/link";
 import { AllUsersHeartRateChart } from "@/components/all-users-heart-rate-chart";
-import { TimezoneSelect, getBrowserTimezone } from "@/components/timezone-select";
+import { UserAvatar } from "@/components/user-avatar";
 import { useHeartRateWs, type LatestHeartRate } from "@/lib/ws";
 
 export default function UsersPage() {
-  const queryClient = useQueryClient();
-  const [newName, setNewName] = useState("");
-  const [newTimezone, setNewTimezone] = useState(getBrowserTimezone);
-  const [showForm, setShowForm] = useState(false);
-
   const { data: users, isLoading } = useQuery({
     queryKey: ["users"],
     queryFn: getUsers,
@@ -23,58 +18,11 @@ export default function UsersPage() {
   const userIds = useMemo(() => (users ?? []).map((u) => u.id), [users]);
   const { data: liveHr, reconnectCount } = useHeartRateWs(userIds);
 
-  const createMutation = useMutation({
-    mutationFn: ({ name, timezone }: { name: string; timezone: string }) =>
-      createUser(name, timezone),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["users"] });
-      setNewName("");
-      setNewTimezone(getBrowserTimezone());
-      setShowForm(false);
-    },
-  });
-
   return (
     <div>
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold">Users</h1>
-        <button
-          onClick={() => setShowForm(!showForm)}
-          className="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded text-sm"
-        >
-          Add User
-        </button>
       </div>
-
-      {showForm && (
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (newName.trim())
-              createMutation.mutate({ name: newName.trim(), timezone: newTimezone });
-          }}
-          className="mb-6 flex flex-col gap-2"
-        >
-          <div className="flex gap-2">
-            <input
-              type="text"
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
-              placeholder="User name"
-              className="bg-gray-800 border border-gray-700 rounded px-3 py-2 flex-1"
-              autoFocus
-            />
-            <button
-              type="submit"
-              disabled={createMutation.isPending}
-              className="bg-green-600 hover:bg-green-700 px-4 py-2 rounded text-sm disabled:opacity-50"
-            >
-              Create
-            </button>
-          </div>
-          <TimezoneSelect value={newTimezone} onChange={setNewTimezone} />
-        </form>
-      )}
 
       <AllUsersHeartRateChart liveHr={liveHr} wsReconnectCount={reconnectCount} />
 
@@ -126,9 +74,10 @@ const UserRow = memo(function UserRow({
       <td className="px-4 py-3">
         <Link
           href={`/users/${user.id}`}
-          className="text-blue-400 hover:underline"
+          className="text-blue-400 hover:underline flex items-center gap-2"
         >
-          {user.name}
+          <UserAvatar src={user.avatar_url} name={user.display_name} size="sm" />
+          {user.display_name}
         </Link>
       </td>
       <td className="px-4 py-3 text-right">

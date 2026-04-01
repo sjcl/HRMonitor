@@ -77,7 +77,7 @@ export function AllUsersHeartRateChart({
       const results = await Promise.all(
         users.map(async (u) => ({
           userId: u.id,
-          name: u.name,
+          name: u.display_name,
           records: await getHeartRates(u.id, range.label),
         })),
       );
@@ -99,7 +99,7 @@ export function AllUsersHeartRateChart({
         const results = await Promise.all(
           users.map(async (u) => ({
             userId: u.id,
-            name: u.name,
+            name: u.display_name,
             records: await getMinuteStats(u.id, range.label),
           })),
         );

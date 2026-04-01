@@ -1,18 +1,18 @@
 use axum::Json;
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
 use redis::AsyncCommands;
 use std::sync::Arc;
 
 use crate::AppState;
 use crate::broadcast::LatestHeartRateUpdate;
 use crate::error::AppError;
-use crate::models::{CreateUserRequest, UpdateUserRequest, User, UserListItem, UserRow};
+use crate::models::{UpdateUserRequest, User, UserListItem, UserRow};
 
 #[derive(Debug, sqlx::FromRow)]
 struct UserListRow {
     id: String,
-    name: String,
+    display_name: String,
+    avatar_url: Option<String>,
     has_pulsoid_token: bool,
     created_at: i64,
 }
@@ -23,10 +23,12 @@ pub async fn list_users(
     let rows: Vec<UserListRow> = sqlx::query_as(
         "SELECT
             u.id,
-            u.name,
+            u.display_name,
+            a.provider_image as avatar_url,
             EXTRACT(EPOCH FROM u.created_at)::BIGINT as created_at,
             (u.pulsoid_access_token IS NOT NULL) as has_pulsoid_token
         FROM users u
+        LEFT JOIN accounts a ON a.user_id = u.id AND a.provider = 'discord'
         ORDER BY u.created_at DESC",
     )
     .fetch_all(&state.db)
@@ -55,7 +57,8 @@ pub async fn list_users(
 
         users.push(UserListItem {
             id: row.id,
-            name: row.name,
+            display_name: row.display_name,
+            avatar_url: row.avatar_url,
             latest_bpm,
             has_pulsoid_token: row.has_pulsoid_token,
             created_at: row.created_at,
@@ -113,49 +116,21 @@ pub async fn list_users(
     Ok(Json(users))
 }
 
-pub async fn create_user(
-    State(state): State<Arc<AppState>>,
-    Json(body): Json<CreateUserRequest>,
-) -> Result<(StatusCode, Json<User>), AppError> {
-    if body.name.trim().is_empty() {
-        return Err(AppError::BadRequest("Name cannot be empty".into()));
-    }
-
-    let id = uuid::Uuid::new_v4().to_string();
-    let now = now_unix();
-    let timezone = body.timezone.unwrap_or_else(|| "UTC".to_string());
-
-    sqlx::query("INSERT INTO users (id, name, timezone, created_at, updated_at) VALUES ($1, $2, $3, to_timestamp($4), to_timestamp($5))")
-        .bind(&id)
-        .bind(&body.name)
-        .bind(&timezone)
-        .bind(now)
-        .bind(now)
-        .execute(&state.db)
-        .await?;
-
-    let user = User {
-        id,
-        name: body.name,
-        timezone,
-        created_at: now,
-        updated_at: now,
-    };
-
-    Ok((StatusCode::CREATED, Json(user)))
-}
-
 pub async fn get_user(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<User>, AppError> {
     let row: UserRow = sqlx::query_as(
-        "SELECT id, name, timezone, pulsoid_access_token,
-                EXTRACT(EPOCH FROM pulsoid_last_connected_at)::BIGINT as pulsoid_last_connected_at,
-                pulsoid_last_error,
-                EXTRACT(EPOCH FROM created_at)::BIGINT as created_at,
-                EXTRACT(EPOCH FROM updated_at)::BIGINT as updated_at
-         FROM users WHERE id = $1",
+        "SELECT u.id, u.display_name, u.timezone,
+                a.provider_image as avatar_url,
+                u.pulsoid_access_token,
+                EXTRACT(EPOCH FROM u.pulsoid_last_connected_at)::BIGINT as pulsoid_last_connected_at,
+                u.pulsoid_last_error,
+                EXTRACT(EPOCH FROM u.created_at)::BIGINT as created_at,
+                EXTRACT(EPOCH FROM u.updated_at)::BIGINT as updated_at
+         FROM users u
+         LEFT JOIN accounts a ON a.user_id = u.id AND a.provider = 'discord'
+         WHERE u.id = $1",
     )
     .bind(&id)
     .fetch_optional(&state.db)
@@ -170,18 +145,18 @@ pub async fn update_user(
     Path(id): Path<String>,
     Json(body): Json<UpdateUserRequest>,
 ) -> Result<Json<User>, AppError> {
-    if let Some(ref name) = body.name
-        && name.trim().is_empty()
+    if let Some(ref display_name) = body.display_name
+        && display_name.trim().is_empty()
     {
-        return Err(AppError::BadRequest("Name cannot be empty".into()));
+        return Err(AppError::BadRequest("Display name cannot be empty".into()));
     }
 
     let now = now_unix();
 
     let result = sqlx::query(
-        "UPDATE users SET name = COALESCE($1, name), timezone = COALESCE($2, timezone), updated_at = to_timestamp($3) WHERE id = $4"
+        "UPDATE users SET display_name = COALESCE($1, display_name), timezone = COALESCE($2, timezone), updated_at = to_timestamp($3) WHERE id = $4"
     )
-        .bind(&body.name)
+        .bind(&body.display_name)
         .bind(&body.timezone)
         .bind(now)
         .bind(&id)
@@ -193,12 +168,16 @@ pub async fn update_user(
     }
 
     let row: UserRow = sqlx::query_as(
-        "SELECT id, name, timezone, pulsoid_access_token,
-                EXTRACT(EPOCH FROM pulsoid_last_connected_at)::BIGINT as pulsoid_last_connected_at,
-                pulsoid_last_error,
-                EXTRACT(EPOCH FROM created_at)::BIGINT as created_at,
-                EXTRACT(EPOCH FROM updated_at)::BIGINT as updated_at
-         FROM users WHERE id = $1",
+        "SELECT u.id, u.display_name, u.timezone,
+                a.provider_image as avatar_url,
+                u.pulsoid_access_token,
+                EXTRACT(EPOCH FROM u.pulsoid_last_connected_at)::BIGINT as pulsoid_last_connected_at,
+                u.pulsoid_last_error,
+                EXTRACT(EPOCH FROM u.created_at)::BIGINT as created_at,
+                EXTRACT(EPOCH FROM u.updated_at)::BIGINT as updated_at
+         FROM users u
+         LEFT JOIN accounts a ON a.user_id = u.id AND a.provider = 'discord'
+         WHERE u.id = $1",
     )
     .bind(&id)
     .fetch_one(&state.db)
