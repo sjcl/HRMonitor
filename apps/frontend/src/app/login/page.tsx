@@ -8,7 +8,11 @@ export default function LoginPage() {
       <h1 className="text-3xl font-bold">HR Monitor</h1>
       <p className="text-gray-400">Sign in to continue</p>
       <button
-        onClick={() => signIn("discord", { redirectTo: "/users" })}
+        onClick={() => {
+          const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+          document.cookie = `browser_tz=${tz}; path=/; max-age=300; SameSite=Lax`;
+          signIn("discord", { redirectTo: "/users" });
+        }}
         className="flex items-center gap-3 bg-[#5865F2] hover:bg-[#4752C4] px-6 py-3 rounded-lg text-white font-medium transition-colors"
       >
         <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">

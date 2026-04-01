@@ -1,5 +1,6 @@
 import NextAuth from "next-auth";
 import Discord from "next-auth/providers/discord";
+import { cookies } from "next/headers";
 import { Pool } from "pg";
 import type {
   Adapter,
@@ -23,11 +24,24 @@ function toAdapterUser(row: Record<string, unknown>): AdapterUser {
 function pgAdapter(): Adapter {
   return {
     async createUser(user) {
+      const cookieStore = await cookies();
+      const tz = cookieStore.get("browser_tz")?.value ?? null;
+
+      let timezone = "UTC";
+      if (tz) {
+        try {
+          Intl.DateTimeFormat("en-US", { timeZone: tz });
+          timezone = tz;
+        } catch {
+          // invalid timezone cookie → UTC fallback
+        }
+      }
+
       const result = await pool.query(
         `INSERT INTO users (display_name, primary_email, timezone)
-         VALUES ($1, $2, 'UTC')
+         VALUES ($1, $2, $3)
          RETURNING id, display_name, primary_email`,
-        [user.name ?? "User", user.email ?? null]
+        [user.name ?? "User", user.email ?? null, timezone]
       );
       return toAdapterUser(result.rows[0]);
     },
