@@ -126,11 +126,7 @@ async fn main() {
 
     // Public routes (no auth required)
     let public_routes = Router::new()
-        .route("/healthz", get(|| async { "ok" }))
-        .route(
-            "/api/oauth/pulsoid/callback",
-            get(handlers::oauth::callback),
-        );
+        .route("/healthz", get(|| async { "ok" }));
 
     // Protected routes (auth required)
     let protected_routes = Router::new()
@@ -177,6 +173,10 @@ async fn main() {
             get(handlers::heart_rates::latest_heart_rate),
         )
         .route("/api/ws/heart-rates", get(handlers::ws::heart_rate_ws))
+        .route(
+            "/api/oauth/pulsoid/callback",
+            get(handlers::oauth::callback),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_auth,

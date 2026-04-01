@@ -123,6 +123,7 @@ pub async fn redirect_to_pulsoid(
 
 pub async fn callback(
     State(state): State<Arc<AppState>>,
+    Extension(auth_user): Extension<AuthenticatedUser>,
     Query(params): Query<OAuthCallbackQuery>,
 ) -> Response {
     // 1. No state → 400
@@ -153,6 +154,16 @@ pub async fn callback(
     };
 
     let return_to = ReturnTo::from_str(&return_to_str).as_str();
+
+    // Verify the authenticated user matches the ticket owner
+    if auth_user.id != user_id {
+        tracing::warn!(
+            session_user = %auth_user.id,
+            ticket_user = %user_id,
+            "OAuth callback session mismatch"
+        );
+        return Redirect::to(&format!("{return_to}?pulsoid=session_mismatch")).into_response();
+    }
 
     // 3. Error from Pulsoid (user denied)
     if params.error.is_some() {
