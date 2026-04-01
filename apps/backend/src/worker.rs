@@ -67,7 +67,10 @@ pub async fn run_worker(
                 Err(e) => {
                     tracing::warn!(user_id = %user_id, "Token refresh failed: {e}");
                     update_last_error(&db, &user_id, &format!("Token refresh failed: {e}")).await;
-                    return;
+                    tracing::info!(user_id = %user_id, backoff_secs = backoff.as_secs(), "Retrying after backoff");
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(max_backoff);
+                    continue;
                 }
             }
         } else {
