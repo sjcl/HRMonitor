@@ -19,6 +19,7 @@ export interface User {
 }
 
 export interface PulsoidTokenStatus {
+  source: "oauth" | "manual";
   last_connected_at: number | null;
   last_error: string | null;
 }
@@ -77,6 +78,14 @@ export function createPulsoidConnect(returnTo?: string) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ return_to: returnTo ?? "/settings" }),
+  });
+}
+
+export function setManualPulsoidToken(userId: string, accessToken: string) {
+  return fetchJson<void>(`/api/users/${userId}/pulsoid-token`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ access_token: accessToken }),
   });
 }
 

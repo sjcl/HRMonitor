@@ -6,7 +6,7 @@ use tokio::sync::broadcast::Sender;
 use tokio_tungstenite::connect_async;
 
 use crate::broadcast::LatestHeartRateUpdate;
-use crate::models::{PulsoidConnectionRow, PulsoidMessage};
+use crate::models::{PulsoidConnectionRow, PulsoidMessage, SOURCE_OAUTH};
 use crate::pulsoid_oauth::PulsoidOAuthConfig;
 use crate::token_encryption::TokenEncryption;
 
@@ -25,7 +25,7 @@ pub async fn run_worker(
     loop {
         // Fetch connection from DB
         let conn: Option<PulsoidConnectionRow> = match sqlx::query_as(
-            "SELECT id, user_id, access_token, refresh_token, key_version,
+            "SELECT id, user_id, source, access_token, refresh_token, key_version,
                     EXTRACT(EPOCH FROM token_expires_at)::BIGINT as token_expires_at,
                     EXTRACT(EPOCH FROM last_connected_at)::BIGINT as last_connected_at,
                     last_error
@@ -68,20 +68,35 @@ pub async fn run_worker(
             }
         };
 
-        // Check token expiry and refresh if needed
-        let access_token = if is_token_expired(conn.token_expires_at) {
-            match try_refresh(&db, &encryption, &oauth_config, &conn, &user_id).await {
-                Ok(new_token) => new_token,
-                Err(e) => {
-                    tracing::warn!(user_id = %user_id, "Token refresh failed: {e}");
-                    update_last_error(&db, &user_id, &format!("Token refresh failed: {e}")).await;
-                    tracing::info!(user_id = %user_id, backoff_secs = backoff.as_secs(), "Retrying after backoff");
+        // Check token expiry and refresh if needed (OAuth only; manual tokens have no expiry)
+        let access_token = if conn.source == SOURCE_OAUTH {
+            let expires_at = match conn.token_expires_at {
+                Some(ts) => ts,
+                None => {
+                    tracing::error!(user_id = %user_id, "OAuth connection missing token_expires_at");
+                    update_last_error(&db, &user_id, "OAuth connection missing expiry (data inconsistency)").await;
                     tokio::time::sleep(backoff).await;
                     backoff = (backoff * 2).min(max_backoff);
                     continue;
                 }
+            };
+            if is_token_expired(expires_at) {
+                match try_refresh(&db, &encryption, &oauth_config, &conn, &user_id).await {
+                    Ok(new_token) => new_token,
+                    Err(e) => {
+                        tracing::warn!(user_id = %user_id, "Token refresh failed: {e}");
+                        update_last_error(&db, &user_id, &format!("Token refresh failed: {e}")).await;
+                        tracing::info!(user_id = %user_id, backoff_secs = backoff.as_secs(), "Retrying after backoff");
+                        tokio::time::sleep(backoff).await;
+                        backoff = (backoff * 2).min(max_backoff);
+                        continue;
+                    }
+                }
+            } else {
+                access_token
             }
         } else {
+            // Manual token: no expiry, no refresh
             access_token
         };
 
@@ -151,8 +166,13 @@ async fn try_refresh(
     conn: &PulsoidConnectionRow,
     user_id: &str,
 ) -> Result<String, String> {
+    let refresh_token_bytes = conn.refresh_token.as_ref().ok_or_else(|| {
+        tracing::error!(user_id = %user_id, "OAuth connection missing refresh_token (data inconsistency)");
+        "OAuth connection has no refresh_token".to_string()
+    })?;
+
     let refresh_token_plain = encryption
-        .decrypt(&conn.refresh_token, conn.key_version as u32)
+        .decrypt(refresh_token_bytes, conn.key_version as u32)
         .map_err(|e| format!("Failed to decrypt refresh token: {e}"))?;
 
     let token_resp = oauth_config
@@ -166,8 +186,8 @@ async fn try_refresh(
     let (enc_access, key_version) = encryption.encrypt(new_access);
 
     // If refresh_token came back, use it; otherwise keep the old one
-    let enc_refresh = if let Some(ref new_rt) = token_resp.refresh_token {
-        encryption.encrypt(new_rt).0
+    let enc_refresh: Option<Vec<u8>> = if let Some(ref new_rt) = token_resp.refresh_token {
+        Some(encryption.encrypt(new_rt).0)
     } else {
         conn.refresh_token.clone()
     };

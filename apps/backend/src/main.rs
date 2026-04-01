@@ -63,6 +63,8 @@ async fn main() {
     let pulsoid_oauth = PulsoidOAuthConfig::from_env();
     let token_encryption = TokenEncryption::from_env();
 
+    db::migrate_legacy_pulsoid_tokens(&pool, &token_encryption).await;
+
     let worker_manager = WorkerManager::new(
         pool.clone(),
         redis_conn.clone(),
@@ -138,6 +140,7 @@ async fn main() {
         .route(
             "/api/users/{id}/pulsoid-token",
             get(handlers::tokens::get_pulsoid_token)
+                .put(handlers::tokens::set_manual_pulsoid_token)
                 .delete(handlers::tokens::delete_pulsoid_token),
         )
         .route(

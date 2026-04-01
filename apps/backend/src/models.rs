@@ -1,6 +1,11 @@
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
+// --- Constants ---
+
+pub const SOURCE_OAUTH: &str = "oauth";
+pub const SOURCE_MANUAL: &str = "manual";
+
 // --- DB rows ---
 
 #[derive(Debug, Clone, FromRow)]
@@ -17,10 +22,11 @@ pub struct UserRow {
 pub struct PulsoidConnectionRow {
     pub id: String,
     pub user_id: String,
+    pub source: String,
     pub access_token: Vec<u8>,
-    pub refresh_token: Vec<u8>,
+    pub refresh_token: Option<Vec<u8>>,
     pub key_version: i32,
-    pub token_expires_at: i64,
+    pub token_expires_at: Option<i64>,
     pub last_connected_at: Option<i64>,
     pub last_error: Option<String>,
 }
@@ -95,8 +101,14 @@ pub struct UserListItem {
 
 #[derive(Debug, Serialize)]
 pub struct PulsoidTokenResponse {
+    pub source: String,
     pub last_connected_at: Option<i64>,
     pub last_error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetManualTokenRequest {
+    pub access_token: String,
 }
 
 #[derive(Debug, FromRow, Serialize)]
