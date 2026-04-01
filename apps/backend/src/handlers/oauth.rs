@@ -135,7 +135,7 @@ pub async fn callback(
     };
 
     // 2. Atomically consume the ticket
-    let ticket: Option<(String, String, String)> = sqlx::query_as(
+    let ticket: Option<(String, String, String)> = match sqlx::query_as(
         "UPDATE connect_requests SET used_at = now()
          WHERE state = $1 AND used_at IS NULL AND expires_at > now() AND provider = 'pulsoid'
          RETURNING user_id, return_to, provider",
@@ -143,7 +143,13 @@ pub async fn callback(
     .bind(&oauth_state)
     .fetch_optional(&state.db)
     .await
-    .unwrap_or(None);
+    {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!("DB error consuming OAuth ticket: {e}");
+            return Redirect::to("/settings?pulsoid=exchange_failed").into_response();
+        }
+    };
 
     let (user_id, return_to_str, _provider) = match ticket {
         Some(t) => t,

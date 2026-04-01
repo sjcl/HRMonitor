@@ -66,13 +66,19 @@ impl WorkerManager {
         }
 
         // Step 3: Check if connection still exists (outside lock)
-        let has_connection: bool = sqlx::query_scalar(
+        let has_connection: bool = match sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM pulsoid_connections WHERE user_id = $1)",
         )
         .bind(user_id)
         .fetch_one(&self.db)
         .await
-        .unwrap_or(false);
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!(user_id, "Failed to check pulsoid connection, assuming exists: {e}");
+                true
+            }
+        };
 
         // Step 4: Spawn new worker if needed (under lock)
         if has_connection {
