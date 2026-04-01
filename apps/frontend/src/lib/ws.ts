@@ -26,14 +26,16 @@ function buildWsUrl(): string {
   return `${proto}//${location.host}/api/ws/heart-rates`;
 }
 
-async function checkSession(): Promise<boolean> {
+type SessionStatus = "authenticated" | "unauthenticated" | "error";
+
+async function checkSession(): Promise<SessionStatus> {
   try {
     const res = await fetch("/api/auth/session");
-    if (!res.ok) return false;
+    if (!res.ok) return "error";
     const data = await res.json();
-    return !!data?.user;
+    return data?.user ? "authenticated" : "unauthenticated";
   } catch {
-    return false;
+    return "error";
   }
 }
 
@@ -77,6 +79,17 @@ export function useHeartRateWs(
   useEffect(() => {
     let cancelled = false;
 
+    function scheduleReconnect() {
+      if (cancelled) return;
+      wasDisconnectedRef.current = true;
+      const delay = backoffRef.current;
+      reconnectTimerRef.current = setTimeout(() => {
+        reconnectTimerRef.current = null;
+        backoffRef.current = Math.min(backoffRef.current * 2, 30000);
+        connect();
+      }, delay);
+    }
+
     async function connect() {
       if (typeof window === "undefined") return;
 
@@ -87,10 +100,15 @@ export function useHeartRateWs(
       }
 
       // Check session before connecting — prevents infinite reconnect loop on auth failure
-      const hasSession = await checkSession();
+      const sessionStatus = await checkSession();
       if (cancelled) return;
-      if (!hasSession) {
+      if (sessionStatus === "unauthenticated") {
         window.location.href = "/login";
+        return;
+      }
+      if (sessionStatus === "error") {
+        // Transient failure — retry with backoff instead of redirecting
+        scheduleReconnect();
         return;
       }
 
@@ -147,15 +165,8 @@ export function useHeartRateWs(
 
       ws.onclose = () => {
         if (ws !== wsRef.current) return;
-        if (cancelled) return;
         wsRef.current = null;
-        wasDisconnectedRef.current = true;
-        const delay = backoffRef.current;
-        reconnectTimerRef.current = setTimeout(() => {
-          reconnectTimerRef.current = null;
-          backoffRef.current = Math.min(backoffRef.current * 2, 30000);
-          connect();
-        }, delay);
+        scheduleReconnect();
       };
 
       ws.onerror = () => {
