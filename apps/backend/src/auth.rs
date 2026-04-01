@@ -52,7 +52,7 @@ pub async fn require_auth(
          JOIN users u ON s.user_id = u.id
          WHERE s.session_token = $1 AND s.expires > now()",
     )
-    .bind(&token)
+    .bind(token)
     .fetch_optional(&state.db)
     .await
     .map_err(|e| {
@@ -82,10 +82,10 @@ pub fn ensure_self(auth_user: &AuthenticatedUser, target_id: &str) -> Result<(),
 fn parse_cookie<'a>(header: &'a str, name: &str) -> Option<&'a str> {
     for pair in header.split(';') {
         let pair = pair.trim();
-        if let Some(value) = pair.strip_prefix(name) {
-            if let Some(value) = value.strip_prefix('=') {
-                return Some(value);
-            }
+        if let Some(value) = pair.strip_prefix(name)
+            && let Some(value) = value.strip_prefix('=')
+        {
+            return Some(value);
         }
     }
     None
