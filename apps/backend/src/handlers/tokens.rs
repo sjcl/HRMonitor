@@ -1,9 +1,11 @@
 use axum::Json;
+use axum::Extension;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use std::sync::Arc;
 
 use crate::AppState;
+use crate::auth::{AuthenticatedUser, ensure_self};
 use crate::error::AppError;
 use crate::models::{PulsoidTokenResponse, SetPulsoidTokenRequest, UserRow};
 
@@ -17,7 +19,10 @@ const SELECT_USER_ROW: &str = "SELECT id, display_name, timezone, NULL::TEXT as 
 pub async fn get_pulsoid_token(
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<String>,
+    Extension(auth_user): Extension<AuthenticatedUser>,
 ) -> Result<Json<PulsoidTokenResponse>, AppError> {
+    ensure_self(&auth_user, &user_id)?;
+
     let query = format!("{SELECT_USER_ROW} WHERE id = $1");
     let user: UserRow = sqlx::query_as(&query)
         .bind(&user_id)
@@ -38,8 +43,11 @@ pub async fn get_pulsoid_token(
 pub async fn set_pulsoid_token(
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<String>,
+    Extension(auth_user): Extension<AuthenticatedUser>,
     Json(body): Json<SetPulsoidTokenRequest>,
 ) -> Result<Json<PulsoidTokenResponse>, AppError> {
+    ensure_self(&auth_user, &user_id)?;
+
     if body.access_token.trim().is_empty() {
         return Err(AppError::BadRequest("Access token cannot be empty".into()));
     }
@@ -80,7 +88,10 @@ pub async fn set_pulsoid_token(
 pub async fn delete_pulsoid_token(
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<String>,
+    Extension(auth_user): Extension<AuthenticatedUser>,
 ) -> Result<StatusCode, AppError> {
+    ensure_self(&auth_user, &user_id)?;
+
     // Stop worker before DB update
     state.worker_manager.stop(&user_id).await;
 
