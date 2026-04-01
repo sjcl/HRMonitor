@@ -148,21 +148,30 @@ function pgAdapter(): Adapter {
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
   adapter: pgAdapter(),
-  providers: [Discord],
+  providers: [
+    Discord({
+      authorization: { params: { scope: "identify" } },
+    }),
+  ],
   session: { strategy: "database" },
   callbacks: {
-    async signIn({ user, account }) {
-      if (!account) return true;
+    async signIn({ account, profile }) {
+      if (!account || !profile) return true;
 
-      // Update provider snapshot on every login
+      // Use raw Discord profile (not `user`, which is stale DB data on returning logins)
+      const avatarUrl = profile.avatar
+        ? `https://cdn.discordapp.com/avatars/${profile.id}/${profile.avatar}.webp`
+        : null;
+
       await pool.query(
         `UPDATE accounts SET
-          provider_name = $1, provider_email = $2, provider_image = $3, updated_at = now()
-         WHERE provider = $4 AND provider_account_id = $5`,
+          provider_name  = $1,
+          provider_image = $2,
+          updated_at     = now()
+         WHERE provider = $3 AND provider_account_id = $4`,
         [
-          user.name ?? null,
-          user.email ?? null,
-          user.image ?? null,
+          (profile.global_name as string) ?? (profile.username as string) ?? null,
+          avatarUrl,
           account.provider,
           account.providerAccountId,
         ]
