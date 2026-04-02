@@ -63,8 +63,6 @@ async fn main() {
     let pulsoid_oauth = PulsoidOAuthConfig::from_env();
     let token_encryption = TokenEncryption::from_env();
 
-    db::migrate_legacy_pulsoid_tokens(&pool, &token_encryption).await;
-
     let worker_manager = WorkerManager::new(
         pool.clone(),
         redis_conn.clone(),
