@@ -32,6 +32,13 @@ export function PulsoidToken({
     queryKey: ["pulsoid-token", userId],
     queryFn: () => getPulsoidToken(userId),
     refetchOnWindowFocus: false,
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      if (data && !data.last_connected_at && !data.last_error) {
+        return 2000;
+      }
+      return false;
+    },
   });
 
   const connectMutation = useMutation({
