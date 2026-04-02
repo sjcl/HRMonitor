@@ -197,7 +197,7 @@ async fn try_refresh(
         "UPDATE pulsoid_connections
          SET access_token = $1, refresh_token = $2, key_version = $3,
              token_expires_at = now() + make_interval(secs => $4), last_error = NULL
-         WHERE user_id = $5",
+         WHERE user_id = $5 AND source = 'oauth'",
     )
     .bind(&enc_access)
     .bind(&enc_refresh)
