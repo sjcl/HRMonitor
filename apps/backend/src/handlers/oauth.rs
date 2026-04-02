@@ -134,13 +134,14 @@ pub async fn callback(
         }
     };
 
-    // 2. Atomically consume the ticket
-    let ticket: Option<(String, String, String)> = match sqlx::query_as(
+    // 2. Atomically consume the ticket (only if owned by current session user)
+    let ticket: Option<(String,)> = match sqlx::query_as(
         "UPDATE connect_requests SET used_at = now()
-         WHERE state = $1 AND used_at IS NULL AND expires_at > now() AND provider = 'pulsoid'
-         RETURNING user_id, return_to, provider",
+         WHERE state = $1 AND user_id = $2 AND used_at IS NULL AND expires_at > now() AND provider = 'pulsoid'
+         RETURNING return_to",
     )
     .bind(&oauth_state)
+    .bind(&auth_user.id)
     .fetch_optional(&state.db)
     .await
     {
@@ -151,7 +152,7 @@ pub async fn callback(
         }
     };
 
-    let (user_id, return_to_str, _provider) = match ticket {
+    let (return_to_str,) = match ticket {
         Some(t) => t,
         None => {
             tracing::warn!("Callback with invalid/expired/used state");
@@ -159,17 +160,8 @@ pub async fn callback(
         }
     };
 
+    let user_id = &auth_user.id;
     let return_to = ReturnTo::from_str(&return_to_str).as_str();
-
-    // Verify the authenticated user matches the ticket owner
-    if auth_user.id != user_id {
-        tracing::warn!(
-            session_user = %auth_user.id,
-            ticket_user = %user_id,
-            "OAuth callback session mismatch"
-        );
-        return Redirect::to(&format!("{return_to}?pulsoid=session_mismatch")).into_response();
-    }
 
     // 3. Error from Pulsoid (user denied)
     if params.error.is_some() {
