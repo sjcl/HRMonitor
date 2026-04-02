@@ -9,9 +9,9 @@ COPY migrations ./migrations
 
 RUN cargo build --release
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
-RUN apt-get update && apt-get install -y libssl3 libpq5 ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y libssl3t64 libpq5 ca-certificates && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/release/hrmonitor_backend /usr/local/bin/hrmonitor_backend
 

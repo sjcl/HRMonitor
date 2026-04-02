@@ -1,6 +1,11 @@
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
+// --- Constants ---
+
+pub const SOURCE_OAUTH: &str = "oauth";
+pub const SOURCE_MANUAL: &str = "manual";
+
 // --- DB rows ---
 
 #[derive(Debug, Clone, FromRow)]
@@ -9,11 +14,21 @@ pub struct UserRow {
     pub display_name: String,
     pub timezone: String,
     pub avatar_url: Option<String>,
-    pub pulsoid_access_token: Option<String>,
-    pub pulsoid_last_connected_at: Option<i64>,
-    pub pulsoid_last_error: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct PulsoidConnectionRow {
+    pub id: String,
+    pub user_id: String,
+    pub source: String,
+    pub access_token: Vec<u8>,
+    pub refresh_token: Option<Vec<u8>>,
+    pub key_version: i32,
+    pub token_expires_at: Option<i64>,
+    pub last_connected_at: Option<i64>,
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, FromRow, Serialize)]
@@ -58,11 +73,6 @@ pub struct UpdateUserRequest {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct SetPulsoidTokenRequest {
-    pub access_token: String,
-}
-
-#[derive(Debug, Deserialize)]
 pub struct HeartRateQuery {
     pub period: String,
 }
@@ -91,8 +101,14 @@ pub struct UserListItem {
 
 #[derive(Debug, Serialize)]
 pub struct PulsoidTokenResponse {
+    pub source: String,
     pub last_connected_at: Option<i64>,
     pub last_error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetManualTokenRequest {
+    pub access_token: String,
 }
 
 #[derive(Debug, FromRow, Serialize)]

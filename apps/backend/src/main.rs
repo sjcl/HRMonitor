@@ -4,6 +4,8 @@ mod db;
 mod error;
 mod handlers;
 mod models;
+mod pulsoid_oauth;
+mod token_encryption;
 mod worker;
 mod worker_manager;
 
@@ -16,6 +18,8 @@ use tower_http::cors::CorsLayer;
 
 use auth::AuthConfig;
 use broadcast::LatestHeartRateUpdate;
+use pulsoid_oauth::PulsoidOAuthConfig;
+use token_encryption::TokenEncryption;
 use worker_manager::WorkerManager;
 
 pub struct AppState {
@@ -24,6 +28,8 @@ pub struct AppState {
     pub worker_manager: Arc<WorkerManager>,
     pub hr_broadcast: tokio_broadcast::Sender<LatestHeartRateUpdate>,
     pub auth_config: AuthConfig,
+    pub pulsoid_oauth: PulsoidOAuthConfig,
+    pub token_encryption: TokenEncryption,
 }
 
 #[tokio::main]
@@ -54,7 +60,14 @@ async fn main() {
 
     let (hr_tx, _) = tokio_broadcast::channel::<LatestHeartRateUpdate>(256);
 
-    let worker_manager = WorkerManager::new(pool.clone(), redis_conn.clone(), hr_tx.clone());
+    let pulsoid_oauth = PulsoidOAuthConfig::from_env();
+    let token_encryption = TokenEncryption::from_env();
+
+    let worker_manager = WorkerManager::new(
+        pool.clone(),
+        redis_conn.clone(),
+        hr_tx.clone(),
+    );
     worker_manager.start_all_active().await;
 
     let auth_config = AuthConfig::default();
@@ -70,6 +83,8 @@ async fn main() {
         worker_manager,
         hr_broadcast: hr_tx,
         auth_config,
+        pulsoid_oauth,
+        token_encryption,
     });
 
     // Spawn session cleanup task (runs every hour)
@@ -91,11 +106,27 @@ async fn main() {
                 }
                 Err(e) => tracing::error!("Session cleanup failed: {e}"),
             }
+            // Clean up expired connect requests
+            match sqlx::query("DELETE FROM connect_requests WHERE expires_at < now() - INTERVAL '1 hour'")
+                .execute(&cleanup_pool)
+                .await
+            {
+                Ok(result) => {
+                    if result.rows_affected() > 0 {
+                        tracing::info!(
+                            count = result.rows_affected(),
+                            "Cleaned up expired connect requests"
+                        );
+                    }
+                }
+                Err(e) => tracing::error!("Connect request cleanup failed: {e}"),
+            }
         }
     });
 
     // Public routes (no auth required)
-    let public_routes = Router::new().route("/healthz", get(|| async { "ok" }));
+    let public_routes = Router::new()
+        .route("/healthz", get(|| async { "ok" }));
 
     // Protected routes (auth required)
     let protected_routes = Router::new()
@@ -107,8 +138,16 @@ async fn main() {
         .route(
             "/api/users/{id}/pulsoid-token",
             get(handlers::tokens::get_pulsoid_token)
-                .put(handlers::tokens::set_pulsoid_token)
+                .put(handlers::tokens::set_manual_pulsoid_token)
                 .delete(handlers::tokens::delete_pulsoid_token),
+        )
+        .route(
+            "/api/oauth/pulsoid/connect",
+            axum::routing::post(handlers::oauth::create_connect),
+        )
+        .route(
+            "/api/oauth/pulsoid/connect/{request_id}",
+            get(handlers::oauth::redirect_to_pulsoid),
         )
         .route(
             "/api/users/{id}/heart-rates/minute-stats",
@@ -135,6 +174,10 @@ async fn main() {
             get(handlers::heart_rates::latest_heart_rate),
         )
         .route("/api/ws/heart-rates", get(handlers::ws::heart_rate_ws))
+        .route(
+            "/api/oauth/pulsoid/callback",
+            get(handlers::oauth::callback),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_auth,

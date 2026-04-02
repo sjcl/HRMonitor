@@ -10,6 +10,14 @@ use crate::broadcast::LatestHeartRateUpdate;
 use crate::error::AppError;
 use crate::models::{UpdateUserRequest, User, UserListItem, UserRow};
 
+const SELECT_USER_ROW: &str =
+    "SELECT u.id, u.display_name, u.timezone,
+            a.provider_image as avatar_url,
+            EXTRACT(EPOCH FROM u.created_at)::BIGINT as created_at,
+            EXTRACT(EPOCH FROM u.updated_at)::BIGINT as updated_at
+     FROM users u
+     LEFT JOIN accounts a ON a.user_id = u.id AND a.provider = 'discord'";
+
 #[derive(Debug, sqlx::FromRow)]
 struct UserListRow {
     id: String,
@@ -28,7 +36,7 @@ pub async fn list_users(
             u.display_name,
             a.provider_image as avatar_url,
             EXTRACT(EPOCH FROM u.created_at)::BIGINT as created_at,
-            (u.pulsoid_access_token IS NOT NULL) as has_pulsoid_token
+            EXISTS (SELECT 1 FROM pulsoid_connections WHERE user_id = u.id) as has_pulsoid_token
         FROM users u
         LEFT JOIN accounts a ON a.user_id = u.id AND a.provider = 'discord'
         ORDER BY u.created_at DESC",
@@ -122,22 +130,12 @@ pub async fn get_user(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<User>, AppError> {
-    let row: UserRow = sqlx::query_as(
-        "SELECT u.id, u.display_name, u.timezone,
-                a.provider_image as avatar_url,
-                u.pulsoid_access_token,
-                EXTRACT(EPOCH FROM u.pulsoid_last_connected_at)::BIGINT as pulsoid_last_connected_at,
-                u.pulsoid_last_error,
-                EXTRACT(EPOCH FROM u.created_at)::BIGINT as created_at,
-                EXTRACT(EPOCH FROM u.updated_at)::BIGINT as updated_at
-         FROM users u
-         LEFT JOIN accounts a ON a.user_id = u.id AND a.provider = 'discord'
-         WHERE u.id = $1",
-    )
-    .bind(&id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| AppError::NotFound("User not found".into()))?;
+    let query = format!("{SELECT_USER_ROW} WHERE u.id = $1");
+    let row: UserRow = sqlx::query_as(&query)
+        .bind(&id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or_else(|| AppError::NotFound("User not found".into()))?;
 
     Ok(Json(User::from(row)))
 }
@@ -172,21 +170,11 @@ pub async fn update_user(
         return Err(AppError::NotFound("User not found".into()));
     }
 
-    let row: UserRow = sqlx::query_as(
-        "SELECT u.id, u.display_name, u.timezone,
-                a.provider_image as avatar_url,
-                u.pulsoid_access_token,
-                EXTRACT(EPOCH FROM u.pulsoid_last_connected_at)::BIGINT as pulsoid_last_connected_at,
-                u.pulsoid_last_error,
-                EXTRACT(EPOCH FROM u.created_at)::BIGINT as created_at,
-                EXTRACT(EPOCH FROM u.updated_at)::BIGINT as updated_at
-         FROM users u
-         LEFT JOIN accounts a ON a.user_id = u.id AND a.provider = 'discord'
-         WHERE u.id = $1",
-    )
-    .bind(&id)
-    .fetch_one(&state.db)
-    .await?;
+    let query = format!("{SELECT_USER_ROW} WHERE u.id = $1");
+    let row: UserRow = sqlx::query_as(&query)
+        .bind(&id)
+        .fetch_one(&state.db)
+        .await?;
 
     Ok(Json(User::from(row)))
 }
