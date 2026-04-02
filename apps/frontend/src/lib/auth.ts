@@ -1,5 +1,6 @@
 import NextAuth from "next-auth";
 import Discord from "next-auth/providers/discord";
+import type { DiscordProfile } from "@auth/core/providers/discord";
 import { cookies } from "next/headers";
 import { Pool } from "pg";
 import type {
@@ -10,6 +11,14 @@ import type {
 } from "@auth/core/adapters";
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+
+function extractDiscordProfile(profile: DiscordProfile) {
+  const avatarUrl = profile.avatar
+    ? `https://cdn.discordapp.com/avatars/${profile.id}/${profile.avatar}.webp`
+    : null;
+  const name = profile.global_name ?? profile.username ?? null;
+  return { avatarUrl, name };
+}
 
 function toAdapterUser(row: Record<string, unknown>): AdapterUser {
   return {
@@ -174,14 +183,32 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     }),
   ],
   session: { strategy: "database" },
+  events: {
+    // First login: signIn callback runs BEFORE linkAccount, so the UPDATE
+    // in signIn hits 0 rows. This event fires AFTER linkAccount, ensuring
+    // provider_name/provider_image are populated on initial account creation.
+    async linkAccount({ account, profile }) {
+      if (account.provider !== "discord" || !profile) return;
+      const discordProfile = profile as DiscordProfile;
+      const p = extractDiscordProfile(discordProfile);
+      await pool.query(
+        `UPDATE accounts SET
+          provider_name  = $1,
+          provider_image = $2,
+          updated_at     = now()
+         WHERE provider = $3 AND provider_account_id = $4`,
+        [p.name, p.avatarUrl, account.provider, account.providerAccountId]
+      );
+    },
+  },
   callbacks: {
+    // Returning logins: account already exists, so this UPDATE succeeds and
+    // picks up any Discord profile changes (avatar, display name) since last login.
     async signIn({ account, profile }) {
-      if (!account || !profile) return true;
+      if (!account || !profile || account.provider !== "discord") return true;
 
-      // Use raw Discord profile (not `user`, which is stale DB data on returning logins)
-      const avatarUrl = profile.avatar
-        ? `https://cdn.discordapp.com/avatars/${profile.id}/${profile.avatar}.webp`
-        : null;
+      const discordProfile = profile as DiscordProfile;
+      const p = extractDiscordProfile(discordProfile);
 
       await pool.query(
         `UPDATE accounts SET
@@ -189,12 +216,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
           provider_image = $2,
           updated_at     = now()
          WHERE provider = $3 AND provider_account_id = $4`,
-        [
-          (profile.global_name as string) ?? (profile.username as string) ?? null,
-          avatarUrl,
-          account.provider,
-          account.providerAccountId,
-        ]
+        [p.name, p.avatarUrl, account.provider, account.providerAccountId]
       );
 
       return true;
