@@ -8,7 +8,7 @@
     "start": "next start"
   },
   "dependencies": {
-    "@tanstack/react-query": "5.96.1",
+    "@tanstack/react-query": "5.96.2",
     "next": "16.2.2",
     "next-auth": "5.0.0-beta.30",
     "pg": "8.20.0",
