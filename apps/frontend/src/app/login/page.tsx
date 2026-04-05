@@ -11,7 +11,7 @@ export default function LoginPage() {
         onClick={() => {
           const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
           document.cookie = `browser_tz=${tz}; path=/; max-age=300; SameSite=Lax`;
-          signIn("discord", { redirectTo: "/users" });
+          signIn("discord", { redirectTo: "/dashboard" });
         }}
         className="flex items-center gap-3 bg-[#5865F2] hover:bg-[#4752C4] px-6 py-3 rounded-lg text-white font-medium transition-colors"
       >
