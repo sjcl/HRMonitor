@@ -5,7 +5,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { getUser, updateUser } from "@/lib/api";
 import { PulsoidToken } from "@/components/pulsoid-token";
 import { TimezoneSelect } from "@/components/timezone-select";
-import { redirect, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { useState, useEffect, Suspense } from "react";
 
 export default function SettingsPage() {
@@ -52,7 +52,6 @@ function SettingsContent() {
     user && (editName !== user.display_name || editTimezone !== user.timezone);
 
   if (status === "loading") return null;
-  if (status === "unauthenticated") redirect("/login");
   if (!userId) return null;
 
   return (
