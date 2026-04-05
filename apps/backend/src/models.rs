@@ -14,6 +14,7 @@ pub struct UserRow {
     pub display_name: String,
     pub timezone: String,
     pub avatar_url: Option<String>,
+    pub heart_rate_visibility: String,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -37,6 +38,7 @@ pub struct User {
     pub display_name: String,
     pub timezone: String,
     pub avatar_url: Option<String>,
+    pub heart_rate_visibility: String,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -48,6 +50,7 @@ impl From<UserRow> for User {
             display_name: r.display_name,
             timezone: r.timezone,
             avatar_url: r.avatar_url,
+            heart_rate_visibility: r.heart_rate_visibility,
             created_at: r.created_at,
             updated_at: r.updated_at,
         }
@@ -70,6 +73,7 @@ pub struct HeartRateRecord {
 pub struct UpdateUserRequest {
     pub display_name: Option<String>,
     pub timezone: Option<String>,
+    pub heart_rate_visibility: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

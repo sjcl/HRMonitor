@@ -5,7 +5,7 @@ use redis::AsyncCommands;
 use std::sync::Arc;
 
 use crate::AppState;
-use crate::auth::{AuthenticatedUser, ensure_self};
+use crate::auth::{AuthenticatedUser, ensure_can_view_user, ensure_self};
 use crate::broadcast::LatestHeartRateUpdate;
 use crate::error::AppError;
 use crate::models::{UpdateUserRequest, User, UserListItem, UserRow};
@@ -13,10 +13,13 @@ use crate::models::{UpdateUserRequest, User, UserListItem, UserRow};
 const SELECT_USER_ROW: &str =
     "SELECT u.id, u.display_name, u.timezone,
             a.provider_image as avatar_url,
+            u.heart_rate_visibility,
             EXTRACT(EPOCH FROM u.created_at)::BIGINT as created_at,
             EXTRACT(EPOCH FROM u.updated_at)::BIGINT as updated_at
      FROM users u
      LEFT JOIN accounts a ON a.user_id = u.id AND a.provider = 'discord'";
+
+const VALID_VISIBILITIES: &[&str] = &["public", "group", "private"];
 
 #[derive(Debug, sqlx::FromRow)]
 struct UserListRow {
@@ -29,6 +32,7 @@ struct UserListRow {
 
 pub async fn list_users(
     State(state): State<Arc<AppState>>,
+    Extension(auth_user): Extension<AuthenticatedUser>,
 ) -> Result<Json<Vec<UserListItem>>, AppError> {
     let rows: Vec<UserListRow> = sqlx::query_as(
         "SELECT
@@ -39,8 +43,10 @@ pub async fn list_users(
             EXISTS (SELECT 1 FROM pulsoid_connections WHERE user_id = u.id) as has_pulsoid_token
         FROM users u
         LEFT JOIN accounts a ON a.user_id = u.id AND a.provider = 'discord'
+        WHERE u.heart_rate_visibility = 'public' OR u.id = $1
         ORDER BY u.created_at DESC",
     )
+    .bind(&auth_user.id)
     .fetch_all(&state.db)
     .await?;
 
@@ -129,7 +135,10 @@ pub async fn list_users(
 pub async fn get_user(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Extension(auth_user): Extension<AuthenticatedUser>,
 ) -> Result<Json<User>, AppError> {
+    ensure_can_view_user(&state.db, &auth_user, &id).await?;
+
     let query = format!("{SELECT_USER_ROW} WHERE u.id = $1");
     let row: UserRow = sqlx::query_as(&query)
         .bind(&id)
@@ -154,13 +163,22 @@ pub async fn update_user(
         return Err(AppError::BadRequest("Display name cannot be empty".into()));
     }
 
+    if let Some(ref vis) = body.heart_rate_visibility
+        && !VALID_VISIBILITIES.contains(&vis.as_str())
+    {
+        return Err(AppError::BadRequest(
+            "heart_rate_visibility must be one of: public, group, private".into(),
+        ));
+    }
+
     let now = now_unix();
 
     let result = sqlx::query(
-        "UPDATE users SET display_name = COALESCE($1, display_name), timezone = COALESCE($2, timezone), updated_at = to_timestamp($3) WHERE id = $4"
+        "UPDATE users SET display_name = COALESCE($1, display_name), timezone = COALESCE($2, timezone), heart_rate_visibility = COALESCE($3, heart_rate_visibility), updated_at = to_timestamp($4) WHERE id = $5"
     )
         .bind(&body.display_name)
         .bind(&body.timezone)
+        .bind(&body.heart_rate_visibility)
         .bind(now)
         .bind(&id)
         .execute(&state.db)

@@ -9,11 +9,14 @@ export interface UserListItem {
   created_at: number;
 }
 
+export type HeartRateVisibility = "public" | "group" | "private";
+
 export interface User {
   id: string;
   display_name: string;
   avatar_url: string | null;
   timezone: string;
+  heart_rate_visibility: HeartRateVisibility;
   created_at: number;
   updated_at: number;
 }
@@ -31,15 +34,22 @@ export interface HeartRateRecord {
 
 // --- API functions ---
 
+export class ApiError extends Error {
+  constructor(public status: number, message: string) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init);
   if (res.status === 401) {
     window.location.href = "/login";
-    throw new Error("Unauthorized");
+    throw new ApiError(401, "Unauthorized");
   }
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `HTTP ${res.status}`);
+    throw new ApiError(res.status, body.error || `HTTP ${res.status}`);
   }
   if (res.status === 204) return undefined as T;
   return res.json();
@@ -53,7 +63,14 @@ export function getUser(id: string) {
   return fetchJson<User>(`/api/users/${id}`);
 }
 
-export function updateUser(id: string, data: { display_name?: string; timezone?: string }) {
+export function updateUser(
+  id: string,
+  data: {
+    display_name?: string;
+    timezone?: string;
+    heart_rate_visibility?: HeartRateVisibility;
+  },
+) {
   return fetchJson<User>(`/api/users/${id}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },

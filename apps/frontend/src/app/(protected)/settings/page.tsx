@@ -2,7 +2,7 @@
 
 import { useSession } from "next-auth/react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { getUser, updateUser } from "@/lib/api";
+import { getUser, updateUser, type HeartRateVisibility } from "@/lib/api";
 import { PulsoidToken } from "@/components/pulsoid-token";
 import { TimezoneSelect } from "@/components/timezone-select";
 import { useSearchParams } from "next/navigation";
@@ -31,17 +31,23 @@ function SettingsContent() {
 
   const [editName, setEditName] = useState("");
   const [editTimezone, setEditTimezone] = useState("");
+  const [editVisibility, setEditVisibility] =
+    useState<HeartRateVisibility>("group");
 
   useEffect(() => {
     if (user) {
       setEditName(user.display_name);
       setEditTimezone(user.timezone);
+      setEditVisibility(user.heart_rate_visibility);
     }
   }, [user]);
 
   const updateMutation = useMutation({
-    mutationFn: (data: { display_name?: string; timezone?: string }) =>
-      updateUser(userId!, data),
+    mutationFn: (data: {
+      display_name?: string;
+      timezone?: string;
+      heart_rate_visibility?: HeartRateVisibility;
+    }) => updateUser(userId!, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["user", userId] });
       queryClient.invalidateQueries({ queryKey: ["users"] });
@@ -49,7 +55,10 @@ function SettingsContent() {
   });
 
   const hasChanges =
-    user && (editName !== user.display_name || editTimezone !== user.timezone);
+    user &&
+    (editName !== user.display_name ||
+      editTimezone !== user.timezone ||
+      editVisibility !== user.heart_rate_visibility);
 
   if (status === "loading") return null;
   if (!userId) return null;
@@ -78,12 +87,29 @@ function SettingsContent() {
               className="w-full"
             />
           </div>
+          <div>
+            <label className="block text-sm text-gray-400 mb-1">
+              心拍データの公開範囲
+            </label>
+            <select
+              value={editVisibility}
+              onChange={(e) =>
+                setEditVisibility(e.target.value as HeartRateVisibility)
+              }
+              className="bg-gray-800 border border-gray-700 rounded px-3 py-2 w-full"
+            >
+              <option value="public">全員に公開 (public)</option>
+              <option value="group">グループに公開 (group)</option>
+              <option value="private">非公開 (private)</option>
+            </select>
+          </div>
           {hasChanges && (
             <button
               onClick={() =>
                 updateMutation.mutate({
                   display_name: editName.trim(),
                   timezone: editTimezone,
+                  heart_rate_visibility: editVisibility,
                 })
               }
               disabled={updateMutation.isPending || !editName.trim()}

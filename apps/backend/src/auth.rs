@@ -79,6 +79,35 @@ pub fn ensure_self(auth_user: &AuthenticatedUser, target_id: &str) -> Result<(),
     Ok(())
 }
 
+/// Check whether `auth_user` is allowed to view `target_id`'s heart rate data
+/// based on that user's `heart_rate_visibility` setting.
+///
+/// - `public`: any authenticated user may view
+/// - `group` / `private`: only the user themselves (group is reserved for a
+///   future group-membership feature; for now it behaves as private)
+///
+/// Returns `NotFound` if the target user does not exist, `Forbidden` if not
+/// allowed.
+pub async fn ensure_can_view_user(
+    db: &sqlx::PgPool,
+    auth_user: &AuthenticatedUser,
+    target_id: &str,
+) -> Result<(), AppError> {
+    if auth_user.id == target_id {
+        return Ok(());
+    }
+    let vis: Option<String> =
+        sqlx::query_scalar("SELECT heart_rate_visibility FROM users WHERE id = $1")
+            .bind(target_id)
+            .fetch_optional(db)
+            .await?;
+    match vis.as_deref() {
+        Some("public") => Ok(()),
+        Some(_) => Err(AppError::Forbidden("Not allowed to view this user".into())),
+        None => Err(AppError::NotFound("User not found".into())),
+    }
+}
+
 fn parse_cookie<'a>(header: &'a str, name: &str) -> Option<&'a str> {
     for pair in header.split(';') {
         let pair = pair.trim();

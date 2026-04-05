@@ -1,3 +1,4 @@
+use axum::Extension;
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{State, WebSocketUpgrade};
 use axum::response::IntoResponse;
@@ -8,6 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::AppState;
+use crate::auth::{AuthenticatedUser, ensure_can_view_user};
 use crate::broadcast::LatestHeartRateUpdate;
 use crate::models::WsClientMessage;
 
@@ -25,11 +27,12 @@ enum WsServerMessage {
 pub async fn heart_rate_ws(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
+    Extension(auth_user): Extension<AuthenticatedUser>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_ws(socket, state))
+    ws.on_upgrade(move |socket| handle_ws(socket, state, auth_user))
 }
 
-async fn handle_ws(socket: WebSocket, state: Arc<AppState>) {
+async fn handle_ws(socket: WebSocket, state: Arc<AppState>, auth_user: AuthenticatedUser) {
     let (mut sender, mut receiver) = socket.split();
     let mut subscribed: HashSet<String> = HashSet::new();
     let mut broadcast_rx = state.hr_broadcast.subscribe();
@@ -42,9 +45,20 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>) {
                     Some(Ok(Message::Text(text))) => {
                         match serde_json::from_str::<WsClientMessage>(&text) {
                             Ok(WsClientMessage::Subscribe { user_ids }) => {
-                                subscribed.extend(user_ids.iter().cloned());
+                                // Filter by visibility: only allow subscribing to
+                                // users the authenticated user can view.
+                                let mut allowed: Vec<String> = Vec::with_capacity(user_ids.len());
+                                for uid in user_ids {
+                                    if ensure_can_view_user(&state.db, &auth_user, &uid)
+                                        .await
+                                        .is_ok()
+                                    {
+                                        allowed.push(uid);
+                                    }
+                                }
+                                subscribed.extend(allowed.iter().cloned());
                                 // Send snapshot from Redis
-                                let snapshot = read_snapshot(&state, &user_ids).await;
+                                let snapshot = read_snapshot(&state, &allowed).await;
                                 let msg = WsServerMessage::Snapshot { data: snapshot };
                                 if let Ok(json) = serde_json::to_string(&msg)
                                     && sender.send(Message::Text(json.into())).await.is_err()

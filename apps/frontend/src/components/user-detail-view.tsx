@@ -1,22 +1,50 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { getUser } from "@/lib/api";
+import { ApiError, getUser } from "@/lib/api";
 import { HeartRateChart } from "@/components/heart-rate-chart";
 import { DailyStats } from "@/components/daily-stats";
 import { useHeartRateWs } from "@/lib/ws";
 import { useMemo } from "react";
 import { UserAvatar } from "@/components/user-avatar";
 
+const EMPTY_USER_IDS: string[] = [];
+
 export function UserDetailView({ userId }: { userId: string }) {
-  const { data: user } = useQuery({
+  const { data: user, status, error } = useQuery({
     queryKey: ["user", userId],
     queryFn: () => getUser(userId),
+    retry: false,
   });
 
-  const userIds = useMemo(() => [userId], [userId]);
+  // Only subscribe to WS once the user fetch has succeeded — otherwise a
+  // forbidden user detail page would still trigger WS subscription and
+  // other API calls.
+  const authorized = status === "success";
+  const userIds = useMemo(
+    () => (authorized ? [userId] : EMPTY_USER_IDS),
+    [authorized, userId],
+  );
   const { data: liveHrData, reconnectCount } = useHeartRateWs(userIds);
-  const latestHr = liveHrData.get(userId) ?? null;
+  const latestHr = authorized ? liveHrData.get(userId) ?? null : null;
+
+  if (status === "error") {
+    const forbidden = error instanceof ApiError && error.status === 403;
+    return (
+      <div>
+        <h1 className="text-2xl font-bold mb-4">
+          {forbidden ? "非公開" : "エラー"}
+        </h1>
+        <p className="text-gray-400">
+          {forbidden
+            ? "このユーザーの心拍データは公開されていません。"
+            : error instanceof Error
+              ? error.message
+              : "ユーザー情報を取得できませんでした。"}
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div>
@@ -40,10 +68,12 @@ export function UserDetailView({ userId }: { userId: string }) {
         )}
       </div>
 
-      <section className="mb-8">
-        <h2 className="text-lg font-semibold mb-3">Heart Rate</h2>
-        <HeartRateChart userId={userId} latestHr={latestHr} wsReconnectCount={reconnectCount} />
-      </section>
+      {authorized && (
+        <section className="mb-8">
+          <h2 className="text-lg font-semibold mb-3">Heart Rate</h2>
+          <HeartRateChart userId={userId} latestHr={latestHr} wsReconnectCount={reconnectCount} />
+        </section>
+      )}
 
       {user && (
         <section className="mb-8">

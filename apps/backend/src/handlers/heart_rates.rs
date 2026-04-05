@@ -1,3 +1,4 @@
+use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use chrono::NaiveDate;
@@ -5,6 +6,7 @@ use redis::AsyncCommands;
 use std::sync::Arc;
 
 use crate::AppState;
+use crate::auth::{AuthenticatedUser, ensure_can_view_user};
 use crate::broadcast::LatestHeartRateUpdate;
 use crate::error::AppError;
 use crate::models::{
@@ -46,6 +48,7 @@ fn parse_period(s: &str) -> Result<(i64, i64), AppError> {
 pub async fn list_heart_rates(
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<String>,
+    Extension(auth_user): Extension<AuthenticatedUser>,
     Query(params): Query<HeartRateQuery>,
 ) -> Result<Json<Vec<HeartRateResponse>>, AppError> {
     let (seconds, limit) = parse_period(&params.period)?;
@@ -53,6 +56,7 @@ pub async fn list_heart_rates(
     let from = now - seconds;
 
     check_user_exists(&state.db, &user_id).await?;
+    ensure_can_view_user(&state.db, &auth_user, &user_id).await?;
 
     let records: Vec<HeartRateResponse> = sqlx::query_as(
         "SELECT bpm, EXTRACT(EPOCH FROM recorded_at)::BIGINT as timestamp
@@ -73,10 +77,12 @@ pub async fn list_heart_rates(
 pub async fn heart_rates_by_date(
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<String>,
+    Extension(auth_user): Extension<AuthenticatedUser>,
     Query(params): Query<HeartRateByDateQuery>,
 ) -> Result<Json<Vec<HeartRateResponse>>, AppError> {
     parse_date(&params.date)?;
     check_user_exists(&state.db, &user_id).await?;
+    ensure_can_view_user(&state.db, &auth_user, &user_id).await?;
 
     let records: Vec<HeartRateResponse> = sqlx::query_as(
         "WITH tz AS (SELECT timezone FROM users WHERE id = $1)
@@ -98,11 +104,13 @@ pub async fn heart_rates_by_date(
 pub async fn daily_stats(
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<String>,
+    Extension(auth_user): Extension<AuthenticatedUser>,
     Query(params): Query<DailyStatsQuery>,
 ) -> Result<Json<Option<DailyStatsResponse>>, AppError> {
     parse_date(&params.date)?;
 
     check_user_exists(&state.db, &user_id).await?;
+    ensure_can_view_user(&state.db, &auth_user, &user_id).await?;
 
     let record: Option<DailyStatsResponse> = sqlx::query_as(
         "WITH tz AS (SELECT timezone FROM users WHERE id = $1)
@@ -130,6 +138,7 @@ pub async fn daily_stats(
 pub async fn minute_stats(
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<String>,
+    Extension(auth_user): Extension<AuthenticatedUser>,
     Query(params): Query<HeartRateQuery>,
 ) -> Result<Json<Vec<MinuteStatsResponse>>, AppError> {
     let (seconds, _) = parse_period(&params.period)?;
@@ -137,6 +146,7 @@ pub async fn minute_stats(
     let from = now - seconds;
 
     check_user_exists(&state.db, &user_id).await?;
+    ensure_can_view_user(&state.db, &auth_user, &user_id).await?;
 
     let records: Vec<MinuteStatsResponse> = sqlx::query_as(
         "SELECT
@@ -161,10 +171,12 @@ pub async fn minute_stats(
 pub async fn minute_stats_by_date(
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<String>,
+    Extension(auth_user): Extension<AuthenticatedUser>,
     Query(params): Query<HeartRateByDateQuery>,
 ) -> Result<Json<Vec<MinuteStatsResponse>>, AppError> {
     parse_date(&params.date)?;
     check_user_exists(&state.db, &user_id).await?;
+    ensure_can_view_user(&state.db, &auth_user, &user_id).await?;
 
     let records: Vec<MinuteStatsResponse> = sqlx::query_as(
         "WITH tz AS (SELECT timezone FROM users WHERE id = $1)
@@ -191,7 +203,11 @@ pub async fn minute_stats_by_date(
 pub async fn latest_heart_rate(
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<String>,
+    Extension(auth_user): Extension<AuthenticatedUser>,
 ) -> Result<Json<HeartRateResponse>, AppError> {
+    check_user_exists(&state.db, &user_id).await?;
+    ensure_can_view_user(&state.db, &auth_user, &user_id).await?;
+
     // Try Redis first
     {
         let mut redis = state.redis.lock().await;
