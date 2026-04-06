@@ -106,7 +106,7 @@ export default function GroupDetailPage() {
     isOwner || group.invite_policy === "group+";
 
   return (
-    <div className="max-w-2xl">
+    <div>
       {/* Header */}
       <div className="flex items-center justify-between mb-6">
         <div>
