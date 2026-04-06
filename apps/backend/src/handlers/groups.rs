@@ -431,7 +431,7 @@ pub async fn create_invite(
     .bind(&group_id)
     .bind(&token_hash)
     .bind(&auth_user.id)
-    .bind(expires_in_hours as f64)
+    .bind(expires_in_hours as i32)
     .bind(body.max_uses)
     .bind(&body.target_user_id)
     .fetch_one(&state.db)
