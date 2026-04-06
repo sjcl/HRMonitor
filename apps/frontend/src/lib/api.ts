@@ -9,7 +9,7 @@ export interface UserListItem {
   created_at: number;
 }
 
-export type HeartRateVisibility = "public" | "group" | "private";
+export type HeartRateVisibility = "group_default" | "private";
 
 export interface User {
   id: string;

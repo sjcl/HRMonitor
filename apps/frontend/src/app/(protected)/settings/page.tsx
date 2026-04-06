@@ -32,7 +32,7 @@ function SettingsContent() {
   const [editName, setEditName] = useState("");
   const [editTimezone, setEditTimezone] = useState("");
   const [editVisibility, setEditVisibility] =
-    useState<HeartRateVisibility>("group");
+    useState<HeartRateVisibility>("group_default");
 
   useEffect(() => {
     if (user) {
@@ -98,10 +98,12 @@ function SettingsContent() {
               }
               className="bg-gray-800 border border-gray-700 rounded px-3 py-2 w-full"
             >
-              <option value="public">全員に公開 (public)</option>
-              <option value="group">グループに公開 (group)</option>
-              <option value="private">非公開 (private)</option>
+              <option value="group_default">グループごとの設定に準拠</option>
+              <option value="private">グループごとの設定にかかわらず非公開</option>
             </select>
+            <p className="text-xs text-gray-500 mt-1">
+              「グループごとの設定に準拠」を選択すると、所属するグループの公開設定に従います。「非公開」を選択すると、グループの設定にかかわらず自分だけが閲覧できます。（グループ機能は未実装のため、現在はどちらを選んでも自分のみ閲覧可能です。）
+            </p>
           </div>
           {hasChanges && (
             <button

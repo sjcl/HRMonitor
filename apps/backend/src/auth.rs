@@ -79,12 +79,12 @@ pub fn ensure_self(auth_user: &AuthenticatedUser, target_id: &str) -> Result<(),
     Ok(())
 }
 
-/// Check whether `auth_user` is allowed to view `target_id`'s heart rate data
-/// based on that user's `heart_rate_visibility` setting.
+/// Check whether `auth_user` is allowed to view `target_id`'s heart rate data.
 ///
-/// - `public`: any authenticated user may view
-/// - `group` / `private`: only the user themselves (group is reserved for a
-///   future group-membership feature; for now it behaves as private)
+/// `heart_rate_visibility` controls access:
+/// - `group_default`: follow the group's visibility settings. Since groups
+///   are not yet implemented, this currently denies non-self access.
+/// - `private`: always deny non-self access regardless of group settings.
 ///
 /// Returns `NotFound` if the target user does not exist, `Forbidden` if not
 /// allowed.
@@ -101,8 +101,9 @@ pub async fn ensure_can_view_user(
             .bind(target_id)
             .fetch_optional(db)
             .await?;
+    // TODO: when groups are implemented, allow access for `group_default` users
+    // if auth_user is in the target's group.
     match vis.as_deref() {
-        Some("public") => Ok(()),
         Some(_) => Err(AppError::Forbidden("Not allowed to view this user".into())),
         None => Err(AppError::NotFound("User not found".into())),
     }

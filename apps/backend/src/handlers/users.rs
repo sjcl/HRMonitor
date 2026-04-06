@@ -19,7 +19,7 @@ const SELECT_USER_ROW: &str =
      FROM users u
      LEFT JOIN accounts a ON a.user_id = u.id AND a.provider = 'discord'";
 
-const VALID_VISIBILITIES: &[&str] = &["public", "group", "private"];
+const VALID_VISIBILITIES: &[&str] = &["group_default", "private"];
 
 #[derive(Debug, sqlx::FromRow)]
 struct UserListRow {
@@ -43,7 +43,7 @@ pub async fn list_users(
             EXISTS (SELECT 1 FROM pulsoid_connections WHERE user_id = u.id) as has_pulsoid_token
         FROM users u
         LEFT JOIN accounts a ON a.user_id = u.id AND a.provider = 'discord'
-        WHERE u.heart_rate_visibility = 'public' OR u.id = $1
+        WHERE u.id = $1
         ORDER BY u.created_at DESC",
     )
     .bind(&auth_user.id)
@@ -167,7 +167,7 @@ pub async fn update_user(
         && !VALID_VISIBILITIES.contains(&vis.as_str())
     {
         return Err(AppError::BadRequest(
-            "heart_rate_visibility must be one of: public, group, private".into(),
+            "heart_rate_visibility must be one of: group_default, private".into(),
         ));
     }
 
