@@ -62,6 +62,21 @@ export interface AcceptInviteResponse {
   group_id: string;
 }
 
+export interface GroupHeartRateRecord {
+  user_id: string;
+  bpm: number;
+  timestamp: number;
+}
+
+export interface GroupMinuteStats {
+  user_id: string;
+  timestamp: number;
+  avg_bpm: number;
+  min_bpm: number;
+  max_bpm: number;
+  sample_count: number;
+}
+
 // --- API functions ---
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
@@ -159,4 +174,16 @@ export function acceptInvite(token: string) {
   return fetchJson<AcceptInviteResponse>(`/api/invites/${token}/accept`, {
     method: "POST",
   });
+}
+
+export function getGroupHeartRates(groupId: string, period: string) {
+  return fetchJson<GroupHeartRateRecord[]>(
+    `/api/groups/${groupId}/heart-rates?period=${period}`,
+  );
+}
+
+export function getGroupMinuteStats(groupId: string, period: string) {
+  return fetchJson<GroupMinuteStats[]>(
+    `/api/groups/${groupId}/heart-rates/minute-stats?period=${period}`,
+  );
 }

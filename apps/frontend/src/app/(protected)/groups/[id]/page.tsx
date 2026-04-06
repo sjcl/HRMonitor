@@ -1,5 +1,6 @@
 "use client";
 
+import { useSession } from "next-auth/react";
 import { useParams, useRouter } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -13,11 +14,13 @@ import {
   revokeInvite,
 } from "@/lib/groups-api";
 import { UserAvatar } from "@/components/user-avatar";
+import { GroupHeartRateChart } from "@/components/group-heart-rate-chart";
 import { useGroupHeartRateWs } from "@/lib/ws";
 import { useState } from "react";
 
 export default function GroupDetailPage() {
   const { id } = useParams<{ id: string }>();
+  const { data: session } = useSession();
   const router = useRouter();
   const queryClient = useQueryClient();
 
@@ -26,7 +29,7 @@ export default function GroupDetailPage() {
     queryFn: () => getGroup(id),
   });
 
-  const { data: liveHrData } = useGroupHeartRateWs(id);
+  const { data: liveHrData, reconnectCount } = useGroupHeartRateWs(id);
 
   const { data: invites } = useQuery({
     queryKey: ["group-invites", id],
@@ -200,6 +203,17 @@ export default function GroupDetailPage() {
           </button>
         </div>
       </div>
+
+      {/* Heart Rate Chart */}
+      {session?.user?.id && (
+        <GroupHeartRateChart
+          groupId={id}
+          members={group.members}
+          currentUserId={session.user.id}
+          liveHrData={liveHrData}
+          wsReconnectCount={reconnectCount}
+        />
+      )}
 
       {/* Members */}
       <div className="mb-6">

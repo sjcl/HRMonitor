@@ -222,6 +222,25 @@ pub struct AcceptInviteResponse {
     pub group_id: String,
 }
 
+// --- Group heart rate DTOs ---
+
+#[derive(Debug, FromRow, Serialize)]
+pub struct GroupHeartRateResponse {
+    pub user_id: String,
+    pub bpm: i32,
+    pub timestamp: i64,
+}
+
+#[derive(Debug, FromRow, Serialize)]
+pub struct GroupMinuteStatsResponse {
+    pub user_id: String,
+    pub timestamp: i64,
+    pub avg_bpm: f64,
+    pub min_bpm: i32,
+    pub max_bpm: i32,
+    pub sample_count: i64,
+}
+
 // --- Pulsoid WebSocket message ---
 
 #[derive(Debug, Deserialize)]

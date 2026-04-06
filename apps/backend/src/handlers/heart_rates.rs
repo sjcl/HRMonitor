@@ -9,9 +9,10 @@ use crate::AppState;
 use crate::auth::{AuthenticatedUser, ensure_can_view_user};
 use crate::broadcast::LatestHeartRateUpdate;
 use crate::error::AppError;
+use crate::handlers::groups::ensure_active_member;
 use crate::models::{
-    DailyStatsQuery, DailyStatsResponse, HeartRateByDateQuery, HeartRateQuery, HeartRateResponse,
-    MinuteStatsResponse,
+    DailyStatsQuery, DailyStatsResponse, GroupHeartRateResponse, GroupMinuteStatsResponse,
+    HeartRateByDateQuery, HeartRateQuery, HeartRateResponse, MinuteStatsResponse,
 };
 
 fn parse_date(s: &str) -> Result<NaiveDate, AppError> {
@@ -252,4 +253,73 @@ pub async fn latest_heart_rate(
     }
 
     Ok(Json(record))
+}
+
+pub async fn group_heart_rates(
+    State(state): State<Arc<AppState>>,
+    Path(group_id): Path<String>,
+    Extension(auth_user): Extension<AuthenticatedUser>,
+    Query(params): Query<HeartRateQuery>,
+) -> Result<Json<Vec<GroupHeartRateResponse>>, AppError> {
+    let (seconds, _) = parse_period(&params.period)?;
+    let now = chrono::Utc::now().timestamp();
+    let from = now - seconds;
+
+    ensure_active_member(&state.db, &group_id, &auth_user.id).await?;
+
+    let records: Vec<GroupHeartRateResponse> = sqlx::query_as(
+        "SELECT hr.user_id,
+                hr.bpm,
+                EXTRACT(EPOCH FROM hr.recorded_at)::BIGINT AS timestamp
+         FROM heart_rate_records hr
+         JOIN group_members gm ON gm.user_id = hr.user_id
+         WHERE gm.group_id = $1
+           AND gm.status = 'active'
+           AND (gm.sharing = true OR gm.user_id = $2)
+           AND hr.recorded_at >= to_timestamp($3)
+         ORDER BY hr.recorded_at",
+    )
+    .bind(&group_id)
+    .bind(&auth_user.id)
+    .bind(from)
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(Json(records))
+}
+
+pub async fn group_minute_stats(
+    State(state): State<Arc<AppState>>,
+    Path(group_id): Path<String>,
+    Extension(auth_user): Extension<AuthenticatedUser>,
+    Query(params): Query<HeartRateQuery>,
+) -> Result<Json<Vec<GroupMinuteStatsResponse>>, AppError> {
+    let (seconds, _) = parse_period(&params.period)?;
+    let now = chrono::Utc::now().timestamp();
+    let from = now - seconds;
+
+    ensure_active_member(&state.db, &group_id, &auth_user.id).await?;
+
+    let records: Vec<GroupMinuteStatsResponse> = sqlx::query_as(
+        "SELECT hm.user_id,
+                EXTRACT(EPOCH FROM hm.bucket)::BIGINT AS timestamp,
+                hm.avg_bpm,
+                hm.min_bpm,
+                hm.max_bpm,
+                hm.sample_count
+         FROM heart_rate_1m hm
+         JOIN group_members gm ON gm.user_id = hm.user_id
+         WHERE gm.group_id = $1
+           AND gm.status = 'active'
+           AND (gm.sharing = true OR gm.user_id = $2)
+           AND hm.bucket >= to_timestamp($3)
+         ORDER BY hm.bucket",
+    )
+    .bind(&group_id)
+    .bind(&auth_user.id)
+    .bind(from)
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(Json(records))
 }

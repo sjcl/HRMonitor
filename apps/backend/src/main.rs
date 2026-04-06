@@ -183,6 +183,14 @@ async fn main() {
                 .delete(handlers::groups::delete_group),
         )
         .route(
+            "/api/groups/{id}/heart-rates",
+            get(handlers::heart_rates::group_heart_rates),
+        )
+        .route(
+            "/api/groups/{id}/heart-rates/minute-stats",
+            get(handlers::heart_rates::group_minute_stats),
+        )
+        .route(
             "/api/groups/{id}/members/me",
             axum::routing::patch(handlers::groups::update_my_membership)
                 .delete(handlers::groups::leave_group),
