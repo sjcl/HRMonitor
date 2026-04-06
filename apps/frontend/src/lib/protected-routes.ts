@@ -1,5 +1,6 @@
 export const PROTECTED_ROUTE_PREFIXES = [
-  "/dashboard",
+  "/me",
+  "/groups",
   "/settings",
   "/users",
 ] as const;

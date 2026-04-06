@@ -1,14 +1,12 @@
 use axum::Json;
 use axum::Extension;
 use axum::extract::{Path, State};
-use redis::AsyncCommands;
 use std::sync::Arc;
 
 use crate::AppState;
 use crate::auth::{AuthenticatedUser, ensure_can_view_user, ensure_self};
-use crate::broadcast::LatestHeartRateUpdate;
 use crate::error::AppError;
-use crate::models::{UpdateUserRequest, User, UserListItem, UserRow};
+use crate::models::{UpdateUserRequest, User, UserRow};
 
 const SELECT_USER_ROW: &str =
     "SELECT u.id, u.display_name, u.timezone,
@@ -20,117 +18,6 @@ const SELECT_USER_ROW: &str =
      LEFT JOIN accounts a ON a.user_id = u.id AND a.provider = 'discord'";
 
 const VALID_VISIBILITIES: &[&str] = &["group_default", "private"];
-
-#[derive(Debug, sqlx::FromRow)]
-struct UserListRow {
-    id: String,
-    display_name: String,
-    avatar_url: Option<String>,
-    has_pulsoid_token: bool,
-    created_at: i64,
-}
-
-pub async fn list_users(
-    State(state): State<Arc<AppState>>,
-    Extension(auth_user): Extension<AuthenticatedUser>,
-) -> Result<Json<Vec<UserListItem>>, AppError> {
-    let rows: Vec<UserListRow> = sqlx::query_as(
-        "SELECT
-            u.id,
-            u.display_name,
-            a.provider_image as avatar_url,
-            EXTRACT(EPOCH FROM u.created_at)::BIGINT as created_at,
-            EXISTS (SELECT 1 FROM pulsoid_connections WHERE user_id = u.id) as has_pulsoid_token
-        FROM users u
-        LEFT JOIN accounts a ON a.user_id = u.id AND a.provider = 'discord'
-        WHERE u.id = $1
-        ORDER BY u.created_at DESC",
-    )
-    .bind(&auth_user.id)
-    .fetch_all(&state.db)
-    .await?;
-
-    // Read latest_bpm from Redis for all users
-    let mut redis = state.redis.lock().await;
-    let mut users = Vec::with_capacity(rows.len());
-    let mut missing_bpm_indices: Vec<usize> = Vec::new();
-    let mut missing_bpm_user_ids: Vec<String> = Vec::new();
-
-    for row in rows {
-        let key = format!("latest_bpm:{}", row.id);
-        let latest_bpm: Option<i32> = redis
-            .get::<_, Option<String>>(&key)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|v| serde_json::from_str::<LatestHeartRateUpdate>(&v).ok())
-            .map(|u| u.bpm);
-
-        if latest_bpm.is_none() {
-            missing_bpm_indices.push(users.len());
-            missing_bpm_user_ids.push(row.id.clone());
-        }
-
-        users.push(UserListItem {
-            id: row.id,
-            display_name: row.display_name,
-            avatar_url: row.avatar_url,
-            latest_bpm,
-            has_pulsoid_token: row.has_pulsoid_token,
-            created_at: row.created_at,
-        });
-    }
-    drop(redis);
-
-    // Fall back to DB for users without cached latest_bpm
-    if !missing_bpm_user_ids.is_empty() {
-        let db_rows: Vec<(String, i32, i64)> = sqlx::query_as(
-            "SELECT DISTINCT ON (user_id) user_id, bpm,
-                    EXTRACT(EPOCH FROM recorded_at)::BIGINT as recorded_at
-             FROM heart_rate_records
-             WHERE user_id = ANY($1)
-             ORDER BY user_id, recorded_at DESC",
-        )
-        .bind(&missing_bpm_user_ids)
-        .fetch_all(&state.db)
-        .await?;
-
-        let bpm_map: std::collections::HashMap<&str, (i32, i64)> = db_rows
-            .iter()
-            .map(|(uid, bpm, ts)| (uid.as_str(), (*bpm, *ts)))
-            .collect();
-
-        // Write back to Redis
-        {
-            let mut redis = state.redis.lock().await;
-            for (uid, &(bpm, recorded_at)) in &bpm_map {
-                let update = LatestHeartRateUpdate {
-                    user_id: uid.to_string(),
-                    bpm,
-                    recorded_at,
-                    received_at: recorded_at,
-                };
-                if let Ok(json) = serde_json::to_string(&update) {
-                    let key = format!("latest_bpm:{uid}");
-                    let _: Result<Option<String>, _> = redis::cmd("SET")
-                        .arg(&key)
-                        .arg(&json)
-                        .arg("NX")
-                        .query_async(&mut *redis)
-                        .await;
-                }
-            }
-        }
-
-        for &idx in &missing_bpm_indices {
-            if let Some(&(bpm, _)) = bpm_map.get(users[idx].id.as_str()) {
-                users[idx].latest_bpm = Some(bpm);
-            }
-        }
-    }
-
-    Ok(Json(users))
-}
 
 pub async fn get_user(
     State(state): State<Arc<AppState>>,

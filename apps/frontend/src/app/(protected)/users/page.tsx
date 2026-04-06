@@ -1,5 +1,5 @@
 import { redirect } from "next/navigation";
 
 export default function UsersPage() {
-  redirect("/dashboard?tab=shared");
+  redirect("/me");
 }

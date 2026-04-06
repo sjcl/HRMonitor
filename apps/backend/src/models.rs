@@ -93,16 +93,6 @@ pub struct DailyStatsQuery {
 
 // --- Response DTOs ---
 
-#[derive(Debug, FromRow, Serialize)]
-pub struct UserListItem {
-    pub id: String,
-    pub display_name: String,
-    pub avatar_url: Option<String>,
-    pub latest_bpm: Option<i32>,
-    pub has_pulsoid_token: bool,
-    pub created_at: i64,
-}
-
 #[derive(Debug, Serialize)]
 pub struct PulsoidTokenResponse {
     pub source: String,
@@ -137,6 +127,99 @@ pub struct MinuteStatsResponse {
     pub min_bpm: i32,
     pub max_bpm: i32,
     pub sample_count: i64,
+}
+
+// --- Group DTOs ---
+
+#[derive(Debug, Deserialize)]
+pub struct CreateGroupRequest {
+    pub name: Option<String>,
+    pub invite_policy: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateGroupRequest {
+    pub name: Option<String>,
+    pub invite_policy: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateMembershipRequest {
+    pub sharing: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateInviteRequest {
+    pub expires_in_hours: Option<i64>,
+    pub max_uses: Option<i32>,
+    pub target_user_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GroupListItem {
+    pub id: String,
+    pub name: Option<String>,
+    pub display_name: Option<String>,
+    pub member_count: i64,
+    pub my_sharing: bool,
+    pub my_role: String,
+    pub invite_policy: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GroupDetail {
+    pub id: String,
+    pub name: Option<String>,
+    pub display_name: Option<String>,
+    pub invite_policy: String,
+    pub my_sharing: bool,
+    pub my_role: String,
+    pub members: Vec<GroupMemberInfo>,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GroupMemberInfo {
+    pub user_id: String,
+    pub display_name: String,
+    pub avatar_url: Option<String>,
+    pub role: String,
+    pub sharing: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct InviteListItem {
+    pub id: String,
+    pub created_by_name: String,
+    pub expires_at: i64,
+    pub max_uses: Option<i32>,
+    pub use_count: i32,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct InviteInfo {
+    pub group_name: Option<String>,
+    pub group_display_name: Option<String>,
+    pub group_id: String,
+    pub inviter_name: String,
+    pub expires_at: i64,
+    pub valid: bool,
+    pub reason: Option<String>,
+    pub already_member: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CreateInviteResponse {
+    pub id: String,
+    pub token: String,
+    pub expires_at: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AcceptInviteResponse {
+    pub group_id: String,
 }
 
 // --- Client WebSocket messages ---

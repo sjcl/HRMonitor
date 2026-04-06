@@ -1,14 +1,5 @@
 // --- Types ---
 
-export interface UserListItem {
-  id: string;
-  display_name: string;
-  avatar_url: string | null;
-  latest_bpm: number | null;
-  has_pulsoid_token: boolean;
-  created_at: number;
-}
-
 export type HeartRateVisibility = "group_default" | "private";
 
 export interface User {
@@ -53,10 +44,6 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   }
   if (res.status === 204) return undefined as T;
   return res.json();
-}
-
-export function getUsers() {
-  return fetchJson<UserListItem[]>("/api/users");
 }
 
 export function getUser(id: string) {

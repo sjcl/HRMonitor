@@ -13,8 +13,8 @@ export default function UserDetailPage({
 
   return (
     <div>
-      <Link href="/dashboard?tab=shared" className="text-sm text-gray-400 hover:underline">
-        &larr; Back to shared
+      <Link href="/groups" className="text-sm text-gray-400 hover:underline">
+        &larr; Back to groups
       </Link>
       <div className="mt-4">
         <UserDetailView userId={id} />

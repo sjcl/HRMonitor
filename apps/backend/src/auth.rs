@@ -101,9 +101,27 @@ pub async fn ensure_can_view_user(
             .bind(target_id)
             .fetch_optional(db)
             .await?;
-    // TODO: when groups are implemented, allow access for `group_default` users
-    // if auth_user is in the target's group.
     match vis.as_deref() {
+        Some("private") => Err(AppError::Forbidden("Not allowed to view this user".into())),
+        Some("group_default") => {
+            let shared: bool = sqlx::query_scalar(
+                "SELECT EXISTS(
+                    SELECT 1 FROM group_members gm1
+                    JOIN group_members gm2 ON gm1.group_id = gm2.group_id
+                    WHERE gm1.user_id = $1 AND gm1.status = 'active'
+                      AND gm2.user_id = $2 AND gm2.status = 'active' AND gm2.sharing = true
+                )",
+            )
+            .bind(&auth_user.id)
+            .bind(target_id)
+            .fetch_one(db)
+            .await?;
+            if shared {
+                Ok(())
+            } else {
+                Err(AppError::Forbidden("Not allowed to view this user".into()))
+            }
+        }
         Some(_) => Err(AppError::Forbidden("Not allowed to view this user".into())),
         None => Err(AppError::NotFound("User not found".into())),
     }

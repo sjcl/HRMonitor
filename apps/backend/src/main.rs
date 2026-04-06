@@ -130,7 +130,6 @@ async fn main() {
 
     // Protected routes (auth required)
     let protected_routes = Router::new()
-        .route("/api/users", get(handlers::users::list_users))
         .route(
             "/api/users/{id}",
             get(handlers::users::get_user).patch(handlers::users::update_user),
@@ -172,6 +171,37 @@ async fn main() {
         .route(
             "/api/users/{id}/latest-heart-rate",
             get(handlers::heart_rates::latest_heart_rate),
+        )
+        .route(
+            "/api/groups",
+            get(handlers::groups::list_groups).post(handlers::groups::create_group),
+        )
+        .route(
+            "/api/groups/{id}",
+            get(handlers::groups::get_group)
+                .patch(handlers::groups::update_group)
+                .delete(handlers::groups::delete_group),
+        )
+        .route(
+            "/api/groups/{id}/members/me",
+            axum::routing::patch(handlers::groups::update_my_membership)
+                .delete(handlers::groups::leave_group),
+        )
+        .route(
+            "/api/groups/{id}/invites",
+            get(handlers::groups::list_invites).post(handlers::groups::create_invite),
+        )
+        .route(
+            "/api/groups/{id}/invites/{invite_id}",
+            axum::routing::delete(handlers::groups::revoke_invite),
+        )
+        .route(
+            "/api/invites/{token}",
+            get(handlers::groups::get_invite_info),
+        )
+        .route(
+            "/api/invites/{token}/accept",
+            axum::routing::post(handlers::groups::accept_invite),
         )
         .route("/api/ws/heart-rates", get(handlers::ws::heart_rate_ws))
         .route(
