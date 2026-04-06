@@ -203,7 +203,15 @@ async fn main() {
             "/api/invites/{token}/accept",
             axum::routing::post(handlers::groups::accept_invite),
         )
-        .route("/api/ws/heart-rates", get(handlers::ws::heart_rate_ws))
+        .route("/api/ws/me", get(handlers::ws::my_heart_rate_ws))
+        .route(
+            "/api/ws/users/{id}",
+            get(handlers::ws::user_heart_rate_ws),
+        )
+        .route(
+            "/api/ws/groups/{id}",
+            get(handlers::ws::group_heart_rate_ws),
+        )
         .route(
             "/api/oauth/pulsoid/callback",
             get(handlers::oauth::callback),

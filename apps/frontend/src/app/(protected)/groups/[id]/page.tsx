@@ -13,6 +13,7 @@ import {
   revokeInvite,
 } from "@/lib/groups-api";
 import { UserAvatar } from "@/components/user-avatar";
+import { useGroupHeartRateWs } from "@/lib/ws";
 import { useState } from "react";
 
 export default function GroupDetailPage() {
@@ -24,6 +25,8 @@ export default function GroupDetailPage() {
     queryKey: ["group", id],
     queryFn: () => getGroup(id),
   });
+
+  const { data: liveHrData } = useGroupHeartRateWs(id);
 
   const { data: invites } = useQuery({
     queryKey: ["group-invites", id],
@@ -204,35 +207,54 @@ export default function GroupDetailPage() {
           メンバー ({group.members.length})
         </h2>
         <div className="flex flex-col gap-2">
-          {group.members.map((member) => (
-            <div
-              key={member.user_id}
-              className="bg-gray-900 border border-gray-700 rounded-lg p-3 flex items-center justify-between"
-            >
-              <div className="flex items-center gap-3">
-                <UserAvatar
-                  name={member.display_name}
-                  src={member.avatar_url}
-                  size="md"
-                />
-                <div>
-                  <span className="font-medium">{member.display_name}</span>
-                  {member.role === "owner" && (
-                    <span className="ml-2 text-xs bg-yellow-600/30 text-yellow-400 px-2 py-0.5 rounded">
-                      オーナー
-                    </span>
+          {group.members.map((member) => {
+            const hr = liveHrData.get(member.user_id);
+            return (
+              <div
+                key={member.user_id}
+                className="bg-gray-900 border border-gray-700 rounded-lg p-3 flex items-center justify-between"
+              >
+                <div className="flex items-center gap-3">
+                  <UserAvatar
+                    name={member.display_name}
+                    src={member.avatar_url}
+                    size="md"
+                  />
+                  <div>
+                    <span className="font-medium">{member.display_name}</span>
+                    {member.role === "owner" && (
+                      <span className="ml-2 text-xs bg-yellow-600/30 text-yellow-400 px-2 py-0.5 rounded">
+                        オーナー
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <div className="flex items-center gap-3">
+                  {hr && (
+                    <div className="flex items-center gap-2">
+                      <span className="text-lg font-mono font-bold text-red-400">
+                        {hr.bpm} BPM
+                      </span>
+                      <span className="text-xs text-gray-400">
+                        {new Date(hr.recorded_at * 1000).toLocaleTimeString("ja-JP", {
+                          hour: "2-digit",
+                          minute: "2-digit",
+                          second: "2-digit",
+                        })}
+                      </span>
+                    </div>
                   )}
+                  <span
+                    className={`text-sm ${
+                      member.sharing ? "text-green-400" : "text-gray-500"
+                    }`}
+                  >
+                    {member.sharing ? "共有中" : "非共有"}
+                  </span>
                 </div>
               </div>
-              <span
-                className={`text-sm ${
-                  member.sharing ? "text-green-400" : "text-gray-500"
-                }`}
-              >
-                {member.sharing ? "共有中" : "非共有"}
-              </span>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
 

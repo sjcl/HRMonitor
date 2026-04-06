@@ -4,11 +4,8 @@ import { useQuery } from "@tanstack/react-query";
 import { ApiError, getUser } from "@/lib/api";
 import { HeartRateChart } from "@/components/heart-rate-chart";
 import { DailyStats } from "@/components/daily-stats";
-import { useHeartRateWs } from "@/lib/ws";
-import { useMemo } from "react";
+import { useUserHeartRateWs } from "@/lib/ws";
 import { UserAvatar } from "@/components/user-avatar";
-
-const EMPTY_USER_IDS: string[] = [];
 
 export function UserDetailView({ userId }: { userId: string }) {
   const { data: user, status, error } = useQuery({
@@ -18,15 +15,9 @@ export function UserDetailView({ userId }: { userId: string }) {
   });
 
   // Only subscribe to WS once the user fetch has succeeded — otherwise a
-  // forbidden user detail page would still trigger WS subscription and
-  // other API calls.
+  // forbidden user detail page would still trigger WS subscription.
   const authorized = status === "success";
-  const userIds = useMemo(
-    () => (authorized ? [userId] : EMPTY_USER_IDS),
-    [authorized, userId],
-  );
-  const { data: liveHrData, reconnectCount } = useHeartRateWs(userIds);
-  const latestHr = authorized ? liveHrData.get(userId) ?? null : null;
+  const { data: latestHr, reconnectCount } = useUserHeartRateWs(authorized ? userId : null);
 
   if (status === "error") {
     const forbidden = error instanceof ApiError && error.status === 403;

@@ -91,7 +91,7 @@ async fn fetch_active_members(
 
 /// Ensure the authenticated user is an active member of the group.
 /// Returns (role, sharing) on success.
-async fn ensure_active_member(
+pub async fn ensure_active_member(
     db: &sqlx::PgPool,
     group_id: &str,
     user_id: &str,

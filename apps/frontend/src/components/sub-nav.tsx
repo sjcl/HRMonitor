@@ -5,7 +5,7 @@ import { usePathname } from "next/navigation";
 
 const items = [
   { href: "/me", label: "自分", icon: <HeartIcon /> },
-  { href: "/groups", label: "グループ", icon: <UsersIcon /> },
+  { href: "/groups", label: "共有", icon: <UsersIcon /> },
 ] as const;
 
 export function SubNav() {

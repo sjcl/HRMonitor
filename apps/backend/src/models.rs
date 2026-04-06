@@ -222,15 +222,6 @@ pub struct AcceptInviteResponse {
     pub group_id: String,
 }
 
-// --- Client WebSocket messages ---
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum WsClientMessage {
-    Subscribe { user_ids: Vec<String> },
-    Unsubscribe { user_ids: Vec<String> },
-}
-
 // --- Pulsoid WebSocket message ---
 
 #[derive(Debug, Deserialize)]

@@ -1,17 +1,19 @@
 use axum::Extension;
 use axum::extract::ws::{Message, WebSocket};
-use axum::extract::{State, WebSocketUpgrade};
+use axum::extract::{Path, State, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
 use redis::AsyncCommands;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use tokio::time::{Duration, interval};
 
 use crate::AppState;
 use crate::auth::{AuthenticatedUser, ensure_can_view_user};
 use crate::broadcast::LatestHeartRateUpdate;
-use crate::models::WsClientMessage;
+use crate::error::AppError;
+use crate::handlers::groups::ensure_active_member;
 
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -24,67 +26,89 @@ enum WsServerMessage {
     },
 }
 
-pub async fn heart_rate_ws(
+// ---------------------------------------------------------------------------
+// /api/ws/me — own heart rate (no reauth needed)
+// ---------------------------------------------------------------------------
+
+pub async fn my_heart_rate_ws(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
     Extension(auth_user): Extension<AuthenticatedUser>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_ws(socket, state, auth_user))
+    let user_id = auth_user.id.clone();
+    ws.on_upgrade(move |socket| handle_single_user_ws(socket, state, user_id, None))
 }
 
-async fn handle_ws(socket: WebSocket, state: Arc<AppState>, auth_user: AuthenticatedUser) {
+// ---------------------------------------------------------------------------
+// /api/ws/users/{id} — specific user's heart rate (reauth every 30s)
+// ---------------------------------------------------------------------------
+
+pub async fn user_heart_rate_ws(
+    ws: WebSocketUpgrade,
+    Path(target_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+    Extension(auth_user): Extension<AuthenticatedUser>,
+) -> Result<impl IntoResponse, AppError> {
+    ensure_can_view_user(&state.db, &auth_user, &target_id).await?;
+    let reauth = if auth_user.id == target_id {
+        None
+    } else {
+        Some(auth_user)
+    };
+    Ok(ws.on_upgrade(move |socket| handle_single_user_ws(socket, state, target_id, reauth)))
+}
+
+// ---------------------------------------------------------------------------
+// /api/ws/groups/{id} — group heart rates (reauth every 30s)
+// ---------------------------------------------------------------------------
+
+pub async fn group_heart_rate_ws(
+    ws: WebSocketUpgrade,
+    Path(group_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+    Extension(auth_user): Extension<AuthenticatedUser>,
+) -> Result<impl IntoResponse, AppError> {
+    ensure_active_member(&state.db, &group_id, &auth_user.id).await?;
+    Ok(ws.on_upgrade(move |socket| handle_group_ws(socket, state, auth_user, group_id)))
+}
+
+// ---------------------------------------------------------------------------
+// Internal: single-user WebSocket loop (used by /me and /users/{id})
+// ---------------------------------------------------------------------------
+
+async fn handle_single_user_ws(
+    socket: WebSocket,
+    state: Arc<AppState>,
+    target_user_id: String,
+    reauth: Option<AuthenticatedUser>, // None = self, skip reauth
+) {
     let (mut sender, mut receiver) = socket.split();
-    let mut subscribed: HashSet<String> = HashSet::new();
     let mut broadcast_rx = state.hr_broadcast.subscribe();
+
+    // Send initial snapshot
+    let snapshot = read_snapshot(&state, &[target_user_id.clone()]).await;
+    let msg = WsServerMessage::Snapshot { data: snapshot };
+    if let Ok(json) = serde_json::to_string(&msg) {
+        if sender.send(Message::Text(json.into())).await.is_err() {
+            return;
+        }
+    }
+
+    let mut reauth_interval = interval(Duration::from_secs(30));
+    reauth_interval.tick().await; // consume the immediate first tick
 
     loop {
         tokio::select! {
-            // Handle messages from client
             msg = receiver.next() => {
                 match msg {
-                    Some(Ok(Message::Text(text))) => {
-                        match serde_json::from_str::<WsClientMessage>(&text) {
-                            Ok(WsClientMessage::Subscribe { user_ids }) => {
-                                // Filter by visibility: only allow subscribing to
-                                // users the authenticated user can view.
-                                let mut allowed: Vec<String> = Vec::with_capacity(user_ids.len());
-                                for uid in user_ids {
-                                    if ensure_can_view_user(&state.db, &auth_user, &uid)
-                                        .await
-                                        .is_ok()
-                                    {
-                                        allowed.push(uid);
-                                    }
-                                }
-                                subscribed.extend(allowed.iter().cloned());
-                                // Send snapshot from Redis
-                                let snapshot = read_snapshot(&state, &allowed).await;
-                                let msg = WsServerMessage::Snapshot { data: snapshot };
-                                if let Ok(json) = serde_json::to_string(&msg)
-                                    && sender.send(Message::Text(json.into())).await.is_err()
-                                {
-                                    break;
-                                }
-                            }
-                            Ok(WsClientMessage::Unsubscribe { user_ids }) => {
-                                for id in &user_ids {
-                                    subscribed.remove(id);
-                                }
-                            }
-                            Err(_) => {
-                                // Ignore malformed messages
-                            }
-                        }
-                    }
                     Some(Ok(Message::Close(_))) | None => break,
-                    _ => {}
+                    _ => {} // ignore all client messages
                 }
             }
-            // Handle broadcast updates
             result = broadcast_rx.recv() => {
                 match result {
                     Ok(update) => {
-                        if subscribed.contains(&update.user_id) {
+                        if update.user_id == target_user_id {
                             let msg = WsServerMessage::Update { data: update };
                             if let Ok(json) = serde_json::to_string(&msg)
                                 && sender.send(Message::Text(json.into())).await.is_err()
@@ -99,8 +123,156 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>, auth_user: Authentic
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
+            _ = reauth_interval.tick() => {
+                if let Some(ref auth_user) = reauth {
+                    if ensure_can_view_user(&state.db, auth_user, &target_user_id)
+                        .await
+                        .is_err()
+                    {
+                        break; // permission revoked
+                    }
+                }
+            }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Internal: group WebSocket loop
+// ---------------------------------------------------------------------------
+
+async fn handle_group_ws(
+    socket: WebSocket,
+    state: Arc<AppState>,
+    auth_user: AuthenticatedUser,
+    group_id: String,
+) {
+    let (mut sender, mut receiver) = socket.split();
+    let mut broadcast_rx = state.hr_broadcast.subscribe();
+
+    // Fetch initial member list (sharing=true OR self, status=active)
+    let mut members: HashSet<String> = match fetch_sharing_members(&state.db, &group_id, &auth_user.id).await {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+
+    // Send initial snapshot
+    let user_ids: Vec<String> = members.iter().cloned().collect();
+    let snapshot = read_snapshot(&state, &user_ids).await;
+    let msg = WsServerMessage::Snapshot { data: snapshot };
+    if let Ok(json) = serde_json::to_string(&msg) {
+        if sender.send(Message::Text(json.into())).await.is_err() {
+            return;
+        }
+    }
+
+    let mut reauth_interval = interval(Duration::from_secs(30));
+    reauth_interval.tick().await; // consume the immediate first tick
+
+    loop {
+        tokio::select! {
+            msg = receiver.next() => {
+                match msg {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    _ => {} // ignore all client messages
+                }
+            }
+            result = broadcast_rx.recv() => {
+                match result {
+                    Ok(update) => {
+                        if members.contains(&update.user_id) {
+                            let msg = WsServerMessage::Update { data: update };
+                            if let Ok(json) = serde_json::to_string(&msg)
+                                && sender.send(Message::Text(json.into())).await.is_err()
+                            {
+                                break;
+                            }
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("WebSocket broadcast lagged by {n} messages");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+            _ = reauth_interval.tick() => {
+                // Re-check membership and sharing
+                let new_members: HashSet<String> = match fetch_sharing_members(&state.db, &group_id, &auth_user.id).await {
+                    Ok(m) => m,
+                    Err(_) => break, // group deleted or self removed
+                };
+
+                // Check self is still a member
+                if !new_members.contains(&auth_user.id) {
+                    // Self was removed or left — but fetch_sharing_members always
+                    // includes self if active, so absence means we left/group deleted.
+                    break;
+                }
+
+                // Detect removed members → send snapshot with null
+                let removed: Vec<String> = members.difference(&new_members).cloned().collect();
+                if !removed.is_empty() {
+                    let mut removal_data: HashMap<String, Option<LatestHeartRateUpdate>> =
+                        HashMap::with_capacity(removed.len());
+                    for uid in &removed {
+                        removal_data.insert(uid.clone(), None::<LatestHeartRateUpdate>);
+                    }
+                    let msg = WsServerMessage::Snapshot { data: removal_data };
+                    if let Ok(json) = serde_json::to_string(&msg)
+                        && sender.send(Message::Text(json.into())).await.is_err()
+                    {
+                        break;
+                    }
+                }
+
+                // Detect added members → send snapshot with their data
+                let added: Vec<String> = new_members.difference(&members).cloned().collect();
+                if !added.is_empty() {
+                    let snapshot = read_snapshot(&state, &added).await;
+                    let msg = WsServerMessage::Snapshot { data: snapshot };
+                    if let Ok(json) = serde_json::to_string(&msg)
+                        && sender.send(Message::Text(json.into())).await.is_err()
+                    {
+                        break;
+                    }
+                }
+
+                members = new_members;
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Fetch active group members who have sharing enabled, plus the auth user
+/// regardless of their sharing flag. Returns an error if the auth user is not
+/// an active member (i.e. left or group deleted).
+async fn fetch_sharing_members(
+    db: &sqlx::PgPool,
+    group_id: &str,
+    auth_user_id: &str,
+) -> Result<HashSet<String>, AppError> {
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT user_id FROM group_members \
+         WHERE group_id = $1 AND status = 'active' \
+           AND (sharing = true OR user_id = $2)",
+    )
+    .bind(group_id)
+    .bind(auth_user_id)
+    .fetch_all(db)
+    .await?;
+
+    let set: HashSet<String> = rows.into_iter().map(|(uid,)| uid).collect();
+
+    // If auth user is not in the result, they are no longer an active member
+    if !set.contains(auth_user_id) {
+        return Err(AppError::NotFound("Group not found".into()));
+    }
+
+    Ok(set)
 }
 
 async fn read_snapshot(
