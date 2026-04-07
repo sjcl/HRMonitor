@@ -87,7 +87,6 @@ export function GroupsListView() {
         invite_policy: newPolicy,
       }),
     onSuccess: (group) => {
-      setCreatedGroupId(group.id);
       queryClient.invalidateQueries({ queryKey: ["groups"] });
       setModalStep(null);
       setNewName("");
