@@ -120,20 +120,36 @@ export function GroupsListView() {
               className="bg-gray-900 border border-gray-700 rounded-lg p-4 hover:border-gray-500 transition-colors block"
             >
               <div className="flex items-center gap-4">
-                <div className="flex -space-x-2 flex-shrink-0">
-                  {group.member_previews.slice(0, 5).map((member) => (
-                    <div key={member.user_id} className="ring-2 ring-gray-900 rounded-full">
-                      <UserAvatar
-                        src={member.avatar_url}
-                        name={member.display_name}
-                        size="sm"
-                      />
-                    </div>
-                  ))}
-                  {Math.max(0, group.member_count - 5) > 0 && (
-                    <span className="w-6 h-6 rounded-full bg-gray-700 flex items-center justify-center text-xs text-gray-300 ring-2 ring-gray-900 flex-shrink-0">
-                      +{group.member_count - 5}
-                    </span>
+                <div className="relative w-9 h-9 flex-shrink-0">
+                  {group.member_previews.length === 0 ? (
+                    <UserAvatar
+                      src={undefined}
+                      name="?"
+                      size="xl"
+                    />
+                  ) : group.member_previews.length === 1 ? (
+                    <UserAvatar
+                      src={group.member_previews[0].avatar_url}
+                      name={group.member_previews[0].display_name}
+                      size="xl"
+                    />
+                  ) : (
+                    <>
+                      <div className="absolute top-0 left-0 ring-2 ring-gray-900 rounded-full">
+                        <UserAvatar
+                          src={group.member_previews[0].avatar_url}
+                          name={group.member_previews[0].display_name}
+                          size="sm"
+                        />
+                      </div>
+                      <div className="absolute bottom-0 right-0 ring-2 ring-gray-900 rounded-full">
+                        <UserAvatar
+                          src={group.member_previews[1].avatar_url}
+                          name={group.member_previews[1].display_name}
+                          size="sm"
+                        />
+                      </div>
+                    </>
                   )}
                 </div>
                 <div className="flex-1 min-w-0">

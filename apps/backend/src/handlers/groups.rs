@@ -217,14 +217,20 @@ pub async fn list_groups(
     }
 
     let member_rows: Vec<GroupListMemberRow> = sqlx::query_as(
-        "SELECT gm.group_id, gm.user_id, u.display_name, a.provider_image as avatar_url
-         FROM group_members gm
-         JOIN users u ON u.id = gm.user_id
-         LEFT JOIN accounts a ON a.user_id = u.id AND a.provider = 'discord'
-         WHERE gm.group_id = ANY($1) AND gm.status = 'active'
-         ORDER BY gm.group_id, gm.created_at, gm.user_id",
+        "SELECT group_id, user_id, display_name, avatar_url
+         FROM (
+             SELECT gm.group_id, gm.user_id, u.display_name, a.provider_image as avatar_url,
+                    ROW_NUMBER() OVER (PARTITION BY gm.group_id ORDER BY gm.created_at, gm.user_id) as rn
+             FROM group_members gm
+             JOIN users u ON u.id = gm.user_id
+             LEFT JOIN accounts a ON a.user_id = u.id AND a.provider = 'discord'
+             WHERE gm.group_id = ANY($1) AND gm.status = 'active' AND gm.user_id != $2
+         ) sub
+         WHERE rn <= 2
+         ORDER BY group_id",
     )
     .bind(&group_ids)
+    .bind(&auth_user.id)
     .fetch_all(&state.db)
     .await?;
 
