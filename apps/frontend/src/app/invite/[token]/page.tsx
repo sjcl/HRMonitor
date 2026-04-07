@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { SessionProvider, useSession } from "next-auth/react";
 import { useQuery, useMutation } from "@tanstack/react-query";
@@ -35,8 +36,10 @@ function InviteContent() {
     retry: false,
   });
 
+  const [sharing, setSharing] = useState(true);
+
   const acceptMutation = useMutation({
-    mutationFn: () => acceptInvite(token),
+    mutationFn: () => acceptInvite(token, sharing),
     onSuccess: (data) => {
       router.push(`/groups/${data.group_id}`);
     },
@@ -154,6 +157,24 @@ function InviteContent() {
       <p className="text-sm text-gray-500">
         有効期限: {new Date(invite.expires_at * 1000).toLocaleString()}
       </p>
+
+      <div className="flex items-center gap-3">
+        <span className="text-sm text-gray-400">心拍データを共有する</span>
+        <button
+          type="button"
+          onClick={() => setSharing(!sharing)}
+          aria-pressed={sharing}
+          className={`w-12 h-7 rounded-full transition-colors relative ${
+            sharing ? "bg-blue-600" : "bg-gray-600"
+          }`}
+        >
+          <span
+            className={`absolute top-1 w-5 h-5 rounded-full bg-white transition-transform ${
+              sharing ? "left-6" : "left-1"
+            }`}
+          />
+        </button>
+      </div>
 
       {acceptErrorText && (
         <p className="text-red-400 text-sm">{acceptErrorText}</p>

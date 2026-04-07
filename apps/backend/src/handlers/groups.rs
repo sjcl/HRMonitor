@@ -8,7 +8,8 @@ use crate::AppState;
 use crate::auth::AuthenticatedUser;
 use crate::error::AppError;
 use crate::models::{
-    AcceptInviteResponse, CreateGroupRequest, CreateInviteRequest, CreateInviteResponse,
+    AcceptInviteRequest, AcceptInviteResponse, CreateGroupRequest, CreateInviteRequest,
+    CreateInviteResponse,
     GroupDetail, GroupListItem, GroupMemberInfo, GroupMemberPreview, InviteInfo, InviteListItem,
     UpdateGroupRequest, UpdateMembershipRequest,
 };
@@ -688,7 +689,9 @@ pub async fn accept_invite(
     State(state): State<Arc<AppState>>,
     Path(token): Path<String>,
     Extension(auth_user): Extension<AuthenticatedUser>,
+    body: Option<Json<AcceptInviteRequest>>,
 ) -> Result<Json<AcceptInviteResponse>, AppError> {
+    let req = body.map(|Json(v)| v).unwrap_or(AcceptInviteRequest { sharing: true });
     let token_hash = hash_token(&token);
 
     let mut tx = state.db.begin().await?;
@@ -740,14 +743,15 @@ pub async fn accept_invite(
     // Insert or re-activate membership
     let result = sqlx::query(
         "INSERT INTO group_members (group_id, user_id, role, sharing, status, joined_at)
-         VALUES ($1, $2, 'member', true, 'active', now())
+         VALUES ($1, $2, 'member', $3, 'active', now())
          ON CONFLICT (group_id, user_id) DO UPDATE
-         SET status = 'active', sharing = true, left_at = NULL,
+         SET status = 'active', sharing = $3, left_at = NULL,
              role = 'member', joined_at = now()
          WHERE group_members.status = 'left'",
     )
     .bind(&invite.group_id)
     .bind(&auth_user.id)
+    .bind(req.sharing)
     .execute(&mut *tx)
     .await?;
 

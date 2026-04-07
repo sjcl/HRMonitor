@@ -191,9 +191,11 @@ export function getInviteInfo(token: string) {
   return fetchJson<InviteInfo>(`/api/invites/${token}`);
 }
 
-export function acceptInvite(token: string) {
+export function acceptInvite(token: string, sharing: boolean = true) {
   return fetchJson<AcceptInviteResponse>(`/api/invites/${token}/accept`, {
     method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sharing }),
   });
 }
 

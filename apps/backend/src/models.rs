@@ -149,6 +149,16 @@ pub struct UpdateMembershipRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct AcceptInviteRequest {
+    #[serde(default = "default_sharing")]
+    pub sharing: bool,
+}
+
+fn default_sharing() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize)]
 pub struct CreateInviteRequest {
     pub expires_in_hours: Option<i64>,
     pub max_uses: Option<i32>,
