@@ -36,15 +36,15 @@ fn compute_display_name<T>(
     get_user_id: impl Fn(&T) -> &str,
     get_display_name: impl Fn(&T) -> &str,
 ) -> Option<String> {
-    if let Some(name) = group_name {
-        if !name.is_empty() {
-            return Some(name.clone());
-        }
+    if let Some(name) = group_name
+        && !name.is_empty()
+    {
+        return Some(name.clone());
     }
     let others: Vec<&str> = members
         .iter()
         .filter(|m| get_user_id(m) != viewer_id)
-        .map(|m| get_display_name(m))
+        .map(get_display_name)
         .collect();
     match others.len() {
         0 => None,
@@ -121,12 +121,12 @@ pub async fn create_group(
     Extension(auth_user): Extension<AuthenticatedUser>,
     Json(body): Json<CreateGroupRequest>,
 ) -> Result<Json<GroupDetail>, AppError> {
-    if let Some(ref policy) = body.invite_policy {
-        if !VALID_INVITE_POLICIES.contains(&policy.as_str()) {
-            return Err(AppError::BadRequest(
-                "invite_policy must be one of: group, group+".into(),
-            ));
-        }
+    if let Some(ref policy) = body.invite_policy
+        && !VALID_INVITE_POLICIES.contains(&policy.as_str())
+    {
+        return Err(AppError::BadRequest(
+            "invite_policy must be one of: group, group+".into(),
+        ));
     }
 
     let policy = body.invite_policy.as_deref().unwrap_or("group");
@@ -325,12 +325,12 @@ pub async fn update_group(
         return Err(AppError::Forbidden("Only the owner can update the group".into()));
     }
 
-    if let Some(ref policy) = body.invite_policy {
-        if !VALID_INVITE_POLICIES.contains(&policy.as_str()) {
-            return Err(AppError::BadRequest(
-                "invite_policy must be one of: group, group+".into(),
-            ));
-        }
+    if let Some(ref policy) = body.invite_policy
+        && !VALID_INVITE_POLICIES.contains(&policy.as_str())
+    {
+        return Err(AppError::BadRequest(
+            "invite_policy must be one of: group, group+".into(),
+        ));
     }
 
     let result = sqlx::query(
@@ -473,10 +473,10 @@ pub async fn create_invite(
         return Err(AppError::BadRequest("expires_in_hours must be positive".into()));
     }
 
-    if let Some(max_uses) = body.max_uses {
-        if max_uses <= 0 {
-            return Err(AppError::BadRequest("max_uses must be positive".into()));
-        }
+    if let Some(max_uses) = body.max_uses
+        && max_uses <= 0
+    {
+        return Err(AppError::BadRequest("max_uses must be positive".into()));
     }
 
     if let Some(ref target_user_id) = body.target_user_id {

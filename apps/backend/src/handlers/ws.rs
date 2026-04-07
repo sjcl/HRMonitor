@@ -86,12 +86,12 @@ async fn handle_single_user_ws(
     let mut broadcast_rx = state.hr_broadcast.subscribe();
 
     // Send initial snapshot
-    let snapshot = read_snapshot(&state, &[target_user_id.clone()]).await;
+    let snapshot = read_snapshot(&state, std::slice::from_ref(&target_user_id)).await;
     let msg = WsServerMessage::Snapshot { data: snapshot };
-    if let Ok(json) = serde_json::to_string(&msg) {
-        if sender.send(Message::Text(json.into())).await.is_err() {
-            return;
-        }
+    if let Ok(json) = serde_json::to_string(&msg)
+        && sender.send(Message::Text(json.into())).await.is_err()
+    {
+        return;
     }
 
     let mut reauth_interval = interval(Duration::from_secs(30));
@@ -124,13 +124,12 @@ async fn handle_single_user_ws(
                 }
             }
             _ = reauth_interval.tick() => {
-                if let Some(ref auth_user) = reauth {
-                    if ensure_can_view_user(&state.db, auth_user, &target_user_id)
+                if let Some(ref auth_user) = reauth
+                    && ensure_can_view_user(&state.db, auth_user, &target_user_id)
                         .await
                         .is_err()
-                    {
-                        break; // permission revoked
-                    }
+                {
+                    break; // permission revoked
                 }
             }
         }
@@ -160,10 +159,10 @@ async fn handle_group_ws(
     let user_ids: Vec<String> = members.iter().cloned().collect();
     let snapshot = read_snapshot(&state, &user_ids).await;
     let msg = WsServerMessage::Snapshot { data: snapshot };
-    if let Ok(json) = serde_json::to_string(&msg) {
-        if sender.send(Message::Text(json.into())).await.is_err() {
-            return;
-        }
+    if let Ok(json) = serde_json::to_string(&msg)
+        && sender.send(Message::Text(json.into())).await.is_err()
+    {
+        return;
     }
 
     let mut reauth_interval = interval(Duration::from_secs(30));
