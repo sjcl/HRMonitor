@@ -13,6 +13,7 @@ import {
   createInvite,
   listInvites,
   revokeInvite,
+  formatGroupDisplayName,
 } from "@/lib/groups-api";
 import { UserAvatar } from "@/components/user-avatar";
 import { GroupHeartRateChart } from "@/components/group-heart-rate-chart";
@@ -115,7 +116,7 @@ export default function GroupDetailPage() {
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-2xl font-bold">
-            {group.display_name ?? "空のグループ"}
+            {formatGroupDisplayName(group.display_name, group.name, group.members.length)}
           </h1>
           {group.name && (
             <p className="text-sm text-gray-400 mt-1">

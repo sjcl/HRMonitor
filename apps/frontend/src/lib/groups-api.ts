@@ -77,6 +77,19 @@ export interface GroupMinuteStats {
   sample_count: number;
 }
 
+// --- Helpers ---
+
+export function formatGroupDisplayName(
+  displayName: string | null,
+  name: string | null,
+  memberCount: number,
+): string {
+  if (!name && memberCount === 2 && displayName) {
+    return `${displayName}さんとの共有`;
+  }
+  return displayName ?? "空のグループ";
+}
+
 // --- API functions ---
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {

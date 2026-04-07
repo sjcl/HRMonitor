@@ -5,6 +5,7 @@ import {
   getGroups,
   createGroup,
   updateMyMembership,
+  formatGroupDisplayName,
 } from "@/lib/groups-api";
 import { useState } from "react";
 import Link from "next/link";
@@ -120,7 +121,7 @@ export function GroupsListView() {
               <div className="flex items-center justify-between">
                 <div>
                   <h3 className="font-medium">
-                    {group.display_name ?? "空のグループ"}
+                    {formatGroupDisplayName(group.display_name, group.name, group.member_count)}
                   </h3>
                   <p className="text-sm text-gray-400 mt-1">
                     {group.member_count}人のメンバー ・{" "}
