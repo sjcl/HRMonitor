@@ -339,13 +339,15 @@ export function GroupsListView() {
                 <h3 className="font-medium truncate">
                   {formatGroupDisplayName(group.display_name, group.name, group.member_count)}
                 </h3>
-                <p className="text-sm text-gray-400 mt-1">
-                  {group.member_count}人のメンバー ・{" "}
-                  {group.my_role === "owner" ? "オーナー" : "メンバー"} ・{" "}
-                  {group.invite_policy === "group+"
-                    ? "全員招待可"
-                    : "オーナーのみ招待可"}
-                </p>
+                {group.member_count !== 2 && (
+                  <p className="text-sm text-gray-400 mt-1">
+                    {group.member_count}人のメンバー ・{" "}
+                    {group.my_role === "owner" ? "オーナー" : "メンバー"} ・{" "}
+                    {group.invite_policy === "group+"
+                      ? "全員招待可"
+                      : "オーナーのみ招待可"}
+                  </p>
+                )}
               </div>
               <div className="flex items-center gap-3 flex-shrink-0">
                 <label
