@@ -220,13 +220,6 @@ export function useGroupHeartRateWs(
 ): { data: Map<string, LatestHeartRate>; reconnectCount: number } {
   const [data, setData] = useState<Map<string, LatestHeartRate>>(new Map());
 
-  // Reset data when groupId changes
-  const prevGroupIdRef = useRef(groupId);
-  if (prevGroupIdRef.current !== groupId) {
-    prevGroupIdRef.current = groupId;
-    setData(new Map());
-  }
-
   // Batch pending updates and flush once per animation frame
   const pendingUpdatesRef = useRef<Map<string, LatestHeartRate>>(new Map());
   const rafRef = useRef<number | null>(null);
@@ -271,15 +264,17 @@ export function useGroupHeartRateWs(
     [flushUpdates],
   );
 
-  // Cleanup rAF on unmount
+  // Reset data and cancel pending updates when groupId changes (or on unmount)
   useEffect(() => {
+    setData(new Map());
     return () => {
+      pendingUpdatesRef.current.clear();
       if (rafRef.current !== null) {
         cancelAnimationFrame(rafRef.current);
         rafRef.current = null;
       }
     };
-  }, []);
+  }, [groupId]);
 
   const path = groupId ? `/api/ws/groups/${groupId}` : null;
   const { reconnectCount } = useWsConnection({ path, onMessage });
