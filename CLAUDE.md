@@ -48,12 +48,12 @@ docker compose up --build
 
 ## API エンドポイント
 
-- `GET /api/users`, `PATCH /api/users/{id}`
-- `GET/PUT/DELETE /api/users/{id}/pulsoid-token`
-- `GET /api/users/{id}/heart-rates?period=`, `GET /api/users/{id}/heart-rates/by-date?date=`
-- `GET /api/users/{id}/heart-rates/daily-stats?from=&to=`
+- `GET /api/users/{id}` (閲覧、`{id}` に `me` 可), `PATCH /api/users/me`
+- `GET/PUT/DELETE /api/users/me/pulsoid-token`
+- `GET /api/users/{id}/heart-rates?period=`, `GET /api/users/{id}/heart-rates/by-date?date=` (`{id}` に `me` 可)
+- `GET /api/users/{id}/heart-rates/daily-stats?date=`, `GET /api/users/{id}/heart-rates/minute-stats?period=`
 - `GET /api/users/{id}/latest-heart-rate` (Redis優先、DBフォールバック)
-- `WS /api/ws/heart-rates` — subscribe/unsubscribe でユーザー選択、snapshot + リアルタイム更新
+- `WS /api/ws/me`, `WS /api/ws/users/{id}`, `WS /api/ws/groups/{id}`
 
 ## アーキテクチャ要点
 

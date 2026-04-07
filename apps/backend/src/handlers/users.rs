@@ -1,10 +1,10 @@
 use axum::Json;
 use axum::Extension;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use std::sync::Arc;
 
 use crate::AppState;
-use crate::auth::{AuthenticatedUser, ensure_can_view_user, ensure_self};
+use crate::auth::{AuthenticatedUser, UserIdParam, ensure_can_view_user};
 use crate::error::AppError;
 use crate::models::{UpdateUserRequest, User, UserRow};
 
@@ -21,7 +21,7 @@ const VALID_VISIBILITIES: &[&str] = &["group_default", "private"];
 
 pub async fn get_user(
     State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
+    UserIdParam(id): UserIdParam,
     Extension(auth_user): Extension<AuthenticatedUser>,
 ) -> Result<Json<User>, AppError> {
     ensure_can_view_user(&state.db, &auth_user, &id).await?;
@@ -38,11 +38,10 @@ pub async fn get_user(
 
 pub async fn update_user(
     State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
     Extension(auth_user): Extension<AuthenticatedUser>,
     Json(body): Json<UpdateUserRequest>,
 ) -> Result<Json<User>, AppError> {
-    ensure_self(&auth_user, &id)?;
+    let id = auth_user.id.clone();
 
     if let Some(ref display_name) = body.display_name
         && display_name.trim().is_empty()

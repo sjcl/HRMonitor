@@ -47,7 +47,7 @@ function SettingsContent() {
       display_name?: string;
       timezone?: string;
       heart_rate_visibility?: HeartRateVisibility;
-    }) => updateUser(userId!, data),
+    }) => updateUser(data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["user", userId] });
       queryClient.invalidateQueries({ queryKey: ["users"] });
@@ -125,7 +125,7 @@ function SettingsContent() {
 
       <section className="mb-8">
         <h2 className="text-lg font-semibold mb-3">Pulsoid</h2>
-        <PulsoidToken userId={userId} oauthResult={oauthResult} />
+        <PulsoidToken oauthResult={oauthResult} />
       </section>
     </div>
   );

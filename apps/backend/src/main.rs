@@ -130,12 +130,13 @@ async fn main() {
 
     // Protected routes (auth required)
     let protected_routes = Router::new()
+        .route("/api/users/{id}", get(handlers::users::get_user))
         .route(
-            "/api/users/{id}",
-            get(handlers::users::get_user).patch(handlers::users::update_user),
+            "/api/users/me",
+            axum::routing::patch(handlers::users::update_user),
         )
         .route(
-            "/api/users/{id}/pulsoid-token",
+            "/api/users/me/pulsoid-token",
             get(handlers::tokens::get_pulsoid_token)
                 .put(handlers::tokens::set_manual_pulsoid_token)
                 .delete(handlers::tokens::delete_pulsoid_token),

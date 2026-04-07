@@ -50,25 +50,20 @@ export function getUser(id: string) {
   return fetchJson<User>(`/api/users/${id}`);
 }
 
-export function updateUser(
-  id: string,
-  data: {
-    display_name?: string;
-    timezone?: string;
-    heart_rate_visibility?: HeartRateVisibility;
-  },
-) {
-  return fetchJson<User>(`/api/users/${id}`, {
+export function updateUser(data: {
+  display_name?: string;
+  timezone?: string;
+  heart_rate_visibility?: HeartRateVisibility;
+}) {
+  return fetchJson<User>(`/api/users/me`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(data),
   });
 }
 
-export async function getPulsoidToken(
-  userId: string
-): Promise<PulsoidTokenStatus | null> {
-  const res = await fetch(`/api/users/${userId}/pulsoid-token`);
+export async function getPulsoidToken(): Promise<PulsoidTokenStatus | null> {
+  const res = await fetch(`/api/users/me/pulsoid-token`);
   if (res.status === 404) return null;
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
@@ -85,16 +80,16 @@ export function createPulsoidConnect(returnTo?: string) {
   });
 }
 
-export function setManualPulsoidToken(userId: string, accessToken: string) {
-  return fetchJson<void>(`/api/users/${userId}/pulsoid-token`, {
+export function setManualPulsoidToken(accessToken: string) {
+  return fetchJson<void>(`/api/users/me/pulsoid-token`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ access_token: accessToken }),
   });
 }
 
-export function deletePulsoidToken(userId: string) {
-  return fetchJson<void>(`/api/users/${userId}/pulsoid-token`, {
+export function deletePulsoidToken() {
+  return fetchJson<void>(`/api/users/me/pulsoid-token`, {
     method: "DELETE",
   });
 }

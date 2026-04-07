@@ -12,10 +12,8 @@ const RESULT_MESSAGES: Record<string, { text: string; color: string }> = {
 };
 
 export function PulsoidToken({
-  userId,
   oauthResult,
 }: {
-  userId: string;
   oauthResult?: string | null;
 }) {
   const queryClient = useQueryClient();
@@ -29,8 +27,8 @@ export function PulsoidToken({
   }, [oauthResult]);
 
   const { data: token, isLoading } = useQuery({
-    queryKey: ["pulsoid-token", userId],
-    queryFn: () => getPulsoidToken(userId),
+    queryKey: ["pulsoid-token"],
+    queryFn: () => getPulsoidToken(),
     refetchOnWindowFocus: false,
     refetchInterval: (query) => {
       const data = query.state.data;
@@ -49,18 +47,18 @@ export function PulsoidToken({
   });
 
   const manualMutation = useMutation({
-    mutationFn: (accessToken: string) => setManualPulsoidToken(userId, accessToken),
+    mutationFn: (accessToken: string) => setManualPulsoidToken(accessToken),
     onSuccess: () => {
       setManualToken("");
-      queryClient.invalidateQueries({ queryKey: ["pulsoid-token", userId] });
+      queryClient.invalidateQueries({ queryKey: ["pulsoid-token"] });
       queryClient.invalidateQueries({ queryKey: ["users"] });
     },
   });
 
   const disconnectMutation = useMutation({
-    mutationFn: () => deletePulsoidToken(userId),
+    mutationFn: () => deletePulsoidToken(),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["pulsoid-token", userId] });
+      queryClient.invalidateQueries({ queryKey: ["pulsoid-token"] });
       queryClient.invalidateQueries({ queryKey: ["users"] });
     },
   });

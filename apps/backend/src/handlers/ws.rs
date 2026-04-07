@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tokio::time::{Duration, interval};
 
 use crate::AppState;
-use crate::auth::{AuthenticatedUser, ensure_can_view_user};
+use crate::auth::{AuthenticatedUser, UserIdParam, ensure_can_view_user};
 use crate::broadcast::LatestHeartRateUpdate;
 use crate::error::AppError;
 use crate::handlers::groups::ensure_active_member;
@@ -45,7 +45,7 @@ pub async fn my_heart_rate_ws(
 
 pub async fn user_heart_rate_ws(
     ws: WebSocketUpgrade,
-    Path(target_id): Path<String>,
+    UserIdParam(target_id): UserIdParam,
     State(state): State<Arc<AppState>>,
     Extension(auth_user): Extension<AuthenticatedUser>,
 ) -> Result<impl IntoResponse, AppError> {

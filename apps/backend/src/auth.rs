@@ -1,5 +1,6 @@
-use axum::extract::{Request, State};
+use axum::extract::{Path, Request, State};
 use axum::http::StatusCode;
+use axum::http::request::Parts;
 use axum::middleware::Next;
 use axum::response::Response;
 use std::sync::Arc;
@@ -70,13 +71,28 @@ pub async fn require_auth(
     }
 }
 
-pub fn ensure_self(auth_user: &AuthenticatedUser, target_id: &str) -> Result<(), AppError> {
-    if auth_user.id != target_id {
-        return Err(AppError::Forbidden(
-            "Cannot modify another user's resources".into(),
-        ));
+/// Extracts a user ID from the `{id}` path parameter, resolving `"me"` to the
+/// authenticated user's ID.
+pub struct UserIdParam(pub String);
+
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for UserIdParam {
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let Path(id) = Path::<String>::from_request_parts(parts, state)
+            .await
+            .map_err(|_| AppError::BadRequest("Missing user id".into()))?;
+
+        if id == "me" {
+            let auth_user = parts
+                .extensions
+                .get::<AuthenticatedUser>()
+                .ok_or_else(|| AppError::BadRequest("Not authenticated".into()))?;
+            Ok(UserIdParam(auth_user.id.clone()))
+        } else {
+            Ok(UserIdParam(id))
+        }
     }
-    Ok(())
 }
 
 /// Check whether `auth_user` is allowed to view `target_id`'s heart rate data.

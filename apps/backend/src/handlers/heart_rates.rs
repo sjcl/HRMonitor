@@ -6,7 +6,7 @@ use redis::AsyncCommands;
 use std::sync::Arc;
 
 use crate::AppState;
-use crate::auth::{AuthenticatedUser, ensure_can_view_user};
+use crate::auth::{AuthenticatedUser, UserIdParam, ensure_can_view_user};
 use crate::broadcast::LatestHeartRateUpdate;
 use crate::error::AppError;
 use crate::handlers::groups::ensure_active_member;
@@ -37,7 +37,7 @@ fn parse_period(s: &str) -> Result<(i64, i64), AppError> {
 
 pub async fn list_heart_rates(
     State(state): State<Arc<AppState>>,
-    Path(user_id): Path<String>,
+    UserIdParam(user_id): UserIdParam,
     Extension(auth_user): Extension<AuthenticatedUser>,
     Query(params): Query<HeartRateQuery>,
 ) -> Result<Json<Vec<HeartRateResponse>>, AppError> {
@@ -66,7 +66,7 @@ pub async fn list_heart_rates(
 
 pub async fn heart_rates_by_date(
     State(state): State<Arc<AppState>>,
-    Path(user_id): Path<String>,
+    UserIdParam(user_id): UserIdParam,
     Extension(auth_user): Extension<AuthenticatedUser>,
     Query(params): Query<HeartRateByDateQuery>,
 ) -> Result<Json<Vec<HeartRateResponse>>, AppError> {
@@ -93,7 +93,7 @@ pub async fn heart_rates_by_date(
 
 pub async fn daily_stats(
     State(state): State<Arc<AppState>>,
-    Path(user_id): Path<String>,
+    UserIdParam(user_id): UserIdParam,
     Extension(auth_user): Extension<AuthenticatedUser>,
     Query(params): Query<DailyStatsQuery>,
 ) -> Result<Json<Option<DailyStatsResponse>>, AppError> {
@@ -127,7 +127,7 @@ pub async fn daily_stats(
 
 pub async fn minute_stats(
     State(state): State<Arc<AppState>>,
-    Path(user_id): Path<String>,
+    UserIdParam(user_id): UserIdParam,
     Extension(auth_user): Extension<AuthenticatedUser>,
     Query(params): Query<HeartRateQuery>,
 ) -> Result<Json<Vec<MinuteStatsResponse>>, AppError> {
@@ -160,7 +160,7 @@ pub async fn minute_stats(
 
 pub async fn minute_stats_by_date(
     State(state): State<Arc<AppState>>,
-    Path(user_id): Path<String>,
+    UserIdParam(user_id): UserIdParam,
     Extension(auth_user): Extension<AuthenticatedUser>,
     Query(params): Query<HeartRateByDateQuery>,
 ) -> Result<Json<Vec<MinuteStatsResponse>>, AppError> {
@@ -192,7 +192,7 @@ pub async fn minute_stats_by_date(
 
 pub async fn latest_heart_rate(
     State(state): State<Arc<AppState>>,
-    Path(user_id): Path<String>,
+    UserIdParam(user_id): UserIdParam,
     Extension(auth_user): Extension<AuthenticatedUser>,
 ) -> Result<Json<HeartRateResponse>, AppError> {
     super::utils::check_user_exists(&state.db, &user_id).await?;
