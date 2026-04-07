@@ -180,30 +180,6 @@ export default function GroupDetailPage() {
         </div>
       )}
 
-      {/* My sharing */}
-      <div className="bg-gray-900 border border-gray-700 rounded-lg p-4 mb-6">
-        <div className="flex items-center justify-between">
-          <div>
-            <h2 className="font-medium">心拍データの共有</h2>
-            <p className="text-sm text-gray-400 mt-1">
-              このグループのメンバーに心拍データを公開する
-            </p>
-          </div>
-          <button
-            onClick={() => sharingMutation.mutate(!group.my_sharing)}
-            className={`w-12 h-7 rounded-full transition-colors relative ${
-              group.my_sharing ? "bg-blue-600" : "bg-gray-600"
-            }`}
-          >
-            <span
-              className={`absolute top-1 w-5 h-5 rounded-full bg-white transition-transform ${
-                group.my_sharing ? "left-6" : "left-1"
-              }`}
-            />
-          </button>
-        </div>
-      </div>
-
       {/* Heart Rate Chart */}
       {session?.user?.id && (
         <GroupHeartRateChart
@@ -376,33 +352,74 @@ export default function GroupDetailPage() {
         </p>
       </div>
 
-      {/* Leave/Delete */}
+      {/* Controls */}
       <div className="border-t border-gray-700 pt-6">
-        {isOwner ? (
-          <button
-            onClick={() => {
-              if (confirm("このグループを削除しますか？メンバー全員が退出されます。")) {
-                deleteMutation.mutate();
-              }
-            }}
-            disabled={deleteMutation.isPending}
-            className="text-sm text-red-400 hover:text-red-300 disabled:opacity-50"
-          >
-            グループを削除
-          </button>
-        ) : (
-          <button
-            onClick={() => {
-              if (confirm("このグループから退出しますか？")) {
-                leaveMutation.mutate();
-              }
-            }}
-            disabled={leaveMutation.isPending}
-            className="text-sm text-red-400 hover:text-red-300 disabled:opacity-50"
-          >
-            グループから退出
-          </button>
-        )}
+        <h2 className="text-lg font-semibold mb-4">コントロール</h2>
+
+        {/* Sharing toggle */}
+        <div className="bg-gray-900 border border-gray-700 rounded-lg p-4 mb-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="font-medium">心拍データの共有</h3>
+              <p className="text-sm text-gray-400 mt-1">
+                このグループのメンバーに心拍データを公開する
+              </p>
+            </div>
+            <button
+              onClick={() => sharingMutation.mutate(!group.my_sharing)}
+              className={`w-12 h-7 rounded-full transition-colors relative ${
+                group.my_sharing ? "bg-blue-600" : "bg-gray-600"
+              }`}
+            >
+              <span
+                className={`absolute top-1 w-5 h-5 rounded-full bg-white transition-transform ${
+                  group.my_sharing ? "left-6" : "left-1"
+                }`}
+              />
+            </button>
+          </div>
+        </div>
+
+        {/* Delete/Leave */}
+        <div className="bg-gray-900 border border-red-900/50 rounded-lg p-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="font-medium text-red-400">
+                {isOwner ? "グループを削除" : "グループから退出"}
+              </h3>
+              <p className="text-sm text-gray-400 mt-1">
+                {isOwner
+                  ? "グループとすべてのデータを削除します"
+                  : "このグループから退出します"}
+              </p>
+            </div>
+            {isOwner ? (
+              <button
+                onClick={() => {
+                  if (confirm("このグループを削除しますか？メンバー全員が退出されます。")) {
+                    deleteMutation.mutate();
+                  }
+                }}
+                disabled={deleteMutation.isPending}
+                className="text-sm bg-red-600 hover:bg-red-700 px-4 py-2 rounded disabled:opacity-50"
+              >
+                削除
+              </button>
+            ) : (
+              <button
+                onClick={() => {
+                  if (confirm("このグループから退出しますか？")) {
+                    leaveMutation.mutate();
+                  }
+                }}
+                disabled={leaveMutation.isPending}
+                className="text-sm bg-red-600 hover:bg-red-700 px-4 py-2 rounded disabled:opacity-50"
+              >
+                退出
+              </button>
+            )}
+          </div>
+        </div>
       </div>
     </div>
   );
