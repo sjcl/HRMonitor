@@ -180,6 +180,9 @@ export function GroupsListView() {
                     </span>
                   </button>
                 </div>
+                <p className="text-xs text-gray-500 text-center mt-4">
+                  後からでも変更できます
+                </p>
               </>
             )}
 
