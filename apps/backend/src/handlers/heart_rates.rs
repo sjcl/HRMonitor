@@ -1,3 +1,4 @@
+use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use chrono::NaiveDate;
@@ -5,27 +6,18 @@ use redis::AsyncCommands;
 use std::sync::Arc;
 
 use crate::AppState;
+use crate::auth::{AuthenticatedUser, ensure_can_view_user};
 use crate::broadcast::LatestHeartRateUpdate;
 use crate::error::AppError;
+use crate::handlers::groups::ensure_active_member;
 use crate::models::{
-    DailyStatsQuery, DailyStatsResponse, HeartRateByDateQuery, HeartRateQuery, HeartRateResponse,
-    MinuteStatsResponse,
+    DailyStatsQuery, DailyStatsResponse, GroupHeartRateResponse, GroupMinuteStatsResponse,
+    HeartRateByDateQuery, HeartRateQuery, HeartRateResponse, MinuteStatsResponse,
 };
 
 fn parse_date(s: &str) -> Result<NaiveDate, AppError> {
     NaiveDate::parse_from_str(s, "%Y-%m-%d")
         .map_err(|_| AppError::BadRequest(format!("Invalid date: {s}, expected YYYY-MM-DD")))
-}
-
-async fn check_user_exists(db: &sqlx::PgPool, user_id: &str) -> Result<(), AppError> {
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)")
-        .bind(user_id)
-        .fetch_one(db)
-        .await?;
-    if !exists {
-        return Err(AppError::NotFound("User not found".into()));
-    }
-    Ok(())
 }
 
 fn parse_period(s: &str) -> Result<(i64, i64), AppError> {
@@ -46,13 +38,15 @@ fn parse_period(s: &str) -> Result<(i64, i64), AppError> {
 pub async fn list_heart_rates(
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<String>,
+    Extension(auth_user): Extension<AuthenticatedUser>,
     Query(params): Query<HeartRateQuery>,
 ) -> Result<Json<Vec<HeartRateResponse>>, AppError> {
     let (seconds, limit) = parse_period(&params.period)?;
     let now = chrono::Utc::now().timestamp();
     let from = now - seconds;
 
-    check_user_exists(&state.db, &user_id).await?;
+    super::utils::check_user_exists(&state.db, &user_id).await?;
+    ensure_can_view_user(&state.db, &auth_user, &user_id).await?;
 
     let records: Vec<HeartRateResponse> = sqlx::query_as(
         "SELECT bpm, EXTRACT(EPOCH FROM recorded_at)::BIGINT as timestamp
@@ -73,10 +67,12 @@ pub async fn list_heart_rates(
 pub async fn heart_rates_by_date(
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<String>,
+    Extension(auth_user): Extension<AuthenticatedUser>,
     Query(params): Query<HeartRateByDateQuery>,
 ) -> Result<Json<Vec<HeartRateResponse>>, AppError> {
     parse_date(&params.date)?;
-    check_user_exists(&state.db, &user_id).await?;
+    super::utils::check_user_exists(&state.db, &user_id).await?;
+    ensure_can_view_user(&state.db, &auth_user, &user_id).await?;
 
     let records: Vec<HeartRateResponse> = sqlx::query_as(
         "WITH tz AS (SELECT timezone FROM users WHERE id = $1)
@@ -98,11 +94,13 @@ pub async fn heart_rates_by_date(
 pub async fn daily_stats(
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<String>,
+    Extension(auth_user): Extension<AuthenticatedUser>,
     Query(params): Query<DailyStatsQuery>,
 ) -> Result<Json<Option<DailyStatsResponse>>, AppError> {
     parse_date(&params.date)?;
 
-    check_user_exists(&state.db, &user_id).await?;
+    super::utils::check_user_exists(&state.db, &user_id).await?;
+    ensure_can_view_user(&state.db, &auth_user, &user_id).await?;
 
     let record: Option<DailyStatsResponse> = sqlx::query_as(
         "WITH tz AS (SELECT timezone FROM users WHERE id = $1)
@@ -130,13 +128,15 @@ pub async fn daily_stats(
 pub async fn minute_stats(
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<String>,
+    Extension(auth_user): Extension<AuthenticatedUser>,
     Query(params): Query<HeartRateQuery>,
 ) -> Result<Json<Vec<MinuteStatsResponse>>, AppError> {
     let (seconds, _) = parse_period(&params.period)?;
     let now = chrono::Utc::now().timestamp();
     let from = now - seconds;
 
-    check_user_exists(&state.db, &user_id).await?;
+    super::utils::check_user_exists(&state.db, &user_id).await?;
+    ensure_can_view_user(&state.db, &auth_user, &user_id).await?;
 
     let records: Vec<MinuteStatsResponse> = sqlx::query_as(
         "SELECT
@@ -161,10 +161,12 @@ pub async fn minute_stats(
 pub async fn minute_stats_by_date(
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<String>,
+    Extension(auth_user): Extension<AuthenticatedUser>,
     Query(params): Query<HeartRateByDateQuery>,
 ) -> Result<Json<Vec<MinuteStatsResponse>>, AppError> {
     parse_date(&params.date)?;
-    check_user_exists(&state.db, &user_id).await?;
+    super::utils::check_user_exists(&state.db, &user_id).await?;
+    ensure_can_view_user(&state.db, &auth_user, &user_id).await?;
 
     let records: Vec<MinuteStatsResponse> = sqlx::query_as(
         "WITH tz AS (SELECT timezone FROM users WHERE id = $1)
@@ -191,7 +193,11 @@ pub async fn minute_stats_by_date(
 pub async fn latest_heart_rate(
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<String>,
+    Extension(auth_user): Extension<AuthenticatedUser>,
 ) -> Result<Json<HeartRateResponse>, AppError> {
+    super::utils::check_user_exists(&state.db, &user_id).await?;
+    ensure_can_view_user(&state.db, &auth_user, &user_id).await?;
+
     // Try Redis first
     {
         let mut redis = state.redis.lock().await;
@@ -236,4 +242,77 @@ pub async fn latest_heart_rate(
     }
 
     Ok(Json(record))
+}
+
+pub async fn group_heart_rates(
+    State(state): State<Arc<AppState>>,
+    Path(group_id): Path<String>,
+    Extension(auth_user): Extension<AuthenticatedUser>,
+    Query(params): Query<HeartRateQuery>,
+) -> Result<Json<Vec<GroupHeartRateResponse>>, AppError> {
+    let (seconds, _) = parse_period(&params.period)?;
+    let now = chrono::Utc::now().timestamp();
+    let from = now - seconds;
+
+    ensure_active_member(&state.db, &group_id, &auth_user.id).await?;
+
+    let records: Vec<GroupHeartRateResponse> = sqlx::query_as(
+        "SELECT hr.user_id,
+                hr.bpm,
+                EXTRACT(EPOCH FROM hr.recorded_at)::BIGINT AS timestamp
+         FROM heart_rate_records hr
+         JOIN group_members gm ON gm.user_id = hr.user_id
+         JOIN users u ON u.id = gm.user_id
+         WHERE gm.group_id = $1
+           AND gm.status = 'active'
+           AND (gm.sharing = true OR gm.user_id = $2)
+           AND (u.heart_rate_visibility != 'private' OR gm.user_id = $2)
+           AND hr.recorded_at >= to_timestamp($3)
+         ORDER BY hr.recorded_at",
+    )
+    .bind(&group_id)
+    .bind(&auth_user.id)
+    .bind(from)
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(Json(records))
+}
+
+pub async fn group_minute_stats(
+    State(state): State<Arc<AppState>>,
+    Path(group_id): Path<String>,
+    Extension(auth_user): Extension<AuthenticatedUser>,
+    Query(params): Query<HeartRateQuery>,
+) -> Result<Json<Vec<GroupMinuteStatsResponse>>, AppError> {
+    let (seconds, _) = parse_period(&params.period)?;
+    let now = chrono::Utc::now().timestamp();
+    let from = now - seconds;
+
+    ensure_active_member(&state.db, &group_id, &auth_user.id).await?;
+
+    let records: Vec<GroupMinuteStatsResponse> = sqlx::query_as(
+        "SELECT hm.user_id,
+                EXTRACT(EPOCH FROM hm.bucket)::BIGINT AS timestamp,
+                hm.avg_bpm,
+                hm.min_bpm,
+                hm.max_bpm,
+                hm.sample_count
+         FROM heart_rate_1m hm
+         JOIN group_members gm ON gm.user_id = hm.user_id
+         JOIN users u ON u.id = gm.user_id
+         WHERE gm.group_id = $1
+           AND gm.status = 'active'
+           AND (gm.sharing = true OR gm.user_id = $2)
+           AND (u.heart_rate_visibility != 'private' OR gm.user_id = $2)
+           AND hm.bucket >= to_timestamp($3)
+         ORDER BY hm.bucket",
+    )
+    .bind(&group_id)
+    .bind(&auth_user.id)
+    .bind(from)
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(Json(records))
 }

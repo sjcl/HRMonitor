@@ -1,8 +1,31 @@
 "use client";
 
 import { signIn } from "next-auth/react";
+import { useSearchParams } from "next/navigation";
+import { Suspense } from "react";
 
 export default function LoginPage() {
+  return (
+    <main className="max-w-5xl mx-auto p-6">
+      <Suspense>
+        <LoginContent />
+      </Suspense>
+    </main>
+  );
+}
+
+function LoginContent() {
+  const searchParams = useSearchParams();
+  const rawCallbackUrl = searchParams.get("callbackUrl");
+
+  // Only allow relative paths starting with "/" but not "//" (prevent open redirect)
+  const callbackUrl =
+    rawCallbackUrl &&
+    rawCallbackUrl.startsWith("/") &&
+    !rawCallbackUrl.startsWith("//")
+      ? rawCallbackUrl
+      : "/me";
+
   return (
     <div className="flex flex-col items-center justify-center min-h-[60vh] gap-6">
       <h1 className="text-3xl font-bold">HR Monitor</h1>
@@ -11,7 +34,7 @@ export default function LoginPage() {
         onClick={() => {
           const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
           document.cookie = `browser_tz=${tz}; path=/; max-age=300; SameSite=Lax`;
-          signIn("discord", { redirectTo: "/users" });
+          signIn("discord", { redirectTo: callbackUrl });
         }}
         className="flex items-center gap-3 bg-[#5865F2] hover:bg-[#4752C4] px-6 py-3 rounded-lg text-white font-medium transition-colors"
       >

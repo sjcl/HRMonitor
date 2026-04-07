@@ -3,6 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "check:protected-routes": "node scripts/check-protected-routes.mjs",
+    "prebuild": "npm run check:protected-routes",
     "dev": "next dev",
     "build": "next build",
     "start": "next start"

@@ -21,9 +21,9 @@ interface UpdateMessage {
 
 type ServerMessage = SnapshotMessage | UpdateMessage;
 
-function buildWsUrl(): string {
+function buildWsUrl(path: string): string {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  return `${proto}//${location.host}/api/ws/heart-rates`;
+  return `${proto}//${location.host}${path}`;
 }
 
 type SessionStatus = "authenticated" | "unauthenticated" | "error";
@@ -39,44 +39,34 @@ async function checkSession(): Promise<SessionStatus> {
   }
 }
 
-export function useHeartRateWs(
-  userIds: string[],
-): { data: Map<string, LatestHeartRate>; reconnectCount: number } {
-  const [data, setData] = useState<Map<string, LatestHeartRate>>(new Map());
+// ---------------------------------------------------------------------------
+// Shared WebSocket connection hook
+// ---------------------------------------------------------------------------
+
+interface UseWsConnectionOptions {
+  /** WS path (e.g. "/api/ws/me"). null = don't connect. */
+  path: string | null;
+  /** Called for each incoming server message. */
+  onMessage: (msg: ServerMessage) => void;
+}
+
+function useWsConnection({
+  path,
+  onMessage,
+}: UseWsConnectionOptions): { reconnectCount: number } {
   const [reconnectCount, setReconnectCount] = useState(0);
   const wsRef = useRef<WebSocket | null>(null);
-  const subscribedRef = useRef<Set<string>>(new Set());
-  const userIdsRef = useRef(userIds);
   const hasConnectedRef = useRef(false);
   const wasDisconnectedRef = useRef(false);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const backoffRef = useRef(1000);
+  const onMessageRef = useRef(onMessage);
+  onMessageRef.current = onMessage;
 
-  // Batch pending WS updates and flush once per animation frame
-  const pendingUpdatesRef = useRef<Map<string, LatestHeartRate>>(new Map());
-  const rafRef = useRef<number | null>(null);
-
-  // Keep userIdsRef in sync
-  userIdsRef.current = userIds;
-  const userIdsKey = userIds.slice().sort().join(",");
-
-  const flushUpdates = useCallback(() => {
-    rafRef.current = null;
-    const pending = pendingUpdatesRef.current;
-    if (pending.size === 0) return;
-    const batch = new Map(pending);
-    pending.clear();
-    setData((prev) => {
-      const next = new Map(prev);
-      for (const [uid, hr] of batch) {
-        next.set(uid, hr);
-      }
-      return next;
-    });
-  }, []);
-
-  // Connect on mount only
   useEffect(() => {
+    if (path === null) return;
+    const currentPath = path;
+
     let cancelled = false;
 
     function scheduleReconnect() {
@@ -93,13 +83,11 @@ export function useHeartRateWs(
     async function connect() {
       if (typeof window === "undefined") return;
 
-      // Clear any pending reconnect timer
       if (reconnectTimerRef.current) {
         clearTimeout(reconnectTimerRef.current);
         reconnectTimerRef.current = null;
       }
 
-      // Check session before connecting — prevents infinite reconnect loop on auth failure
       const sessionStatus = await checkSession();
       if (cancelled) return;
       if (sessionStatus === "unauthenticated") {
@@ -107,12 +95,11 @@ export function useHeartRateWs(
         return;
       }
       if (sessionStatus === "error") {
-        // Transient failure — retry with backoff instead of redirecting
         scheduleReconnect();
         return;
       }
 
-      const ws = new WebSocket(buildWsUrl());
+      const ws = new WebSocket(buildWsUrl(currentPath));
       wsRef.current = ws;
 
       ws.onopen = () => {
@@ -126,38 +113,13 @@ export function useHeartRateWs(
         hasConnectedRef.current = true;
         wasDisconnectedRef.current = false;
         backoffRef.current = 1000;
-
-        const ids = userIdsRef.current;
-        if (ids.length > 0) {
-          ws.send(JSON.stringify({ type: "subscribe", user_ids: ids }));
-          subscribedRef.current = new Set(ids);
-        }
       };
 
       ws.onmessage = (event) => {
         if (ws !== wsRef.current) return;
         try {
           const msg: ServerMessage = JSON.parse(event.data);
-          if (msg.type === "snapshot") {
-            // Snapshots are infrequent — apply immediately
-            setData((prev) => {
-              const next = new Map(prev);
-              for (const [userId, item] of Object.entries(msg.data)) {
-                if (item) {
-                  next.set(userId, item);
-                } else {
-                  next.delete(userId);
-                }
-              }
-              return next;
-            });
-          } else if (msg.type === "update") {
-            // Batch updates and flush once per animation frame
-            pendingUpdatesRef.current.set(msg.data.user_id, msg.data);
-            if (rafRef.current === null) {
-              rafRef.current = requestAnimationFrame(flushUpdates);
-            }
-          }
+          onMessageRef.current(msg);
         } catch {
           // Ignore malformed messages
         }
@@ -182,43 +144,140 @@ export function useHeartRateWs(
         clearTimeout(reconnectTimerRef.current);
         reconnectTimerRef.current = null;
       }
-      if (rafRef.current !== null) {
-        cancelAnimationFrame(rafRef.current);
-        rafRef.current = null;
-      }
       const ws = wsRef.current;
       wsRef.current = null;
       ws?.close();
     };
-  }, [flushUpdates]);
+  }, [path]);
 
-  // Handle subscription changes while connected
+  return { reconnectCount };
+}
+
+// ---------------------------------------------------------------------------
+// /api/ws/me — own heart rate
+// ---------------------------------------------------------------------------
+
+export function useMyHeartRateWs(): {
+  data: LatestHeartRate | null;
+  reconnectCount: number;
+} {
+  const [data, setData] = useState<LatestHeartRate | null>(null);
+
+  const onMessage = useCallback((msg: ServerMessage) => {
+    if (msg.type === "snapshot") {
+      const values = Object.values(msg.data);
+      setData(values[0] ?? null);
+    } else if (msg.type === "update") {
+      setData(msg.data);
+    }
+  }, []);
+
+  const { reconnectCount } = useWsConnection({
+    path: "/api/ws/me",
+    onMessage,
+  });
+
+  return { data, reconnectCount };
+}
+
+// ---------------------------------------------------------------------------
+// /api/ws/users/{id} — specific user's heart rate
+// ---------------------------------------------------------------------------
+
+export function useUserHeartRateWs(
+  userId: string | null,
+): { data: LatestHeartRate | null; reconnectCount: number } {
+  const [data, setData] = useState<LatestHeartRate | null>(null);
+
+  // Reset data when userId changes
+  const prevUserIdRef = useRef(userId);
+  if (prevUserIdRef.current !== userId) {
+    prevUserIdRef.current = userId;
+    setData(null);
+  }
+
+  const onMessage = useCallback((msg: ServerMessage) => {
+    if (msg.type === "snapshot") {
+      const values = Object.values(msg.data);
+      setData(values[0] ?? null);
+    } else if (msg.type === "update") {
+      setData(msg.data);
+    }
+  }, []);
+
+  const path = userId ? `/api/ws/users/${userId}` : null;
+  const { reconnectCount } = useWsConnection({ path, onMessage });
+
+  return { data, reconnectCount };
+}
+
+// ---------------------------------------------------------------------------
+// /api/ws/groups/{id} — group heart rates
+// ---------------------------------------------------------------------------
+
+export function useGroupHeartRateWs(
+  groupId: string | null,
+): { data: Map<string, LatestHeartRate>; reconnectCount: number } {
+  const [data, setData] = useState<Map<string, LatestHeartRate>>(new Map());
+
+  // Batch pending updates and flush once per animation frame
+  const pendingUpdatesRef = useRef<Map<string, LatestHeartRate>>(new Map());
+  const rafRef = useRef<number | null>(null);
+
+  const flushUpdates = useCallback(() => {
+    rafRef.current = null;
+    const pending = pendingUpdatesRef.current;
+    if (pending.size === 0) return;
+    const batch = new Map(pending);
+    pending.clear();
+    setData((prev) => {
+      const next = new Map(prev);
+      for (const [uid, hr] of batch) {
+        next.set(uid, hr);
+      }
+      return next;
+    });
+  }, []);
+
+  const onMessage = useCallback(
+    (msg: ServerMessage) => {
+      if (msg.type === "snapshot") {
+        // Snapshots are infrequent — apply immediately
+        setData((prev) => {
+          const next = new Map(prev);
+          for (const [userId, item] of Object.entries(msg.data)) {
+            if (item) {
+              next.set(userId, item);
+            } else {
+              next.delete(userId);
+            }
+          }
+          return next;
+        });
+      } else if (msg.type === "update") {
+        pendingUpdatesRef.current.set(msg.data.user_id, msg.data);
+        if (rafRef.current === null) {
+          rafRef.current = requestAnimationFrame(flushUpdates);
+        }
+      }
+    },
+    [flushUpdates],
+  );
+
+  // Reset data and cancel pending updates when groupId changes (or on unmount)
   useEffect(() => {
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    setData(new Map());
+    return () => {
+      pendingUpdatesRef.current.clear();
+      if (rafRef.current !== null) {
+        cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
+      }
+    };
+  }, [groupId]);
 
-    const currentIds = new Set(userIds);
-    const prevIds = subscribedRef.current;
-
-    const toSubscribe = userIds.filter((id) => !prevIds.has(id));
-    const toUnsubscribe = [...prevIds].filter((id) => !currentIds.has(id));
-
-    if (toSubscribe.length > 0) {
-      ws.send(JSON.stringify({ type: "subscribe", user_ids: toSubscribe }));
-    }
-    if (toUnsubscribe.length > 0) {
-      ws.send(
-        JSON.stringify({ type: "unsubscribe", user_ids: toUnsubscribe }),
-      );
-      setData((prev) => {
-        const next = new Map(prev);
-        for (const id of toUnsubscribe) next.delete(id);
-        return next;
-      });
-    }
-
-    subscribedRef.current = currentIds;
-  }, [userIdsKey]);
+  const path = groupId ? `/api/ws/groups/${groupId}` : null;
+  const { reconnectCount } = useWsConnection({ path, onMessage });
 
   return { data, reconnectCount };
 }

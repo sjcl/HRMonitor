@@ -2,6 +2,7 @@ const sizeClasses = {
   sm: "w-6 h-6 text-xs",
   md: "w-8 h-8 text-sm",
   lg: "w-10 h-10 text-base",
+  xl: "w-9 h-9 text-sm",
 } as const;
 
 export function UserAvatar({
@@ -11,7 +12,7 @@ export function UserAvatar({
 }: {
   src: string | null | undefined;
   name: string;
-  size?: "sm" | "md" | "lg";
+  size?: "sm" | "md" | "lg" | "xl";
 }) {
   const cls = sizeClasses[size];
 

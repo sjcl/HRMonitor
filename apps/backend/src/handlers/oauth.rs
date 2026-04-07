@@ -213,7 +213,7 @@ pub async fn callback(
             last_connected_at = NULL,
             last_error = NULL",
     )
-    .bind(&user_id)
+    .bind(user_id)
     .bind(&enc_access)
     .bind(&enc_refresh)
     .bind(key_version as i32)
@@ -229,7 +229,7 @@ pub async fn callback(
     // 9. Notify worker manager
     state
         .worker_manager
-        .notify_connection_changed(&user_id)
+        .notify_connection_changed(user_id)
         .await;
 
     tracing::info!(user_id = %user_id, "Pulsoid authorized successfully");
