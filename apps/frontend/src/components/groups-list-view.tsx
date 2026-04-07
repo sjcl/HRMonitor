@@ -107,12 +107,12 @@ export function GroupsListView() {
   return (
     <div className="mb-8">
       <div className="flex items-center justify-between mb-4">
-        <h2 className="text-lg font-semibold">グループ</h2>
+        <h2 className="text-lg font-semibold">共有一覧</h2>
         <button
           onClick={() => setModalStep("choose")}
           className="bg-blue-600 hover:bg-blue-700 px-3 py-1.5 rounded text-sm"
         >
-          グループを作成
+          新しい共有
         </button>
       </div>
 
@@ -282,94 +282,113 @@ export function GroupsListView() {
 
       {groups && groups.length === 0 && (
         <p className="text-gray-400">
-          グループに参加していません。グループを作成するか、招待リンクから参加してください。
+          共有がありません。共有を追加するか、招待リンクから参加してください。
         </p>
       )}
 
-      {groups && groups.length > 0 && (
-        <div className="flex flex-col gap-3">
-          {groups.map((group) => (
-            <Link
-              key={group.id}
-              href={`/groups/${group.id}`}
-              className="bg-gray-900 border border-gray-700 rounded-lg p-4 hover:border-gray-500 transition-colors block"
-            >
-              <div className="flex items-center gap-4">
-                <div className="relative w-9 h-9 flex-shrink-0">
-                  {group.member_previews.length === 0 ? (
-                    <UserAvatar
-                      src={undefined}
-                      name="?"
-                      size="xl"
-                    />
-                  ) : group.member_previews.length === 1 ? (
-                    <UserAvatar
-                      src={group.member_previews[0].avatar_url}
-                      name={group.member_previews[0].display_name}
-                      size="xl"
-                    />
-                  ) : (
-                    <>
-                      <div className="absolute top-0 left-0 ring-2 ring-gray-900 rounded-full">
-                        <UserAvatar
-                          src={group.member_previews[0].avatar_url}
-                          name={group.member_previews[0].display_name}
-                          size="sm"
-                        />
-                      </div>
-                      <div className="absolute bottom-0 right-0 ring-2 ring-gray-900 rounded-full">
-                        <UserAvatar
-                          src={group.member_previews[1].avatar_url}
-                          name={group.member_previews[1].display_name}
-                          size="sm"
-                        />
-                      </div>
-                    </>
-                  )}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <h3 className="font-medium truncate">
-                    {formatGroupDisplayName(group.display_name, group.name, group.member_count)}
-                  </h3>
-                  <p className="text-sm text-gray-400 mt-1">
-                    {group.member_count}人のメンバー ・{" "}
-                    {group.my_role === "owner" ? "オーナー" : "メンバー"} ・{" "}
-                    {group.invite_policy === "group+"
-                      ? "全員招待可"
-                      : "オーナーのみ招待可"}
-                  </p>
-                </div>
-                <div className="flex items-center gap-3 flex-shrink-0">
-                  <label
-                    className="flex items-center gap-2 text-sm"
-                    onClick={(e) => e.preventDefault()}
-                  >
-                    <span className="text-gray-400">共有</span>
-                    <button
-                      onClick={(e) => {
-                        e.preventDefault();
-                        sharingMutation.mutate({
-                          groupId: group.id,
-                          sharing: !group.my_sharing,
-                        });
-                      }}
-                      className={`w-10 h-6 rounded-full transition-colors relative ${
-                        group.my_sharing ? "bg-blue-600" : "bg-gray-600"
-                      }`}
-                    >
-                      <span
-                        className={`absolute top-1 w-4 h-4 rounded-full bg-white transition-transform ${
-                          group.my_sharing ? "left-5" : "left-1"
-                        }`}
+      {groups && groups.length > 0 && (() => {
+        const emptyGroups = groups.filter(g => g.member_count === 1);
+        const personalGroups = groups.filter(g => g.member_count === 2);
+        const groupGroups = groups.filter(g => g.member_count >= 3);
+
+        const renderCard = (group: typeof groups[number]) => (
+          <Link
+            key={group.id}
+            href={`/groups/${group.id}`}
+            className="bg-gray-900 border border-gray-700 rounded-lg p-4 hover:border-gray-500 transition-colors block"
+          >
+            <div className="flex items-center gap-4">
+              <div className="relative w-9 h-9 flex-shrink-0">
+                {group.member_previews.length === 0 ? (
+                  <UserAvatar
+                    src={undefined}
+                    name="?"
+                    size="xl"
+                  />
+                ) : group.member_previews.length === 1 ? (
+                  <UserAvatar
+                    src={group.member_previews[0].avatar_url}
+                    name={group.member_previews[0].display_name}
+                    size="xl"
+                  />
+                ) : (
+                  <>
+                    <div className="absolute top-0 left-0 ring-2 ring-gray-900 rounded-full">
+                      <UserAvatar
+                        src={group.member_previews[0].avatar_url}
+                        name={group.member_previews[0].display_name}
+                        size="sm"
                       />
-                    </button>
-                  </label>
-                </div>
+                    </div>
+                    <div className="absolute bottom-0 right-0 ring-2 ring-gray-900 rounded-full">
+                      <UserAvatar
+                        src={group.member_previews[1].avatar_url}
+                        name={group.member_previews[1].display_name}
+                        size="sm"
+                      />
+                    </div>
+                  </>
+                )}
               </div>
-            </Link>
-          ))}
-        </div>
-      )}
+              <div className="flex-1 min-w-0">
+                <h3 className="font-medium truncate">
+                  {formatGroupDisplayName(group.display_name, group.name, group.member_count)}
+                </h3>
+                <p className="text-sm text-gray-400 mt-1">
+                  {group.member_count}人のメンバー ・{" "}
+                  {group.my_role === "owner" ? "オーナー" : "メンバー"} ・{" "}
+                  {group.invite_policy === "group+"
+                    ? "全員招待可"
+                    : "オーナーのみ招待可"}
+                </p>
+              </div>
+              <div className="flex items-center gap-3 flex-shrink-0">
+                <label
+                  className="flex items-center gap-2 text-sm"
+                  onClick={(e) => e.preventDefault()}
+                >
+                  <span className="text-gray-400">共有</span>
+                  <button
+                    onClick={(e) => {
+                      e.preventDefault();
+                      sharingMutation.mutate({
+                        groupId: group.id,
+                        sharing: !group.my_sharing,
+                      });
+                    }}
+                    className={`w-10 h-6 rounded-full transition-colors relative ${
+                      group.my_sharing ? "bg-blue-600" : "bg-gray-600"
+                    }`}
+                  >
+                    <span
+                      className={`absolute top-1 w-4 h-4 rounded-full bg-white transition-transform ${
+                        group.my_sharing ? "left-5" : "left-1"
+                      }`}
+                    />
+                  </button>
+                </label>
+              </div>
+            </div>
+          </Link>
+        );
+
+        const sections = [
+          { label: "個人", items: personalGroups },
+          { label: "グループ", items: groupGroups },
+          { label: "空のグループ", items: emptyGroups },
+        ];
+
+        return sections
+          .filter(s => s.items.length > 0)
+          .map(s => (
+            <div key={s.label} className="mb-6">
+              <h3 className="text-sm font-medium text-gray-400 mb-2">{s.label}</h3>
+              <div className="flex flex-col gap-3">
+                {s.items.map(renderCard)}
+              </div>
+            </div>
+          ));
+      })()}
     </div>
   );
 }
