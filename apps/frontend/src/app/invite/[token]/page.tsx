@@ -1,12 +1,22 @@
 "use client";
 
 import { useParams, useRouter } from "next/navigation";
-import { useSession } from "next-auth/react";
+import { SessionProvider, useSession } from "next-auth/react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { getInviteInfo, acceptInvite } from "@/lib/groups-api";
 import { ApiError } from "@/lib/api";
 
 export default function InvitePage() {
+  return (
+    <SessionProvider>
+      <main className="max-w-5xl mx-auto p-6">
+        <InviteContent />
+      </main>
+    </SessionProvider>
+  );
+}
+
+function InviteContent() {
   const { token } = useParams<{ token: string }>();
   const { data: session, status: sessionStatus } = useSession();
   const router = useRouter();
