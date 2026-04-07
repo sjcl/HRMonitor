@@ -256,9 +256,11 @@ async fn fetch_sharing_members(
     auth_user_id: &str,
 ) -> Result<HashSet<String>, AppError> {
     let rows: Vec<(String,)> = sqlx::query_as(
-        "SELECT user_id FROM group_members \
-         WHERE group_id = $1 AND status = 'active' \
-           AND (sharing = true OR user_id = $2)",
+        "SELECT gm.user_id FROM group_members gm \
+         JOIN users u ON u.id = gm.user_id \
+         WHERE gm.group_id = $1 AND gm.status = 'active' \
+           AND (gm.sharing = true OR gm.user_id = $2) \
+           AND (u.heart_rate_visibility != 'private' OR gm.user_id = $2)",
     )
     .bind(group_id)
     .bind(auth_user_id)

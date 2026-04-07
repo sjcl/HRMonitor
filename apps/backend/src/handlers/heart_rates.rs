@@ -273,9 +273,11 @@ pub async fn group_heart_rates(
                 EXTRACT(EPOCH FROM hr.recorded_at)::BIGINT AS timestamp
          FROM heart_rate_records hr
          JOIN group_members gm ON gm.user_id = hr.user_id
+         JOIN users u ON u.id = gm.user_id
          WHERE gm.group_id = $1
            AND gm.status = 'active'
            AND (gm.sharing = true OR gm.user_id = $2)
+           AND (u.heart_rate_visibility != 'private' OR gm.user_id = $2)
            AND hr.recorded_at >= to_timestamp($3)
          ORDER BY hr.recorded_at",
     )
@@ -309,9 +311,11 @@ pub async fn group_minute_stats(
                 hm.sample_count
          FROM heart_rate_1m hm
          JOIN group_members gm ON gm.user_id = hm.user_id
+         JOIN users u ON u.id = gm.user_id
          WHERE gm.group_id = $1
            AND gm.status = 'active'
            AND (gm.sharing = true OR gm.user_id = $2)
+           AND (u.heart_rate_visibility != 'private' OR gm.user_id = $2)
            AND hm.bucket >= to_timestamp($3)
          ORDER BY hm.bucket",
     )
