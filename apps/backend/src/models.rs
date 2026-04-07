@@ -156,6 +156,13 @@ pub struct CreateInviteRequest {
 }
 
 #[derive(Debug, Serialize)]
+pub struct GroupMemberPreview {
+    pub user_id: String,
+    pub display_name: String,
+    pub avatar_url: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct GroupListItem {
     pub id: String,
     pub name: Option<String>,
@@ -164,6 +171,7 @@ pub struct GroupListItem {
     pub my_sharing: bool,
     pub my_role: String,
     pub invite_policy: String,
+    pub member_previews: Vec<GroupMemberPreview>,
     pub created_at: i64,
 }
 

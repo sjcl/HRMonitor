@@ -2,6 +2,12 @@ import { ApiError } from "./api";
 
 // --- Types ---
 
+export interface GroupMemberPreview {
+  user_id: string;
+  display_name: string;
+  avatar_url: string | null;
+}
+
 export interface GroupListItem {
   id: string;
   name: string | null;
@@ -10,6 +16,7 @@ export interface GroupListItem {
   my_sharing: boolean;
   my_role: string;
   invite_policy: string;
+  member_previews: GroupMemberPreview[];
   created_at: number;
 }
 

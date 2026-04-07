@@ -9,6 +9,7 @@ import {
 } from "@/lib/groups-api";
 import { useState } from "react";
 import Link from "next/link";
+import { UserAvatar } from "@/components/user-avatar";
 
 export function GroupsListView() {
   const queryClient = useQueryClient();
@@ -118,9 +119,25 @@ export function GroupsListView() {
               href={`/groups/${group.id}`}
               className="bg-gray-900 border border-gray-700 rounded-lg p-4 hover:border-gray-500 transition-colors block"
             >
-              <div className="flex items-center justify-between">
-                <div>
-                  <h3 className="font-medium">
+              <div className="flex items-center gap-4">
+                <div className="flex -space-x-2 flex-shrink-0">
+                  {group.member_previews.slice(0, 5).map((member) => (
+                    <div key={member.user_id} className="ring-2 ring-gray-900 rounded-full">
+                      <UserAvatar
+                        src={member.avatar_url}
+                        name={member.display_name}
+                        size="sm"
+                      />
+                    </div>
+                  ))}
+                  {Math.max(0, group.member_count - 5) > 0 && (
+                    <span className="w-6 h-6 rounded-full bg-gray-700 flex items-center justify-center text-xs text-gray-300 ring-2 ring-gray-900 flex-shrink-0">
+                      +{group.member_count - 5}
+                    </span>
+                  )}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <h3 className="font-medium truncate">
                     {formatGroupDisplayName(group.display_name, group.name, group.member_count)}
                   </h3>
                   <p className="text-sm text-gray-400 mt-1">
@@ -131,7 +148,7 @@ export function GroupsListView() {
                       : "オーナーのみ招待可"}
                   </p>
                 </div>
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-3 flex-shrink-0">
                   <label
                     className="flex items-center gap-2 text-sm"
                     onClick={(e) => e.preventDefault()}

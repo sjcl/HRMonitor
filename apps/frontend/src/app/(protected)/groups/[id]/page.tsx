@@ -199,7 +199,7 @@ export default function GroupDetailPage() {
       {/* Members */}
       <div className="mb-6">
         <h2 className="text-lg font-semibold mb-3">
-          メンバー{group.members.length !== 2 && ` (${group.members.length})`}
+          メンバー{group.members.length <= 2 && ` (${group.members.length})`}
         </h2>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
           {group.members.map((member) => {

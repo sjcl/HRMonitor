@@ -1,6 +1,7 @@
 use axum::extract::{Path, State};
 use axum::{Extension, Json};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::AppState;
@@ -8,8 +9,8 @@ use crate::auth::AuthenticatedUser;
 use crate::error::AppError;
 use crate::models::{
     AcceptInviteResponse, CreateGroupRequest, CreateInviteRequest, CreateInviteResponse,
-    GroupDetail, GroupListItem, GroupMemberInfo, InviteInfo, InviteListItem, UpdateGroupRequest,
-    UpdateMembershipRequest,
+    GroupDetail, GroupListItem, GroupMemberInfo, GroupMemberPreview, InviteInfo, InviteListItem,
+    UpdateGroupRequest, UpdateMembershipRequest,
 };
 
 const VALID_INVITE_POLICIES: &[&str] = &["group", "group+"];
@@ -27,10 +28,12 @@ fn generate_token() -> String {
 }
 
 /// Compute display name for a group from the viewer's perspective.
-fn compute_display_name(
+fn compute_display_name<T>(
     group_name: &Option<String>,
-    members: &[GroupMemberInfo],
+    members: &[T],
     viewer_id: &str,
+    get_user_id: impl Fn(&T) -> &str,
+    get_display_name: impl Fn(&T) -> &str,
 ) -> Option<String> {
     if let Some(name) = group_name {
         if !name.is_empty() {
@@ -39,8 +42,8 @@ fn compute_display_name(
     }
     let others: Vec<&str> = members
         .iter()
-        .filter(|m| m.user_id != viewer_id)
-        .map(|m| m.display_name.as_str())
+        .filter(|m| get_user_id(m) != viewer_id)
+        .map(|m| get_display_name(m))
         .collect();
     match others.len() {
         0 => None,
@@ -151,7 +154,10 @@ pub async fn create_group(
     tx.commit().await?;
 
     let members = fetch_active_members(&state.db, &group_id).await?;
-    let display_name = compute_display_name(&body.name, &members, &auth_user.id);
+    let display_name = compute_display_name(
+        &body.name, &members, &auth_user.id,
+        |m| &m.user_id, |m| &m.display_name,
+    );
 
     Ok(Json(GroupDetail {
         id: group_id,
@@ -195,23 +201,66 @@ pub async fn list_groups(
     .fetch_all(&state.db)
     .await?;
 
-    // For display names, we need member info per group
-    let mut items = Vec::with_capacity(rows.len());
-    for row in rows {
-        let members = fetch_active_members(&state.db, &row.id).await?;
-        let display_name = compute_display_name(&row.name, &members, &auth_user.id);
-
-        items.push(GroupListItem {
-            id: row.id,
-            name: row.name,
-            display_name,
-            member_count: row.member_count,
-            my_sharing: row.my_sharing,
-            my_role: row.my_role,
-            invite_policy: row.invite_policy,
-            created_at: row.created_at,
-        });
+    if rows.is_empty() {
+        return Ok(Json(Vec::new()));
     }
+
+    // Batch-fetch all members for all groups in one query
+    let group_ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+
+    #[derive(sqlx::FromRow)]
+    struct GroupListMemberRow {
+        group_id: String,
+        user_id: String,
+        display_name: String,
+        avatar_url: Option<String>,
+    }
+
+    let member_rows: Vec<GroupListMemberRow> = sqlx::query_as(
+        "SELECT gm.group_id, gm.user_id, u.display_name, a.provider_image as avatar_url
+         FROM group_members gm
+         JOIN users u ON u.id = gm.user_id
+         LEFT JOIN accounts a ON a.user_id = u.id AND a.provider = 'discord'
+         WHERE gm.group_id = ANY($1) AND gm.status = 'active'
+         ORDER BY gm.group_id, gm.created_at, gm.user_id",
+    )
+    .bind(&group_ids)
+    .fetch_all(&state.db)
+    .await?;
+
+    let mut members_map: HashMap<String, Vec<GroupMemberPreview>> = HashMap::new();
+    for r in member_rows {
+        members_map
+            .entry(r.group_id)
+            .or_default()
+            .push(GroupMemberPreview {
+                user_id: r.user_id,
+                display_name: r.display_name,
+                avatar_url: r.avatar_url,
+            });
+    }
+
+    let items = rows
+        .into_iter()
+        .map(|row| {
+            let member_previews = members_map.remove(&row.id).unwrap_or_default();
+            let display_name = compute_display_name(
+                &row.name, &member_previews, &auth_user.id,
+                |m| &m.user_id, |m| &m.display_name,
+            );
+            GroupListItem {
+                id: row.id,
+                name: row.name,
+                display_name,
+                member_count: row.member_count,
+                my_sharing: row.my_sharing,
+                my_role: row.my_role,
+                invite_policy: row.invite_policy,
+                member_previews,
+                created_at: row.created_at,
+            }
+        })
+        .collect();
 
     Ok(Json(items))
 }
@@ -241,7 +290,10 @@ pub async fn get_group(
     .ok_or_else(|| AppError::NotFound("Group not found".into()))?;
 
     let members = fetch_active_members(&state.db, &id).await?;
-    let display_name = compute_display_name(&group.name, &members, &auth_user.id);
+    let display_name = compute_display_name(
+        &group.name, &members, &auth_user.id,
+        |m| &m.user_id, |m| &m.display_name,
+    );
 
     Ok(Json(GroupDetail {
         id,
@@ -590,7 +642,10 @@ pub async fn get_invite_info(
 
     // Compute display name
     let members = fetch_active_members(&state.db, &row.group_id).await?;
-    let group_display_name = compute_display_name(&row.group_name, &members, &auth_user.id);
+    let group_display_name = compute_display_name(
+        &row.group_name, &members, &auth_user.id,
+        |m| &m.user_id, |m| &m.display_name,
+    );
 
     Ok(Json(InviteInfo {
         group_name: row.group_name,
