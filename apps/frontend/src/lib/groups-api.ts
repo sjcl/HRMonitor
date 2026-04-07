@@ -41,6 +41,7 @@ export interface GroupDetail {
 
 export interface InviteListItem {
   id: string;
+  created_by: string;
   created_by_name: string;
   expires_at: number;
   max_uses: number | null;

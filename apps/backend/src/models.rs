@@ -199,6 +199,7 @@ pub struct GroupMemberInfo {
 #[derive(Debug, Serialize)]
 pub struct InviteListItem {
     pub id: String,
+    pub created_by: String,
     pub created_by_name: String,
     pub expires_at: i64,
     pub max_uses: Option<i32>,

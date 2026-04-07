@@ -529,6 +529,7 @@ pub async fn list_invites(
     #[derive(sqlx::FromRow)]
     struct InviteRow {
         id: String,
+        created_by: String,
         created_by_name: String,
         expires_at: i64,
         max_uses: Option<i32>,
@@ -537,7 +538,7 @@ pub async fn list_invites(
     }
 
     let rows: Vec<InviteRow> = sqlx::query_as(
-        "SELECT gi.id, u.display_name as created_by_name,
+        "SELECT gi.id, gi.created_by, u.display_name as created_by_name,
                 EXTRACT(EPOCH FROM gi.expires_at)::BIGINT as expires_at,
                 gi.max_uses, gi.use_count,
                 EXTRACT(EPOCH FROM gi.created_at)::BIGINT as created_at
@@ -557,6 +558,7 @@ pub async fn list_invites(
         rows.into_iter()
             .map(|r| InviteListItem {
                 id: r.id,
+                created_by: r.created_by,
                 created_by_name: r.created_by_name,
                 expires_at: r.expires_at,
                 max_uses: r.max_uses,

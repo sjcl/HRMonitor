@@ -320,7 +320,7 @@ export default function GroupDetailPage() {
                       </>
                     )}
                   </div>
-                  {isOwner && (
+                  {(isOwner || invite.created_by === session?.user?.id) && (
                     <button
                       onClick={() => revokeMutation.mutate(invite.id)}
                       disabled={revokeMutation.isPending}
