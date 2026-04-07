@@ -35,6 +35,9 @@ export default function GroupDetailPage() {
   const { data: invites } = useQuery({
     queryKey: ["group-invites", id],
     queryFn: () => listInvites(id),
+    enabled:
+      !!group &&
+      (group.my_role === "owner" || group.invite_policy === "group+"),
   });
 
   const [editing, setEditing] = useState(false);
@@ -251,10 +254,10 @@ export default function GroupDetailPage() {
       </div>
 
       {/* Invitations */}
-      <div className="mb-6">
-        <div className="flex items-center justify-between mb-3">
-          <h2 className="text-lg font-semibold">招待</h2>
-          {canInvite && (
+      {canInvite && (
+        <div className="mb-6">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-lg font-semibold">招待</h2>
             <button
               onClick={() => createInviteMutation.mutate()}
               disabled={createInviteMutation.isPending}
@@ -262,97 +265,81 @@ export default function GroupDetailPage() {
             >
               招待を作成
             </button>
-          )}
-        </div>
-
-        {!canInvite && (
-          <p className="text-sm text-gray-400">
-            このグループではオーナーのみが招待を作成できます。
-          </p>
-        )}
-
-        {/* New invite token display */}
-        {inviteUrl && (
-          <div className="bg-green-900/30 border border-green-700 rounded-lg p-4 mb-4">
-            <p className="text-sm text-green-400 mb-2">
-              招待リンクが作成されました。このリンクは一度だけ表示されます。
-            </p>
-            <div className="flex items-center gap-2">
-              <input
-                type="text"
-                readOnly
-                value={inviteUrl}
-                className="bg-gray-800 border border-gray-700 rounded px-3 py-2 w-full text-sm font-mono"
-              />
-              <button
-                onClick={() => {
-                  navigator.clipboard.writeText(inviteUrl);
-                  setCopied(true);
-                }}
-                className="bg-gray-700 hover:bg-gray-600 px-3 py-2 rounded text-sm whitespace-nowrap"
-              >
-                {copied ? "コピー済み" : "コピー"}
-              </button>
-            </div>
           </div>
-        )}
 
-        {/* Active invites list */}
-        {invites && invites.length > 0 && (
-          <div className="flex flex-col gap-2">
-            {invites.map((invite) => (
-              <div
-                key={invite.id}
-                className="bg-gray-900 border border-gray-700 rounded-lg p-3 flex items-center justify-between"
-              >
-                <div className="text-sm">
-                  <span className="text-gray-400">
-                    {invite.created_by_name}が作成
-                  </span>
-                  <span className="text-gray-500 mx-2">・</span>
-                  <span className="text-gray-400">
-                    {new Date(invite.expires_at * 1000).toLocaleDateString()}
-                    まで
-                  </span>
-                  {invite.max_uses && (
-                    <>
-                      <span className="text-gray-500 mx-2">・</span>
-                      <span className="text-gray-400">
-                        {invite.use_count}/{invite.max_uses}回使用
-                      </span>
-                    </>
+          {/* New invite token display */}
+          {inviteUrl && (
+            <div className="bg-green-900/30 border border-green-700 rounded-lg p-4 mb-4">
+              <p className="text-sm text-green-400 mb-2">
+                招待リンクが作成されました。このリンクは一度だけ表示されます。
+              </p>
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  readOnly
+                  value={inviteUrl}
+                  className="bg-gray-800 border border-gray-700 rounded px-3 py-2 w-full text-sm font-mono"
+                />
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(inviteUrl);
+                    setCopied(true);
+                  }}
+                  className="bg-gray-700 hover:bg-gray-600 px-3 py-2 rounded text-sm whitespace-nowrap"
+                >
+                  {copied ? "コピー済み" : "コピー"}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Active invites list */}
+          {invites && invites.length > 0 && (
+            <div className="flex flex-col gap-2">
+              {invites.map((invite) => (
+                <div
+                  key={invite.id}
+                  className="bg-gray-900 border border-gray-700 rounded-lg p-3 flex items-center justify-between"
+                >
+                  <div className="text-sm">
+                    <span className="text-gray-400">
+                      {invite.created_by_name}が作成
+                    </span>
+                    <span className="text-gray-500 mx-2">・</span>
+                    <span className="text-gray-400">
+                      {new Date(invite.expires_at * 1000).toLocaleDateString()}
+                      まで
+                    </span>
+                    {invite.max_uses && (
+                      <>
+                        <span className="text-gray-500 mx-2">・</span>
+                        <span className="text-gray-400">
+                          {invite.use_count}/{invite.max_uses}回使用
+                        </span>
+                      </>
+                    )}
+                  </div>
+                  {isOwner && (
+                    <button
+                      onClick={() => revokeMutation.mutate(invite.id)}
+                      disabled={revokeMutation.isPending}
+                      className="text-sm text-red-400 hover:text-red-300 disabled:opacity-50"
+                    >
+                      無効化
+                    </button>
                   )}
                 </div>
-                {isOwner && (
-                  <button
-                    onClick={() => revokeMutation.mutate(invite.id)}
-                    disabled={revokeMutation.isPending}
-                    className="text-sm text-red-400 hover:text-red-300 disabled:opacity-50"
-                  >
-                    無効化
-                  </button>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
+              ))}
+            </div>
+          )}
 
-        {invites && invites.length === 0 && canInvite && (
-          <p className="text-sm text-gray-400">
-            有効な招待はありません。
-          </p>
-        )}
-      </div>
-
-      {/* Group info */}
-      <div className="text-sm text-gray-500 mb-6">
-        <p>
-          招待ポリシー:{" "}
-          {group.invite_policy === "group+"
-            ? "メンバー全員が招待可能"
-            : "オーナーのみ招待可能"}
-        </p>
-      </div>
+          {invites && invites.length === 0 && (
+            <p className="text-sm text-gray-400">
+              有効な招待はありません。
+            </p>
+          )}
+        </div>
+      )}
 
       {/* Controls */}
       <div className="border-t border-gray-700 pt-6">
