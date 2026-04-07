@@ -60,14 +60,20 @@ export function GroupsListView() {
     setError(null);
     try {
       const group = await createGroup({});
-      setCreatedGroupId(group.id);
-      const invite = await createInvite(group.id, {
-        max_uses: 1,
-        expires_in_hours: 24,
-      });
-      setInviteUrl(`${window.location.origin}/invite/${invite.token}`);
-      setModalStep("personal-result");
-      queryClient.invalidateQueries({ queryKey: ["groups"] });
+      try {
+        const invite = await createInvite(group.id, {
+          max_uses: 1,
+          expires_in_hours: 24,
+        });
+        setInviteUrl(`${window.location.origin}/invite/${invite.token}`);
+        setCreatedGroupId(group.id);
+        setModalStep("personal-result");
+        queryClient.invalidateQueries({ queryKey: ["groups"] });
+      } catch {
+        queryClient.invalidateQueries({ queryKey: ["groups"] });
+        setError("招待リンクの作成に失敗しました。共有一覧をご確認ください。");
+        setModalStep("choose");
+      }
     } catch {
       setError("作成に失敗しました。もう一度お試しください。");
       setModalStep("choose");
