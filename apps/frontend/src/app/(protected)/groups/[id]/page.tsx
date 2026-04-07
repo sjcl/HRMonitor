@@ -1,6 +1,7 @@
 "use client";
 
 import { useSession } from "next-auth/react";
+import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -196,46 +197,47 @@ export default function GroupDetailPage() {
         <h2 className="text-lg font-semibold mb-3">
           メンバー ({group.members.length})
         </h2>
-        <div className="flex flex-col gap-2">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
           {group.members.map((member) => {
             const hr = liveHrData.get(member.user_id);
             return (
               <div
                 key={member.user_id}
-                className="bg-gray-900 border border-gray-700 rounded-lg p-3 flex items-center justify-between"
+                className="bg-gray-900 border border-gray-700 rounded-lg p-3 grid grid-cols-[auto_1fr_auto] items-center gap-3"
               >
-                <div className="flex items-center gap-3">
-                  <UserAvatar
-                    name={member.display_name}
-                    src={member.avatar_url}
-                    size="md"
-                  />
-                  <div>
-                    <span className="font-medium">{member.display_name}</span>
-                    {member.role === "owner" && (
-                      <span className="ml-2 text-xs bg-yellow-600/30 text-yellow-400 px-2 py-0.5 rounded">
-                        オーナー
-                      </span>
-                    )}
-                  </div>
+                <UserAvatar
+                  name={member.display_name}
+                  src={member.avatar_url}
+                  size="md"
+                />
+                <div className="min-w-0">
+                  <Link
+                    href={`/users/${member.user_id}?from=${id}`}
+                    className="font-medium hover:underline"
+                  >
+                    {member.display_name}
+                  </Link>
+                  {member.role === "owner" && (
+                    <span className="ml-2 text-xs bg-yellow-600/30 text-yellow-400 px-2 py-0.5 rounded">
+                      オーナー
+                    </span>
+                  )}
                 </div>
                 <div className="flex items-center gap-3">
-                  {hr && (
-                    <div className="flex items-center gap-2">
-                      <span className="text-lg font-mono font-bold text-red-400">
-                        {hr.bpm} BPM
-                      </span>
-                      <span className="text-xs text-gray-400">
-                        {new Date(hr.recorded_at * 1000).toLocaleTimeString("ja-JP", {
+                  <span className="w-24 text-right text-lg font-mono font-bold text-red-400">
+                    {hr ? `${hr.bpm} BPM` : ""}
+                  </span>
+                  <span className="w-16 text-xs text-gray-400">
+                    {hr
+                      ? new Date(hr.recorded_at * 1000).toLocaleTimeString("ja-JP", {
                           hour: "2-digit",
                           minute: "2-digit",
                           second: "2-digit",
-                        })}
-                      </span>
-                    </div>
-                  )}
+                        })
+                      : ""}
+                  </span>
                   <span
-                    className={`text-sm ${
+                    className={`w-12 text-right text-sm ${
                       member.sharing ? "text-green-400" : "text-gray-500"
                     }`}
                   >
