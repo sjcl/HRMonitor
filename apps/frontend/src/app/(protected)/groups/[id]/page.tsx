@@ -161,8 +161,8 @@ export default function GroupDetailPage() {
                 onChange={(e) => setEditPolicy(e.target.value)}
                 className="bg-gray-800 border border-gray-700 rounded px-3 py-2 w-full text-sm"
               >
-                <option value="group">オーナーのみ招待可能</option>
-                <option value="group+">メンバー全員が招待可能</option>
+                <option value="group">Ownerのみ招待可能</option>
+                <option value="group+">Member全員が招待可能</option>
               </select>
             </div>
             <div className="flex gap-2">
@@ -198,7 +198,7 @@ export default function GroupDetailPage() {
       {/* Members */}
       <div className="mb-6">
         <h2 className="text-lg font-semibold mb-3">
-          メンバー ({group.members.length})
+          メンバー{group.members.length !== 2 && ` (${group.members.length})`}
         </h2>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
           {group.members.map((member) => {
@@ -220,9 +220,9 @@ export default function GroupDetailPage() {
                   >
                     {member.display_name}
                   </Link>
-                  {member.role === "owner" && (
+                  {member.role === "owner" && group.members.length !== 2 && (
                     <span className="ml-2 text-xs bg-yellow-600/30 text-yellow-400 px-2 py-0.5 rounded">
-                      オーナー
+                      Owner
                     </span>
                   )}
                 </div>
