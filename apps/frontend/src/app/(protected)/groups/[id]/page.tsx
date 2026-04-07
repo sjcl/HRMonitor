@@ -31,7 +31,7 @@ export default function GroupDetailPage() {
     queryFn: () => getGroup(id),
   });
 
-  const { data: liveHrData, reconnectCount } = useGroupHeartRateWs(id);
+  const { data: liveHrData, reconnectCount } = useGroupHeartRateWs(group ? id : null);
 
   const { data: invites } = useQuery({
     queryKey: ["group-invites", id],
