@@ -20,17 +20,6 @@ fn parse_date(s: &str) -> Result<NaiveDate, AppError> {
         .map_err(|_| AppError::BadRequest(format!("Invalid date: {s}, expected YYYY-MM-DD")))
 }
 
-async fn check_user_exists(db: &sqlx::PgPool, user_id: &str) -> Result<(), AppError> {
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)")
-        .bind(user_id)
-        .fetch_one(db)
-        .await?;
-    if !exists {
-        return Err(AppError::NotFound("User not found".into()));
-    }
-    Ok(())
-}
-
 fn parse_period(s: &str) -> Result<(i64, i64), AppError> {
     match s {
         "10m" => Ok((600, 600)),
@@ -56,7 +45,7 @@ pub async fn list_heart_rates(
     let now = chrono::Utc::now().timestamp();
     let from = now - seconds;
 
-    check_user_exists(&state.db, &user_id).await?;
+    super::utils::check_user_exists(&state.db, &user_id).await?;
     ensure_can_view_user(&state.db, &auth_user, &user_id).await?;
 
     let records: Vec<HeartRateResponse> = sqlx::query_as(
@@ -82,7 +71,7 @@ pub async fn heart_rates_by_date(
     Query(params): Query<HeartRateByDateQuery>,
 ) -> Result<Json<Vec<HeartRateResponse>>, AppError> {
     parse_date(&params.date)?;
-    check_user_exists(&state.db, &user_id).await?;
+    super::utils::check_user_exists(&state.db, &user_id).await?;
     ensure_can_view_user(&state.db, &auth_user, &user_id).await?;
 
     let records: Vec<HeartRateResponse> = sqlx::query_as(
@@ -110,7 +99,7 @@ pub async fn daily_stats(
 ) -> Result<Json<Option<DailyStatsResponse>>, AppError> {
     parse_date(&params.date)?;
 
-    check_user_exists(&state.db, &user_id).await?;
+    super::utils::check_user_exists(&state.db, &user_id).await?;
     ensure_can_view_user(&state.db, &auth_user, &user_id).await?;
 
     let record: Option<DailyStatsResponse> = sqlx::query_as(
@@ -146,7 +135,7 @@ pub async fn minute_stats(
     let now = chrono::Utc::now().timestamp();
     let from = now - seconds;
 
-    check_user_exists(&state.db, &user_id).await?;
+    super::utils::check_user_exists(&state.db, &user_id).await?;
     ensure_can_view_user(&state.db, &auth_user, &user_id).await?;
 
     let records: Vec<MinuteStatsResponse> = sqlx::query_as(
@@ -176,7 +165,7 @@ pub async fn minute_stats_by_date(
     Query(params): Query<HeartRateByDateQuery>,
 ) -> Result<Json<Vec<MinuteStatsResponse>>, AppError> {
     parse_date(&params.date)?;
-    check_user_exists(&state.db, &user_id).await?;
+    super::utils::check_user_exists(&state.db, &user_id).await?;
     ensure_can_view_user(&state.db, &auth_user, &user_id).await?;
 
     let records: Vec<MinuteStatsResponse> = sqlx::query_as(
@@ -206,7 +195,7 @@ pub async fn latest_heart_rate(
     Path(user_id): Path<String>,
     Extension(auth_user): Extension<AuthenticatedUser>,
 ) -> Result<Json<HeartRateResponse>, AppError> {
-    check_user_exists(&state.db, &user_id).await?;
+    super::utils::check_user_exists(&state.db, &user_id).await?;
     ensure_can_view_user(&state.db, &auth_user, &user_id).await?;
 
     // Try Redis first

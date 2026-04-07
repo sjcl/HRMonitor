@@ -478,10 +478,14 @@ pub async fn create_invite(
         }
     }
 
+    if let Some(ref target_user_id) = body.target_user_id {
+        super::utils::check_user_exists(&state.db, target_user_id).await?;
+    }
+
     let token = generate_token();
     let token_hash = hash_token(&token);
 
-    let (invite_id, expires_at): (String, i64) = sqlx::query_as(
+    let result = sqlx::query_as(
         "INSERT INTO group_invites (group_id, token_hash, created_by, expires_at, max_uses, target_user_id)
          VALUES ($1, $2, $3, now() + make_interval(hours => $4), $5, $6)
          RETURNING id, EXTRACT(EPOCH FROM expires_at)::BIGINT as expires_at",
@@ -493,7 +497,20 @@ pub async fn create_invite(
     .bind(body.max_uses)
     .bind(&body.target_user_id)
     .fetch_one(&state.db)
-    .await?;
+    .await;
+
+    // Auto-generated constraint name from: group_invites.target_user_id REFERENCES users(id)
+    // See migrations/20260407000000_share_groups.sql:52
+    let (invite_id, expires_at): (String, i64) = match result {
+        Ok(row) => row,
+        Err(sqlx::Error::Database(ref db_err))
+            if db_err.is_foreign_key_violation()
+                && db_err.constraint() == Some("group_invites_target_user_id_fkey") =>
+        {
+            return Err(AppError::NotFound("User not found".into()));
+        }
+        Err(e) => return Err(e.into()),
+    };
 
     Ok(Json(CreateInviteResponse {
         id: invite_id,
