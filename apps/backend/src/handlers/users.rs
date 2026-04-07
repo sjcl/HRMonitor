@@ -4,7 +4,7 @@ use axum::extract::State;
 use std::sync::Arc;
 
 use crate::AppState;
-use crate::auth::{AuthenticatedUser, UserIdParam, ensure_can_view_user};
+use crate::auth::{AuthenticatedUser, ViewableUserId};
 use crate::error::AppError;
 use crate::models::{UpdateUserRequest, User, UserRow};
 
@@ -21,10 +21,8 @@ const VALID_VISIBILITIES: &[&str] = &["group_default", "private"];
 
 pub async fn get_user(
     State(state): State<Arc<AppState>>,
-    UserIdParam(id): UserIdParam,
-    Extension(auth_user): Extension<AuthenticatedUser>,
+    ViewableUserId(id): ViewableUserId,
 ) -> Result<Json<User>, AppError> {
-    ensure_can_view_user(&state.db, &auth_user, &id).await?;
 
     let query = format!("{SELECT_USER_ROW} WHERE u.id = $1");
     let row: UserRow = sqlx::query_as(&query)

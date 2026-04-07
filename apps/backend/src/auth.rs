@@ -1,4 +1,4 @@
-use axum::extract::{Path, Request, State};
+use axum::extract::{FromRef, FromRequestParts, Path, Request, State};
 use axum::http::StatusCode;
 use axum::http::request::Parts;
 use axum::middleware::Next;
@@ -75,7 +75,7 @@ pub async fn require_auth(
 /// authenticated user's ID.
 pub struct UserIdParam(pub String);
 
-impl<S: Send + Sync> axum::extract::FromRequestParts<S> for UserIdParam {
+impl<S: Send + Sync> FromRequestParts<S> for UserIdParam {
     type Rejection = AppError;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
@@ -87,11 +87,33 @@ impl<S: Send + Sync> axum::extract::FromRequestParts<S> for UserIdParam {
             let auth_user = parts
                 .extensions
                 .get::<AuthenticatedUser>()
-                .ok_or_else(|| AppError::BadRequest("Not authenticated".into()))?;
+                .ok_or_else(|| AppError::Unauthorized("Not authenticated".into()))?;
             Ok(UserIdParam(auth_user.id.clone()))
         } else {
             Ok(UserIdParam(id))
         }
+    }
+}
+
+pub struct ViewableUserId(pub String);
+
+impl<S> FromRequestParts<S> for ViewableUserId
+where
+    S: Send + Sync,
+    Arc<AppState>: FromRef<S>,
+{
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let app_state = <Arc<AppState>>::from_ref(state);
+        let auth_user = parts
+            .extensions
+            .get::<AuthenticatedUser>()
+            .cloned()
+            .ok_or_else(|| AppError::Unauthorized("Not authenticated".into()))?;
+        let UserIdParam(target_id) = UserIdParam::from_request_parts(parts, state).await?;
+        ensure_can_view_user(&app_state.db, &auth_user, &target_id).await?;
+        Ok(ViewableUserId(target_id))
     }
 }
 
