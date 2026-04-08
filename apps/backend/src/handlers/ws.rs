@@ -149,10 +149,11 @@ async fn handle_group_ws(
     let mut broadcast_rx = state.hr_broadcast.subscribe();
 
     // Fetch initial member list (sharing=true OR self, status=active)
-    let mut members: HashSet<String> = match fetch_sharing_members(&state.db, &group_id, &auth_user.id).await {
-        Ok(m) => m,
-        Err(_) => return,
-    };
+    let mut members: HashSet<String> =
+        match fetch_sharing_members(&state.db, &group_id, &auth_user.id).await {
+            Ok(m) => m,
+            Err(_) => return,
+        };
 
     // Send initial snapshot
     let user_ids: Vec<String> = members.iter().cloned().collect();
@@ -281,22 +282,21 @@ async fn read_snapshot(
 ) -> HashMap<String, Option<LatestHeartRateUpdate>> {
     let mut results: HashMap<String, Option<LatestHeartRateUpdate>> =
         HashMap::with_capacity(user_ids.len());
-    let mut missing = Vec::new();
+    let mut missing_keys = HashMap::new();
 
     {
         let mut redis = state.redis.lock().await;
         for user_id in user_ids {
             let key = format!("latest_bpm:{user_id}");
             let value: Option<String> = redis.get(&key).await.unwrap_or(None);
-            let parsed =
-                value.and_then(|v| serde_json::from_str::<LatestHeartRateUpdate>(&v).ok());
+            let parsed = value.and_then(|v| serde_json::from_str::<LatestHeartRateUpdate>(&v).ok());
 
             match parsed {
                 Some(value) => {
                     results.insert(user_id.clone(), Some(value));
                 }
                 None => {
-                    missing.push((user_id.clone(), key));
+                    missing_keys.insert(user_id.clone(), key);
                     results.insert(user_id.clone(), None);
                 }
             }
@@ -304,8 +304,7 @@ async fn read_snapshot(
     }
 
     let mut cache_refills = Vec::new();
-    if !missing.is_empty() {
-        let missing_ids: Vec<String> = missing.iter().map(|(uid, _)| uid.clone()).collect();
+    if !missing_keys.is_empty() {
         let rows = sqlx::query_as::<_, (String, i32, i64)>(
             "SELECT DISTINCT ON (user_id) user_id, bpm, \
              EXTRACT(EPOCH FROM recorded_at)::BIGINT AS recorded_at \
@@ -313,29 +312,22 @@ async fn read_snapshot(
              WHERE user_id = ANY($1) \
              ORDER BY user_id, recorded_at DESC",
         )
-        .bind(&missing_ids)
+        .bind(&missing_keys.keys().cloned().collect::<Vec<_>>())
         .fetch_all(&state.db)
         .await
         .inspect_err(|e| tracing::warn!("batch latest HR query failed: {e}"))
         .unwrap_or_default();
 
-        let db_map: HashMap<String, LatestHeartRateUpdate> = rows
-            .into_iter()
-            .map(|(user_id, bpm, recorded_at)| {
+        for (user_id, bpm, recorded_at) in rows {
+            if let Some(key) = missing_keys.remove(&user_id) {
                 let update = LatestHeartRateUpdate {
                     user_id: user_id.clone(),
                     bpm,
                     recorded_at,
                     received_at: recorded_at,
                 };
-                (user_id, update)
-            })
-            .collect();
-
-        for (user_id, key) in missing {
-            if let Some(update) = db_map.get(&user_id) {
                 results.insert(user_id, Some(update.clone()));
-                cache_refills.push((key, update.clone()));
+                cache_refills.push((key, update));
             }
         }
     }
