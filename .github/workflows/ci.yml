@@ -12,13 +12,13 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: apps/backend
+        working-directory: backend
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: apps/backend
+          workspaces: backend
       - name: cargo build
         run: cargo build --locked --all-targets
       - name: cargo test
@@ -29,14 +29,14 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: apps/frontend
+        working-directory: frontend
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
           node-version: "24"
           cache: npm
-          cache-dependency-path: apps/frontend/package-lock.json
+          cache-dependency-path: frontend/package-lock.json
       - name: npm ci
         run: npm ci
       - name: next build

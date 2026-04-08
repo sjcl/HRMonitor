@@ -5,9 +5,9 @@ Pulsoid WebSocket から心拍数データをリアルタイム収集し、Times
 ## プロジェクト構成
 
 ```
-apps/backend/    Rust (axum + sqlx + TimescaleDB + Redis) — ポート 3001
-apps/frontend/   Next.js 16 (App Router + TanStack Query + Recharts + Auth.js v5) — ポート 3000
-apps/nginx/      Nginx (リバースプロキシ + 静的ファイル配信) — ポート 80
+backend/    Rust (axum + sqlx + TimescaleDB + Redis) — ポート 3001
+frontend/   Next.js 16 (App Router + TanStack Query + Recharts + Auth.js v5) — ポート 3000
+nginx/      Nginx (リバースプロキシ + 静的ファイル配信) — ポート 80
 docs/            仕様書 (API, アーキテクチャ, スキーマ)
 ```
 
@@ -124,13 +124,13 @@ docker compose -f docker-compose.yml --profile prod up --build
 
 ```bash
 # Backend
-cd apps/backend
+cd backend
 DATABASE_URL=postgres://hrmonitor:hrmonitor@localhost:5432/hrmonitor \
 REDIS_URL=redis://localhost:6379 \
 cargo run
 
 # Frontend
-cd apps/frontend
+cd frontend
 npm run dev
 ```
 
@@ -140,9 +140,9 @@ npm run dev
 |----------|---------|------|
 | `timescaledb` | `timescale/timescaledb:2.26.1-pg17` | TimescaleDB (PostgreSQL 17) |
 | `redis` | `redis:8.6.2-alpine` | Redis (最新心拍数キャッシュ) |
-| `backend` | ビルド: `./apps/backend` | Rust API サーバー |
-| `frontend` | ビルド: `./apps/frontend` | Next.js (standalone) |
-| `nginx` | ビルド: `./apps/nginx` | リバースプロキシ + 静的ファイル配信 |
+| `backend` | ビルド: `./backend` | Rust API サーバー |
+| `frontend` | ビルド: `./frontend` | Next.js (standalone) |
+| `nginx` | ビルド: `./nginx` | リバースプロキシ + 静的ファイル配信 |
 | `cloudflared` | `cloudflare/cloudflared:latest` | Cloudflare Tunnel (prod プロファイル) |
 
 ## API エンドポイント

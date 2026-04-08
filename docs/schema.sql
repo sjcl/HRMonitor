@@ -1,6 +1,6 @@
 -- NOTE: This file is for documentation reference only.
--- The canonical schema lives in apps/backend/migrations/.
--- Run `sqlx migrate add <name>` from apps/backend/ to create new migrations.
+-- The canonical schema lives in backend/migrations/.
+-- Run `sqlx migrate add <name>` from backend/ to create new migrations.
 
 CREATE EXTENSION IF NOT EXISTS timescaledb;
 

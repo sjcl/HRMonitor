@@ -10,7 +10,7 @@ Build a minimal heart-rate monitoring system using:
 ## Architecture Constraints
 
 ### High-level
-- Monorepo structure (apps/frontend, apps/backend, infra)
+- Monorepo structure (frontend, backend, infra)
 - Backend is NOT publicly exposed
 - Frontend is the only public entrypoint
 - Backend is accessed via internal Docker network
