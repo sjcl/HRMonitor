@@ -213,7 +213,6 @@ pub async fn latest_heart_rate(
             let _: Result<Option<String>, _> = redis::cmd("SET")
                 .arg(&key)
                 .arg(&json)
-                .arg("NX")
                 .query_async(&mut *redis)
                 .await;
         }

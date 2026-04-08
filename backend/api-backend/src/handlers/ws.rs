@@ -339,7 +339,6 @@ async fn read_snapshot(
                 let _: Result<Option<String>, _> = redis::cmd("SET")
                     .arg(&key)
                     .arg(&json)
-                    .arg("NX")
                     .query_async(&mut *redis)
                     .await;
             }
