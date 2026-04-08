@@ -1,20 +1,19 @@
 use axum::Extension;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use std::sync::Arc;
 use axum::Json;
 
 use crate::AppState;
-use crate::auth::{AuthenticatedUser, ensure_self};
+use crate::auth::AuthenticatedUser;
 use crate::error::AppError;
 use crate::models::{PulsoidTokenResponse, SetManualTokenRequest};
 
 pub async fn get_pulsoid_token(
     State(state): State<Arc<AppState>>,
-    Path(user_id): Path<String>,
     Extension(auth_user): Extension<AuthenticatedUser>,
 ) -> Result<Json<PulsoidTokenResponse>, AppError> {
-    ensure_self(&auth_user, &user_id)?;
+    let user_id = &auth_user.id;
 
     let row: Option<(String, Option<i64>, Option<String>)> = sqlx::query_as(
         "SELECT source,
@@ -39,10 +38,9 @@ pub async fn get_pulsoid_token(
 
 pub async fn delete_pulsoid_token(
     State(state): State<Arc<AppState>>,
-    Path(user_id): Path<String>,
     Extension(auth_user): Extension<AuthenticatedUser>,
 ) -> Result<StatusCode, AppError> {
-    ensure_self(&auth_user, &user_id)?;
+    let user_id = &auth_user.id;
 
     let result = sqlx::query("DELETE FROM pulsoid_connections WHERE user_id = $1")
         .bind(&user_id)
@@ -61,11 +59,10 @@ pub async fn delete_pulsoid_token(
 
 pub async fn set_manual_pulsoid_token(
     State(state): State<Arc<AppState>>,
-    Path(user_id): Path<String>,
     Extension(auth_user): Extension<AuthenticatedUser>,
     Json(body): Json<SetManualTokenRequest>,
 ) -> Result<StatusCode, AppError> {
-    ensure_self(&auth_user, &user_id)?;
+    let user_id = &auth_user.id;
 
     let token = body.access_token.trim();
     if token.is_empty() {

@@ -15,8 +15,6 @@ pub struct UserRow {
     pub timezone: String,
     pub avatar_url: Option<String>,
     pub heart_rate_visibility: String,
-    pub created_at: i64,
-    pub updated_at: i64,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -32,27 +30,44 @@ pub struct PulsoidConnectionRow {
     pub last_error: Option<String>,
 }
 
-#[derive(Debug, FromRow, Serialize)]
-pub struct User {
+/// 自分の設定取得・更新用
+#[derive(Debug, Serialize)]
+pub struct SelfUser {
     pub id: String,
     pub display_name: String,
-    pub timezone: String,
     pub avatar_url: Option<String>,
+    pub timezone: String,
     pub heart_rate_visibility: String,
-    pub created_at: i64,
-    pub updated_at: i64,
 }
 
-impl From<UserRow> for User {
+impl From<UserRow> for SelfUser {
     fn from(r: UserRow) -> Self {
         Self {
             id: r.id,
             display_name: r.display_name,
-            timezone: r.timezone,
             avatar_url: r.avatar_url,
+            timezone: r.timezone,
             heart_rate_visibility: r.heart_rate_visibility,
-            created_at: r.created_at,
-            updated_at: r.updated_at,
+        }
+    }
+}
+
+/// 心拍詳細画面用（閲覧権限がある相手のメタ情報）
+#[derive(Debug, Serialize)]
+pub struct HeartRateProfile {
+    pub id: String,
+    pub display_name: String,
+    pub avatar_url: Option<String>,
+    pub timezone: String,
+}
+
+impl From<UserRow> for HeartRateProfile {
+    fn from(r: UserRow) -> Self {
+        Self {
+            id: r.id,
+            display_name: r.display_name,
+            avatar_url: r.avatar_url,
+            timezone: r.timezone,
         }
     }
 }

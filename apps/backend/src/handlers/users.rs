@@ -1,31 +1,40 @@
 use axum::Json;
 use axum::Extension;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use std::sync::Arc;
 
 use crate::AppState;
-use crate::auth::{AuthenticatedUser, ensure_can_view_user, ensure_self};
+use crate::auth::{AuthenticatedUser, ViewableUserId};
 use crate::error::AppError;
-use crate::models::{UpdateUserRequest, User, UserRow};
+use crate::models::{HeartRateProfile, SelfUser, UpdateUserRequest, UserRow};
 
 const SELECT_USER_ROW: &str =
     "SELECT u.id, u.display_name, u.timezone,
             a.provider_image as avatar_url,
-            u.heart_rate_visibility,
-            EXTRACT(EPOCH FROM u.created_at)::BIGINT as created_at,
-            EXTRACT(EPOCH FROM u.updated_at)::BIGINT as updated_at
+            u.heart_rate_visibility
      FROM users u
      LEFT JOIN accounts a ON a.user_id = u.id AND a.provider = 'discord'";
 
 const VALID_VISIBILITIES: &[&str] = &["group_default", "private"];
 
-pub async fn get_user(
+pub async fn get_self_user(
     State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
     Extension(auth_user): Extension<AuthenticatedUser>,
-) -> Result<Json<User>, AppError> {
-    ensure_can_view_user(&state.db, &auth_user, &id).await?;
+) -> Result<Json<SelfUser>, AppError> {
+    let query = format!("{SELECT_USER_ROW} WHERE u.id = $1");
+    let row: UserRow = sqlx::query_as(&query)
+        .bind(&auth_user.id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or_else(|| AppError::NotFound("User not found".into()))?;
 
+    Ok(Json(SelfUser::from(row)))
+}
+
+pub async fn get_heart_rate_profile(
+    State(state): State<Arc<AppState>>,
+    ViewableUserId(id): ViewableUserId,
+) -> Result<Json<HeartRateProfile>, AppError> {
     let query = format!("{SELECT_USER_ROW} WHERE u.id = $1");
     let row: UserRow = sqlx::query_as(&query)
         .bind(&id)
@@ -33,16 +42,15 @@ pub async fn get_user(
         .await?
         .ok_or_else(|| AppError::NotFound("User not found".into()))?;
 
-    Ok(Json(User::from(row)))
+    Ok(Json(HeartRateProfile::from(row)))
 }
 
 pub async fn update_user(
     State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
     Extension(auth_user): Extension<AuthenticatedUser>,
     Json(body): Json<UpdateUserRequest>,
-) -> Result<Json<User>, AppError> {
-    ensure_self(&auth_user, &id)?;
+) -> Result<Json<SelfUser>, AppError> {
+    let id = auth_user.id.clone();
 
     if let Some(ref display_name) = body.display_name
         && display_name.trim().is_empty()
@@ -81,7 +89,7 @@ pub async fn update_user(
         .fetch_one(&state.db)
         .await?;
 
-    Ok(Json(User::from(row)))
+    Ok(Json(SelfUser::from(row)))
 }
 
 fn now_unix() -> i64 {
