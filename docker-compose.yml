@@ -22,7 +22,7 @@ services:
     environment:
       - DATABASE_URL=postgres://hrmonitor:hrmonitor@timescaledb:5432/hrmonitor
       - REDIS_URL=redis://redis:6379
-      - RUST_LOG=hrmonitor_backend=info
+      - RUST_LOG=api_backend=info
       - PULSOID_CLIENT_ID=${PULSOID_CLIENT_ID}
       - PULSOID_CLIENT_SECRET=${PULSOID_CLIENT_SECRET}
       - PULSOID_REDIRECT_URI=${PULSOID_REDIRECT_URI}

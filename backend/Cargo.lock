@@ -68,6 +68,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
+name = "api-backend"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "axum",
+ "base64",
+ "chrono",
+ "futures-util",
+ "hex",
+ "rand 0.10.0",
+ "redis",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "sqlx",
+ "tokio",
+ "tokio-tungstenite 0.29.0",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
 name = "arcstr"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -870,32 +896,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cc627f471c528ff0c4a49e1d5e60450c8f6461dd6d10ba9dcd3a61d3dff7728d"
 dependencies = [
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "hrmonitor_backend"
-version = "0.1.0"
-dependencies = [
- "aes-gcm",
- "axum",
- "base64",
- "chrono",
- "futures-util",
- "hex",
- "rand 0.10.0",
- "redis",
- "reqwest",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "sqlx",
- "tokio",
- "tokio-tungstenite 0.29.0",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "urlencoding",
- "uuid",
 ]
 
 [[package]]
