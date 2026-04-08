@@ -304,27 +304,39 @@ async fn read_snapshot(
     }
 
     let mut cache_refills = Vec::new();
-    for (user_id, key) in missing {
-        let from_db = sqlx::query_as::<_, (i32, i64)>(
-            "SELECT bpm, EXTRACT(EPOCH FROM recorded_at)::BIGINT as recorded_at \
-             FROM heart_rate_records WHERE user_id = $1 \
-             ORDER BY recorded_at DESC LIMIT 1",
+    if !missing.is_empty() {
+        let missing_ids: Vec<String> = missing.iter().map(|(uid, _)| uid.clone()).collect();
+        let rows = sqlx::query_as::<_, (String, i32, i64)>(
+            "SELECT DISTINCT ON (user_id) user_id, bpm, \
+             EXTRACT(EPOCH FROM recorded_at)::BIGINT AS recorded_at \
+             FROM heart_rate_records \
+             WHERE user_id = ANY($1) \
+             ORDER BY user_id, recorded_at DESC",
         )
-        .bind(&user_id)
-        .fetch_optional(&state.db)
+        .bind(&missing_ids)
+        .fetch_all(&state.db)
         .await
-        .ok()
-        .flatten()
-        .map(|(bpm, recorded_at)| LatestHeartRateUpdate {
-            user_id: user_id.clone(),
-            bpm,
-            recorded_at,
-            received_at: recorded_at,
-        });
+        .inspect_err(|e| tracing::warn!("batch latest HR query failed: {e}"))
+        .unwrap_or_default();
 
-        if let Some(update) = from_db {
-            results.insert(user_id, Some(update.clone()));
-            cache_refills.push((key, update));
+        let db_map: HashMap<String, LatestHeartRateUpdate> = rows
+            .into_iter()
+            .map(|(user_id, bpm, recorded_at)| {
+                let update = LatestHeartRateUpdate {
+                    user_id: user_id.clone(),
+                    bpm,
+                    recorded_at,
+                    received_at: recorded_at,
+                };
+                (user_id, update)
+            })
+            .collect();
+
+        for (user_id, key) in missing {
+            if let Some(update) = db_map.get(&user_id) {
+                results.insert(user_id, Some(update.clone()));
+                cache_refills.push((key, update.clone()));
+            }
         }
     }
 
