@@ -9,9 +9,8 @@ use crate::auth::AuthenticatedUser;
 use crate::error::AppError;
 use crate::models::{
     AcceptInviteRequest, AcceptInviteResponse, CreateGroupRequest, CreateInviteRequest,
-    CreateInviteResponse,
-    GroupDetail, GroupListItem, GroupMemberInfo, GroupMemberPreview, InviteInfo, InviteListItem,
-    UpdateGroupRequest, UpdateMembershipRequest,
+    CreateInviteResponse, GroupDetail, GroupListItem, GroupMemberInfo, GroupMemberPreview,
+    InviteInfo, InviteListItem, UpdateGroupRequest, UpdateMembershipRequest,
 };
 
 const VALID_INVITE_POLICIES: &[&str] = &["group", "group+"];
@@ -156,8 +155,11 @@ pub async fn create_group(
 
     let members = fetch_active_members(&state.db, &group_id).await?;
     let display_name = compute_display_name(
-        &body.name, &members, &auth_user.id,
-        |m| &m.user_id, |m| &m.display_name,
+        &body.name,
+        &members,
+        &auth_user.id,
+        |m| &m.user_id,
+        |m| &m.display_name,
     );
 
     Ok(Json(GroupDetail {
@@ -252,8 +254,11 @@ pub async fn list_groups(
         .map(|row| {
             let member_previews = members_map.remove(&row.id).unwrap_or_default();
             let display_name = compute_display_name(
-                &row.name, &member_previews, &auth_user.id,
-                |m| &m.user_id, |m| &m.display_name,
+                &row.name,
+                &member_previews,
+                &auth_user.id,
+                |m| &m.user_id,
+                |m| &m.display_name,
             );
             GroupListItem {
                 id: row.id,
@@ -298,8 +303,11 @@ pub async fn get_group(
 
     let members = fetch_active_members(&state.db, &id).await?;
     let display_name = compute_display_name(
-        &group.name, &members, &auth_user.id,
-        |m| &m.user_id, |m| &m.display_name,
+        &group.name,
+        &members,
+        &auth_user.id,
+        |m| &m.user_id,
+        |m| &m.display_name,
     );
 
     Ok(Json(GroupDetail {
@@ -322,7 +330,9 @@ pub async fn update_group(
 ) -> Result<Json<GroupDetail>, AppError> {
     let (role, _) = ensure_active_member(&state.db, &id, &auth_user.id).await?;
     if role != "owner" {
-        return Err(AppError::Forbidden("Only the owner can update the group".into()));
+        return Err(AppError::Forbidden(
+            "Only the owner can update the group".into(),
+        ));
     }
 
     if let Some(ref policy) = body.invite_policy
@@ -359,7 +369,9 @@ pub async fn delete_group(
 ) -> Result<axum::http::StatusCode, AppError> {
     let (role, _) = ensure_active_member(&state.db, &id, &auth_user.id).await?;
     if role != "owner" {
-        return Err(AppError::Forbidden("Only the owner can delete the group".into()));
+        return Err(AppError::Forbidden(
+            "Only the owner can delete the group".into(),
+        ));
     }
 
     let result = sqlx::query("DELETE FROM groups WHERE id = $1")
@@ -470,7 +482,9 @@ pub async fn create_invite(
 
     let expires_in_hours = body.expires_in_hours.unwrap_or(24 * 7); // 7 days default
     if expires_in_hours <= 0 {
-        return Err(AppError::BadRequest("expires_in_hours must be positive".into()));
+        return Err(AppError::BadRequest(
+            "expires_in_hours must be positive".into(),
+        ));
     }
 
     if let Some(max_uses) = body.max_uses
@@ -578,13 +592,12 @@ pub async fn revoke_invite(
     let (role, _) = ensure_active_member(&state.db, &group_id, &auth_user.id).await?;
 
     // Check that the invite belongs to this group and can be revoked by this user
-    let created_by: Option<String> = sqlx::query_scalar(
-        "SELECT created_by FROM group_invites WHERE id = $1 AND group_id = $2",
-    )
-    .bind(&invite_id)
-    .bind(&group_id)
-    .fetch_optional(&state.db)
-    .await?;
+    let created_by: Option<String> =
+        sqlx::query_scalar("SELECT created_by FROM group_invites WHERE id = $1 AND group_id = $2")
+            .bind(&invite_id)
+            .bind(&group_id)
+            .fetch_optional(&state.db)
+            .await?;
 
     let created_by = created_by.ok_or_else(|| AppError::NotFound("Invite not found".into()))?;
 
@@ -648,7 +661,11 @@ pub async fn get_invite_info(
         (false, Some("expired".to_string()))
     } else if row.max_uses.is_some_and(|max| row.use_count >= max) {
         (false, Some("usage_limit_reached".to_string()))
-    } else if row.target_user_id.as_ref().is_some_and(|tid| tid != &auth_user.id) {
+    } else if row
+        .target_user_id
+        .as_ref()
+        .is_some_and(|tid| tid != &auth_user.id)
+    {
         (false, Some("not_for_you".to_string()))
     } else {
         (true, None)
@@ -669,8 +686,11 @@ pub async fn get_invite_info(
     // Compute display name
     let members = fetch_active_members(&state.db, &row.group_id).await?;
     let group_display_name = compute_display_name(
-        &row.group_name, &members, &auth_user.id,
-        |m| &m.user_id, |m| &m.display_name,
+        &row.group_name,
+        &members,
+        &auth_user.id,
+        |m| &m.user_id,
+        |m| &m.display_name,
     );
 
     Ok(Json(InviteInfo {
@@ -691,7 +711,9 @@ pub async fn accept_invite(
     Extension(auth_user): Extension<AuthenticatedUser>,
     body: Option<Json<AcceptInviteRequest>>,
 ) -> Result<Json<AcceptInviteResponse>, AppError> {
-    let req = body.map(|Json(v)| v).unwrap_or(AcceptInviteRequest { sharing: true });
+    let req = body
+        .map(|Json(v)| v)
+        .unwrap_or(AcceptInviteRequest { sharing: true });
     let token_hash = hash_token(&token);
 
     let mut tx = state.db.begin().await?;

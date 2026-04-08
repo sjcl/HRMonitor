@@ -42,8 +42,7 @@ impl From<reqwest::Error> for OAuthError {
 
 impl PulsoidOAuthConfig {
     pub fn from_env() -> Self {
-        let client_id =
-            std::env::var("PULSOID_CLIENT_ID").expect("PULSOID_CLIENT_ID must be set");
+        let client_id = std::env::var("PULSOID_CLIENT_ID").expect("PULSOID_CLIENT_ID must be set");
         let client_secret =
             std::env::var("PULSOID_CLIENT_SECRET").expect("PULSOID_CLIENT_SECRET must be set");
         let redirect_uri =

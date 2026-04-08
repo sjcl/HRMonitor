@@ -1,5 +1,5 @@
 use aes_gcm::aead::{Aead, OsRng};
-use aes_gcm::{Aes256Gcm, AeadCore, KeyInit};
+use aes_gcm::{AeadCore, Aes256Gcm, KeyInit};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use std::collections::HashMap;

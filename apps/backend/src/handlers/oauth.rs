@@ -1,14 +1,14 @@
+use axum::Extension;
+use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
-use axum::Extension;
-use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use crate::AppState;
 use crate::auth::AuthenticatedUser;
 use crate::error::AppError;
-use crate::AppState;
 
 // --- ReturnTo enum (open redirect prevention) ---
 
@@ -111,7 +111,10 @@ pub async fn redirect_to_pulsoid(
     .await?;
 
     let (oauth_state,) = row.ok_or_else(|| {
-        tracing::warn!(request_id_prefix = &request_id[..request_id.len().min(8)], "Invalid or expired connect request");
+        tracing::warn!(
+            request_id_prefix = &request_id[..request_id.len().min(8)],
+            "Invalid or expired connect request"
+        );
         AppError::BadRequest("Invalid or expired request".into())
     })?;
 

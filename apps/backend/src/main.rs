@@ -63,11 +63,7 @@ async fn main() {
     let pulsoid_oauth = PulsoidOAuthConfig::from_env();
     let token_encryption = TokenEncryption::from_env();
 
-    let worker_manager = WorkerManager::new(
-        pool.clone(),
-        redis_conn.clone(),
-        hr_tx.clone(),
-    );
+    let worker_manager = WorkerManager::new(pool.clone(), redis_conn.clone(), hr_tx.clone());
     worker_manager.start_all_active().await;
 
     let auth_config = AuthConfig::default();
@@ -107,9 +103,11 @@ async fn main() {
                 Err(e) => tracing::error!("Session cleanup failed: {e}"),
             }
             // Clean up expired connect requests
-            match sqlx::query("DELETE FROM connect_requests WHERE expires_at < now() - INTERVAL '1 hour'")
-                .execute(&cleanup_pool)
-                .await
+            match sqlx::query(
+                "DELETE FROM connect_requests WHERE expires_at < now() - INTERVAL '1 hour'",
+            )
+            .execute(&cleanup_pool)
+            .await
             {
                 Ok(result) => {
                     if result.rows_affected() > 0 {
@@ -125,15 +123,13 @@ async fn main() {
     });
 
     // Public routes (no auth required)
-    let public_routes = Router::new()
-        .route("/healthz", get(|| async { "ok" }));
+    let public_routes = Router::new().route("/healthz", get(|| async { "ok" }));
 
     // Protected routes (auth required)
     let protected_routes = Router::new()
         .route(
             "/api/users/me",
-            get(handlers::users::get_self_user)
-                .patch(handlers::users::update_user),
+            get(handlers::users::get_self_user).patch(handlers::users::update_user),
         )
         .route(
             "/api/users/{id}/heart-rate-profile",
@@ -217,10 +213,7 @@ async fn main() {
             axum::routing::post(handlers::groups::accept_invite),
         )
         .route("/api/ws/me", get(handlers::ws::my_heart_rate_ws))
-        .route(
-            "/api/ws/users/{id}",
-            get(handlers::ws::user_heart_rate_ws),
-        )
+        .route("/api/ws/users/{id}", get(handlers::ws::user_heart_rate_ws))
         .route(
             "/api/ws/groups/{id}",
             get(handlers::ws::group_heart_rate_ws),

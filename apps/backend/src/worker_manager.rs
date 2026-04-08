@@ -30,18 +30,17 @@ impl WorkerManager {
     }
 
     pub async fn start_all_active(&self) {
-        let user_ids: Vec<(String,)> = match sqlx::query_as(
-            "SELECT user_id FROM pulsoid_connections",
-        )
-        .fetch_all(&self.db)
-        .await
-        {
-            Ok(rows) => rows,
-            Err(e) => {
-                tracing::error!("Failed to fetch active connections: {e}");
-                return;
-            }
-        };
+        let user_ids: Vec<(String,)> =
+            match sqlx::query_as("SELECT user_id FROM pulsoid_connections")
+                .fetch_all(&self.db)
+                .await
+            {
+                Ok(rows) => rows,
+                Err(e) => {
+                    tracing::error!("Failed to fetch active connections: {e}");
+                    return;
+                }
+            };
 
         tracing::info!("Starting {} active workers", user_ids.len());
 
@@ -75,7 +74,10 @@ impl WorkerManager {
         {
             Ok(v) => v,
             Err(e) => {
-                tracing::error!(user_id, "Failed to check pulsoid connection, assuming exists: {e}");
+                tracing::error!(
+                    user_id,
+                    "Failed to check pulsoid connection, assuming exists: {e}"
+                );
                 true
             }
         };

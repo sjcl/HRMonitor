@@ -1,5 +1,5 @@
-use axum::Json;
 use axum::Extension;
+use axum::Json;
 use axum::extract::State;
 use std::sync::Arc;
 
@@ -8,8 +8,7 @@ use crate::auth::{AuthenticatedUser, ViewableUserId};
 use crate::error::AppError;
 use crate::models::{HeartRateProfile, SelfUser, UpdateUserRequest, UserRow};
 
-const SELECT_USER_ROW: &str =
-    "SELECT u.id, u.display_name, u.timezone,
+const SELECT_USER_ROW: &str = "SELECT u.id, u.display_name, u.timezone,
             a.provider_image as avatar_url,
             u.heart_rate_visibility
      FROM users u

@@ -176,7 +176,6 @@ pub async fn latest_heart_rate(
     State(state): State<Arc<AppState>>,
     ViewableUserId(user_id): ViewableUserId,
 ) -> Result<Json<HeartRateResponse>, AppError> {
-
     // Try Redis first
     {
         let mut redis = state.redis.lock().await;

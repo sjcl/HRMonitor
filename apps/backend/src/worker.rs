@@ -74,7 +74,12 @@ pub async fn run_worker(
                 Some(ts) => ts,
                 None => {
                     tracing::error!(user_id = %user_id, "OAuth connection missing token_expires_at");
-                    update_last_error(&db, &user_id, "OAuth connection missing expiry (data inconsistency)").await;
+                    update_last_error(
+                        &db,
+                        &user_id,
+                        "OAuth connection missing expiry (data inconsistency)",
+                    )
+                    .await;
                     tokio::time::sleep(backoff).await;
                     backoff = (backoff * 2).min(max_backoff);
                     continue;
@@ -85,7 +90,8 @@ pub async fn run_worker(
                     Ok(new_token) => new_token,
                     Err(e) => {
                         tracing::warn!(user_id = %user_id, "Token refresh failed: {e}");
-                        update_last_error(&db, &user_id, &format!("Token refresh failed: {e}")).await;
+                        update_last_error(&db, &user_id, &format!("Token refresh failed: {e}"))
+                            .await;
                         tracing::info!(user_id = %user_id, backoff_secs = backoff.as_secs(), "Retrying after backoff");
                         tokio::time::sleep(backoff).await;
                         backoff = (backoff * 2).min(max_backoff);

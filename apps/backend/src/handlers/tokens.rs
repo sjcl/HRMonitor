@@ -1,8 +1,8 @@
 use axum::Extension;
+use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use std::sync::Arc;
-use axum::Json;
 
 use crate::AppState;
 use crate::auth::AuthenticatedUser;
@@ -26,8 +26,8 @@ pub async fn get_pulsoid_token(
     .fetch_optional(&state.db)
     .await?;
 
-    let (source, last_connected_at, last_error) = row
-        .ok_or_else(|| AppError::NotFound("Pulsoid token not configured".into()))?;
+    let (source, last_connected_at, last_error) =
+        row.ok_or_else(|| AppError::NotFound("Pulsoid token not configured".into()))?;
 
     Ok(Json(PulsoidTokenResponse {
         source,
@@ -52,7 +52,10 @@ pub async fn delete_pulsoid_token(
     }
 
     // Notify worker manager to stop the worker
-    state.worker_manager.notify_connection_changed(&user_id).await;
+    state
+        .worker_manager
+        .notify_connection_changed(&user_id)
+        .await;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -89,7 +92,10 @@ pub async fn set_manual_pulsoid_token(
     .execute(&state.db)
     .await?;
 
-    state.worker_manager.notify_connection_changed(&user_id).await;
+    state
+        .worker_manager
+        .notify_connection_changed(&user_id)
+        .await;
 
     Ok(StatusCode::NO_CONTENT)
 }
