@@ -17,11 +17,28 @@ services:
       - "6379"
     restart: unless-stopped
 
+  nats:
+    image: nats:2-alpine
+    expose:
+      - "4222"
+    restart: unless-stopped
+
+  migration:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.migration
+    environment:
+      - DATABASE_URL=postgres://hrmonitor:hrmonitor@timescaledb:5432/hrmonitor
+    depends_on:
+      - timescaledb
+    restart: "no"
+
   backend:
     build: ./backend
     environment:
       - DATABASE_URL=postgres://hrmonitor:hrmonitor@timescaledb:5432/hrmonitor
       - REDIS_URL=redis://redis:6379
+      - NATS_URL=nats://nats:4222
       - RUST_LOG=api_backend=info
       - PULSOID_CLIENT_ID=${PULSOID_CLIENT_ID}
       - PULSOID_CLIENT_SECRET=${PULSOID_CLIENT_SECRET}
@@ -30,8 +47,32 @@ services:
     expose:
       - "3001"
     depends_on:
-      - timescaledb
-      - redis
+      timescaledb:
+        condition: service_started
+      redis:
+        condition: service_started
+      nats:
+        condition: service_started
+      migration:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  pulsoid-ingest:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.pulsoid-ingest
+    environment:
+      - DATABASE_URL=postgres://hrmonitor:hrmonitor@timescaledb:5432/hrmonitor
+      - NATS_URL=nats://nats:4222
+      - RUST_LOG=pulsoid_ingest=info
+      - TOKEN_ENCRYPTION_KEY=${TOKEN_ENCRYPTION_KEY}
+    depends_on:
+      timescaledb:
+        condition: service_started
+      nats:
+        condition: service_started
+      migration:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   frontend:

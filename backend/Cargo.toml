@@ -1,2 +1,2 @@
 [workspace]
-members = ["api-backend"]
+members = ["api-backend", "common", "migration", "pulsoid-ingest"]

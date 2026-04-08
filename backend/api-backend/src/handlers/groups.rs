@@ -515,7 +515,7 @@ pub async fn create_invite(
     .await;
 
     // Auto-generated constraint name from: group_invites.target_user_id REFERENCES users(id)
-    // See migrations/20260407000000_share_groups.sql:52
+    // See migration/migrations/20260407000000_share_groups.sql:52
     let (invite_id, expires_at): (String, i64) = match result {
         Ok(row) => row,
         Err(sqlx::Error::Database(ref db_err))

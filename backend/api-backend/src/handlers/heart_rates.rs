@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use crate::AppState;
 use crate::auth::{AuthenticatedUser, ViewableUserId};
-use crate::broadcast::LatestHeartRateUpdate;
+use common::messages::HeartRateReceived;
 use crate::error::AppError;
 use crate::handlers::groups::ensure_active_member;
 use crate::models::{
@@ -181,7 +181,7 @@ pub async fn latest_heart_rate(
         let mut redis = state.redis.lock().await;
         let key = format!("latest_bpm:{user_id}");
         if let Ok(Some(value)) = redis.get::<_, Option<String>>(&key).await
-            && let Ok(cached) = serde_json::from_str::<LatestHeartRateUpdate>(&value)
+            && let Ok(cached) = serde_json::from_str::<HeartRateReceived>(&value)
         {
             return Ok(Json(HeartRateResponse {
                 bpm: cached.bpm,
@@ -201,7 +201,7 @@ pub async fn latest_heart_rate(
 
     // Write back to Redis
     {
-        let update = LatestHeartRateUpdate {
+        let update = HeartRateReceived {
             user_id: user_id.clone(),
             bpm: record.bpm,
             recorded_at: record.timestamp,

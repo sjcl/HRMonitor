@@ -1,32 +1,29 @@
 mod auth;
-mod broadcast;
 mod db;
 mod error;
 mod handlers;
 mod models;
 mod pulsoid_oauth;
-mod token_encryption;
-mod worker;
-mod worker_manager;
 
 use axum::Router;
 use axum::middleware;
 use axum::routing::get;
+use futures_util::StreamExt;
+use redis::AsyncCommands;
 use std::sync::Arc;
 use tokio::sync::broadcast as tokio_broadcast;
 use tower_http::cors::CorsLayer;
 
 use auth::AuthConfig;
-use broadcast::LatestHeartRateUpdate;
+use common::messages::{HeartRateReceived, TokenRefreshRequest, subjects};
+use common::token_encryption::TokenEncryption;
 use pulsoid_oauth::PulsoidOAuthConfig;
-use token_encryption::TokenEncryption;
-use worker_manager::WorkerManager;
 
 pub struct AppState {
     pub db: sqlx::PgPool,
     pub redis: tokio::sync::Mutex<redis::aio::MultiplexedConnection>,
-    pub worker_manager: Arc<WorkerManager>,
-    pub hr_broadcast: tokio_broadcast::Sender<LatestHeartRateUpdate>,
+    pub nats: async_nats::Client,
+    pub hr_broadcast: tokio_broadcast::Sender<HeartRateReceived>,
     pub auth_config: AuthConfig,
     pub pulsoid_oauth: PulsoidOAuthConfig,
     pub token_encryption: TokenEncryption,
@@ -46,6 +43,9 @@ async fn main() {
 
     let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".into());
 
+    let nats_url =
+        std::env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".into());
+
     let pool = db::init_pool(&database_url)
         .await
         .expect("Failed to initialize database");
@@ -58,13 +58,16 @@ async fn main() {
 
     tracing::info!("Connected to Redis");
 
-    let (hr_tx, _) = tokio_broadcast::channel::<LatestHeartRateUpdate>(256);
+    let nats = async_nats::connect(&nats_url)
+        .await
+        .expect("Failed to connect to NATS");
+
+    tracing::info!("Connected to NATS at {nats_url}");
+
+    let (hr_tx, _) = tokio_broadcast::channel::<HeartRateReceived>(256);
 
     let pulsoid_oauth = PulsoidOAuthConfig::from_env();
     let token_encryption = TokenEncryption::from_env();
-
-    let worker_manager = WorkerManager::new(pool.clone(), redis_conn.clone(), hr_tx.clone());
-    worker_manager.start_all_active().await;
 
     let auth_config = AuthConfig::default();
     tracing::info!(
@@ -75,13 +78,71 @@ async fn main() {
 
     let state = Arc::new(AppState {
         db: pool.clone(),
-        redis: tokio::sync::Mutex::new(redis_conn),
-        worker_manager,
-        hr_broadcast: hr_tx,
+        redis: tokio::sync::Mutex::new(redis_conn.clone()),
+        nats: nats.clone(),
+        hr_broadcast: hr_tx.clone(),
         auth_config,
         pulsoid_oauth,
         token_encryption,
     });
+
+    // Spawn hr.received NATS subscriber
+    {
+        let mut redis_conn = redis_conn.clone();
+        let hr_tx = hr_tx.clone();
+        let mut hr_sub = nats
+            .subscribe(subjects::HR_RECEIVED)
+            .await
+            .expect("Failed to subscribe to hr.received");
+
+        tokio::spawn(async move {
+            while let Some(msg) = hr_sub.next().await {
+                match serde_json::from_slice::<HeartRateReceived>(&msg.payload) {
+                    Ok(update) => {
+                        // Write to Redis cache
+                        let redis_value = serde_json::to_string(&update).unwrap();
+                        let key = format!("latest_bpm:{}", update.user_id);
+                        if let Err(e) = redis_conn.set::<_, _, ()>(&key, &redis_value).await {
+                            tracing::warn!(
+                                user_id = %update.user_id,
+                                "Failed to write to Redis: {e}"
+                            );
+                        }
+                        // Broadcast to WebSocket subscribers
+                        let _ = hr_tx.send(update);
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to parse hr.received event: {e}");
+                    }
+                }
+            }
+        });
+    }
+
+    // Spawn pulsoid.token.refresh_needed NATS subscriber
+    {
+        let state = state.clone();
+        let nats = nats.clone();
+        let mut refresh_sub = nats
+            .subscribe(subjects::TOKEN_REFRESH_NEEDED)
+            .await
+            .expect("Failed to subscribe to token.refresh_needed");
+
+        tokio::spawn(async move {
+            while let Some(msg) = refresh_sub.next().await {
+                let req = match serde_json::from_slice::<TokenRefreshRequest>(&msg.payload) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::warn!("Failed to parse refresh_needed event: {e}");
+                        continue;
+                    }
+                };
+
+                tracing::info!(user_id = %req.user_id, "Received token refresh request");
+                handle_token_refresh(&state, &req.user_id).await;
+            }
+        });
+    }
 
     // Spawn session cleanup task (runs every hour)
     let cleanup_pool = pool;
@@ -239,4 +300,148 @@ async fn main() {
 
     tracing::info!("Server listening on 0.0.0.0:3001");
     axum::serve(listener, app).await.expect("Server error");
+}
+
+/// Handle a token refresh request from pulsoid-ingest.
+/// Fetches the connection from DB, refreshes the OAuth token, saves the new tokens,
+/// and publishes a connection.changed event.
+async fn handle_token_refresh(state: &AppState, user_id: &str) {
+    // Fetch connection details
+    let row: Option<(String, Vec<u8>, Option<Vec<u8>>, i32, Option<i64>)> = match sqlx::query_as(
+        "SELECT source, access_token, refresh_token, key_version,
+                EXTRACT(EPOCH FROM token_expires_at)::BIGINT as token_expires_at
+         FROM pulsoid_connections WHERE user_id = $1",
+    )
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(user_id, "Failed to fetch connection for refresh: {e}");
+            return;
+        }
+    };
+
+    let (source, _access_token, refresh_token_enc, key_version, token_expires_at) = match row {
+        Some(r) => r,
+        None => {
+            tracing::warn!(user_id, "No pulsoid connection found for refresh");
+            return;
+        }
+    };
+
+    // Only process OAuth connections
+    if source != "oauth" {
+        tracing::debug!(user_id, "Ignoring refresh request for non-OAuth connection");
+        return;
+    }
+
+    // Check if token is still expired (might have been refreshed already)
+    if let Some(expires_at) = token_expires_at {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        if now < expires_at - 60 {
+            tracing::debug!(user_id, "Token still valid, skipping refresh");
+            return;
+        }
+    }
+
+    // Decrypt refresh token
+    let refresh_token_bytes = match refresh_token_enc {
+        Some(rt) => rt,
+        None => {
+            tracing::error!(user_id, "OAuth connection has no refresh_token");
+            let _ = sqlx::query(
+                "UPDATE pulsoid_connections SET last_error = $1 WHERE user_id = $2",
+            )
+            .bind("No refresh token available")
+            .bind(user_id)
+            .execute(&state.db)
+            .await;
+            return;
+        }
+    };
+
+    let refresh_token_plain = match state
+        .token_encryption
+        .decrypt(&refresh_token_bytes, key_version as u32)
+    {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!(user_id, "Failed to decrypt refresh token: {e}");
+            let _ = sqlx::query(
+                "UPDATE pulsoid_connections SET last_error = $1 WHERE user_id = $2",
+            )
+            .bind(format!("Failed to decrypt refresh token: {e}"))
+            .bind(user_id)
+            .execute(&state.db)
+            .await;
+            return;
+        }
+    };
+
+    // Call Pulsoid OAuth refresh
+    let token_resp = match state.pulsoid_oauth.refresh_token(&refresh_token_plain).await {
+        Ok(resp) => resp,
+        Err(e) => {
+            tracing::warn!(user_id, "Token refresh failed: {e}");
+            let _ = sqlx::query(
+                "UPDATE pulsoid_connections SET last_error = $1 WHERE user_id = $2",
+            )
+            .bind(format!("Token refresh failed: {e}"))
+            .bind(user_id)
+            .execute(&state.db)
+            .await;
+            return;
+        }
+    };
+
+    // Encrypt new tokens
+    let (enc_access, new_key_version) = state.token_encryption.encrypt(&token_resp.access_token);
+    let enc_refresh: Option<Vec<u8>> = if let Some(ref new_rt) = token_resp.refresh_token {
+        Some(state.token_encryption.encrypt(new_rt).0)
+    } else {
+        Some(refresh_token_bytes) // Keep old refresh token
+    };
+
+    // Save to DB with config_version increment and last_error = NULL
+    let result = sqlx::query(
+        "UPDATE pulsoid_connections
+         SET access_token = $1, refresh_token = $2, key_version = $3,
+             token_expires_at = now() + make_interval(secs => $4),
+             last_error = NULL, config_version = config_version + 1
+         WHERE user_id = $5 AND source = 'oauth'",
+    )
+    .bind(&enc_access)
+    .bind(&enc_refresh)
+    .bind(new_key_version as i32)
+    .bind(token_resp.expires_in as f64)
+    .bind(user_id)
+    .execute(&state.db)
+    .await;
+
+    if let Err(e) = result {
+        tracing::error!(user_id, "Failed to save refreshed tokens: {e}");
+        return;
+    }
+
+    tracing::info!(user_id, "Token refreshed successfully");
+
+    // Notify pulsoid-ingest to reconnect with new token
+    let event = common::messages::ConnectionChangedEvent {
+        user_id: user_id.to_string(),
+    };
+    if let Err(e) = state
+        .nats
+        .publish(
+            subjects::CONNECTION_CHANGED,
+            serde_json::to_vec(&event).unwrap().into(),
+        )
+        .await
+    {
+        tracing::warn!(user_id, "Failed to publish connection.changed after refresh: {e}");
+    }
 }

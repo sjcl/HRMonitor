@@ -4,6 +4,8 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use std::sync::Arc;
 
+use common::messages::{ConnectionChangedEvent, subjects};
+
 use crate::AppState;
 use crate::auth::AuthenticatedUser;
 use crate::error::AppError;
@@ -51,10 +53,16 @@ pub async fn delete_pulsoid_token(
         return Err(AppError::NotFound("Pulsoid token not configured".into()));
     }
 
-    // Notify worker manager to stop the worker
-    state
-        .worker_manager
-        .notify_connection_changed(&user_id)
+    // Notify pulsoid-ingest via NATS
+    let event = ConnectionChangedEvent {
+        user_id: user_id.to_string(),
+    };
+    let _ = state
+        .nats
+        .publish(
+            subjects::CONNECTION_CHANGED,
+            serde_json::to_vec(&event).unwrap().into(),
+        )
         .await;
 
     Ok(StatusCode::NO_CONTENT)
@@ -84,7 +92,8 @@ pub async fn set_manual_pulsoid_token(
             refresh_token = NULL,
             token_expires_at = NULL,
             last_connected_at = NULL,
-            last_error = NULL",
+            last_error = NULL,
+            config_version = pulsoid_connections.config_version + 1",
     )
     .bind(&user_id)
     .bind(&enc_access)
@@ -92,9 +101,16 @@ pub async fn set_manual_pulsoid_token(
     .execute(&state.db)
     .await?;
 
-    state
-        .worker_manager
-        .notify_connection_changed(&user_id)
+    // Notify pulsoid-ingest via NATS
+    let event = ConnectionChangedEvent {
+        user_id: user_id.to_string(),
+    };
+    let _ = state
+        .nats
+        .publish(
+            subjects::CONNECTION_CHANGED,
+            serde_json::to_vec(&event).unwrap().into(),
+        )
         .await;
 
     Ok(StatusCode::NO_CONTENT)

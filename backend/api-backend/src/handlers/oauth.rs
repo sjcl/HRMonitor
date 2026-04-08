@@ -214,7 +214,8 @@ pub async fn callback(
             key_version = EXCLUDED.key_version,
             token_expires_at = EXCLUDED.token_expires_at,
             last_connected_at = NULL,
-            last_error = NULL",
+            last_error = NULL,
+            config_version = pulsoid_connections.config_version + 1",
     )
     .bind(user_id)
     .bind(&enc_access)
@@ -229,10 +230,16 @@ pub async fn callback(
         return Redirect::to(&format!("{return_to}?pulsoid=exchange_failed")).into_response();
     }
 
-    // 9. Notify worker manager
-    state
-        .worker_manager
-        .notify_connection_changed(user_id)
+    // 9. Notify pulsoid-ingest via NATS
+    let event = common::messages::ConnectionChangedEvent {
+        user_id: user_id.to_string(),
+    };
+    let _ = state
+        .nats
+        .publish(
+            common::messages::subjects::CONNECTION_CHANGED,
+            serde_json::to_vec(&event).unwrap().into(),
+        )
         .await;
 
     tracing::info!(user_id = %user_id, "Pulsoid authorized successfully");

@@ -11,7 +11,7 @@ use tokio::time::{Duration, interval};
 
 use crate::AppState;
 use crate::auth::{AuthenticatedUser, ViewableUserId, ensure_can_view_user};
-use crate::broadcast::LatestHeartRateUpdate;
+use common::messages::HeartRateReceived;
 use crate::error::AppError;
 use crate::handlers::groups::ensure_active_member;
 
@@ -19,10 +19,10 @@ use crate::handlers::groups::ensure_active_member;
 #[serde(tag = "type", rename_all = "snake_case")]
 enum WsServerMessage {
     Snapshot {
-        data: HashMap<String, Option<LatestHeartRateUpdate>>,
+        data: HashMap<String, Option<HeartRateReceived>>,
     },
     Update {
-        data: LatestHeartRateUpdate,
+        data: HeartRateReceived,
     },
 }
 
@@ -211,10 +211,10 @@ async fn handle_group_ws(
                 // Detect removed members → send snapshot with null
                 let removed: Vec<String> = members.difference(&new_members).cloned().collect();
                 if !removed.is_empty() {
-                    let mut removal_data: HashMap<String, Option<LatestHeartRateUpdate>> =
+                    let mut removal_data: HashMap<String, Option<HeartRateReceived>> =
                         HashMap::with_capacity(removed.len());
                     for uid in &removed {
-                        removal_data.insert(uid.clone(), None::<LatestHeartRateUpdate>);
+                        removal_data.insert(uid.clone(), None::<HeartRateReceived>);
                     }
                     let msg = WsServerMessage::Snapshot { data: removal_data };
                     if let Ok(json) = serde_json::to_string(&msg)
@@ -279,8 +279,8 @@ async fn fetch_sharing_members(
 async fn read_snapshot(
     state: &AppState,
     user_ids: &[String],
-) -> HashMap<String, Option<LatestHeartRateUpdate>> {
-    let mut results: HashMap<String, Option<LatestHeartRateUpdate>> =
+) -> HashMap<String, Option<HeartRateReceived>> {
+    let mut results: HashMap<String, Option<HeartRateReceived>> =
         HashMap::with_capacity(user_ids.len());
     let mut missing_keys = HashMap::new();
 
@@ -289,7 +289,7 @@ async fn read_snapshot(
         for user_id in user_ids {
             let key = format!("latest_bpm:{user_id}");
             let value: Option<String> = redis.get(&key).await.unwrap_or(None);
-            let parsed = value.and_then(|v| serde_json::from_str::<LatestHeartRateUpdate>(&v).ok());
+            let parsed = value.and_then(|v| serde_json::from_str::<HeartRateReceived>(&v).ok());
 
             match parsed {
                 Some(value) => {
@@ -320,7 +320,7 @@ async fn read_snapshot(
 
         for (user_id, bpm, recorded_at) in rows {
             if let Some(key) = missing_keys.remove(&user_id) {
-                let update = LatestHeartRateUpdate {
+                let update = HeartRateReceived {
                     user_id: user_id.clone(),
                     bpm,
                     recorded_at,

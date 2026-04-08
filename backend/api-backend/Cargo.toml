@@ -4,15 +4,16 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+common = { path = "../common" }
 axum = { version = "0.8.8", features = ["ws"] }
 tokio = { version = "1.51.1", features = ["full"] }
-sqlx = { version = "0.8.6", features = ["runtime-tokio", "postgres", "migrate"] }
+sqlx = { version = "0.8.6", features = ["runtime-tokio", "postgres"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 uuid = { version = "1.23.0", features = ["v4"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-tokio-tungstenite = { version = "0.29.0", features = ["native-tls"] }
+async-nats = "0.47.0"
 futures-util = "0.3.32"
 tower-http = { version = "0.6.8", features = ["cors"] }
 chrono = "0.4.44"
