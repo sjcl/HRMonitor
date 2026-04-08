@@ -2,14 +2,19 @@
 
 export type HeartRateVisibility = "group_default" | "private";
 
-export interface User {
+export interface SelfUser {
   id: string;
   display_name: string;
   avatar_url: string | null;
   timezone: string;
   heart_rate_visibility: HeartRateVisibility;
-  created_at: number;
-  updated_at: number;
+}
+
+export interface HeartRateProfile {
+  id: string;
+  display_name: string;
+  avatar_url: string | null;
+  timezone: string;
 }
 
 export interface PulsoidTokenStatus {
@@ -46,8 +51,12 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   return res.json();
 }
 
-export function getUser(id: string) {
-  return fetchJson<User>(`/api/users/${id}`);
+export function getSelfUser() {
+  return fetchJson<SelfUser>(`/api/users/me`);
+}
+
+export function getHeartRateProfile(userId: string) {
+  return fetchJson<HeartRateProfile>(`/api/users/${userId}/heart-rate-profile`);
 }
 
 export function updateUser(data: {
@@ -55,7 +64,7 @@ export function updateUser(data: {
   timezone?: string;
   heart_rate_visibility?: HeartRateVisibility;
 }) {
-  return fetchJson<User>(`/api/users/me`, {
+  return fetchJson<SelfUser>(`/api/users/me`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(data),

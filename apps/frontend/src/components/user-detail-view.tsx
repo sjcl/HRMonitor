@@ -1,7 +1,7 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { ApiError, getUser } from "@/lib/api";
+import { ApiError, getHeartRateProfile } from "@/lib/api";
 import { HeartRateChart } from "@/components/heart-rate-chart";
 import { DailyStats } from "@/components/daily-stats";
 import { useUserHeartRateWs } from "@/lib/ws";
@@ -9,8 +9,8 @@ import { UserAvatar } from "@/components/user-avatar";
 
 export function UserDetailView({ userId }: { userId: string }) {
   const { data: user, status, error } = useQuery({
-    queryKey: ["user", userId],
-    queryFn: () => getUser(userId),
+    queryKey: ["heart-rate-profile", userId],
+    queryFn: () => getHeartRateProfile(userId),
     retry: false,
   });
 

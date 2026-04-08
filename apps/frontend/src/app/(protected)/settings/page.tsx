@@ -2,7 +2,7 @@
 
 import { useSession } from "next-auth/react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { getUser, updateUser, type HeartRateVisibility } from "@/lib/api";
+import { getSelfUser, updateUser, type HeartRateVisibility } from "@/lib/api";
 import { PulsoidToken } from "@/components/pulsoid-token";
 import { TimezoneSelect } from "@/components/timezone-select";
 import { useSearchParams } from "next/navigation";
@@ -24,8 +24,8 @@ function SettingsContent() {
   const oauthResult = searchParams.get("pulsoid");
 
   const { data: user } = useQuery({
-    queryKey: ["user", userId],
-    queryFn: () => getUser(userId!),
+    queryKey: ["self-user"],
+    queryFn: () => getSelfUser(),
     enabled: !!userId,
   });
 
@@ -49,7 +49,7 @@ function SettingsContent() {
       heart_rate_visibility?: HeartRateVisibility;
     }) => updateUser(data),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["user", userId] });
+      queryClient.invalidateQueries({ queryKey: ["self-user"] });
       queryClient.invalidateQueries({ queryKey: ["users"] });
     },
   });
