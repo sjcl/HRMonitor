@@ -6,6 +6,7 @@ import { HeartRateChart } from "@/components/heart-rate-chart";
 import { DailyStats } from "@/components/daily-stats";
 import { useUserHeartRateWs } from "@/lib/ws";
 import { UserAvatar } from "@/components/user-avatar";
+import { useInView } from "@/hooks/use-in-view";
 
 export function UserDetailView({ userId }: { userId: string }) {
   const { data: user, status, error } = useQuery({
@@ -13,6 +14,8 @@ export function UserDetailView({ userId }: { userId: string }) {
     queryFn: () => getHeartRateProfile(userId),
     retry: false,
   });
+
+  const { ref: dailyStatsRef, inView: dailyStatsInView } = useInView();
 
   // Only subscribe to WS once the user fetch has succeeded — otherwise a
   // forbidden user detail page would still trigger WS subscription.
@@ -67,9 +70,11 @@ export function UserDetailView({ userId }: { userId: string }) {
       )}
 
       {user && (
-        <section className="mb-8">
+        <section className="mb-8" ref={dailyStatsRef}>
           <h2 className="text-lg font-semibold mb-3">Daily Statistics</h2>
-          <DailyStats userId={userId} timezone={user.timezone} key={user.timezone} />
+          {dailyStatsInView && (
+            <DailyStats userId={userId} timezone={user.timezone} key={user.timezone} />
+          )}
         </section>
       )}
     </div>
