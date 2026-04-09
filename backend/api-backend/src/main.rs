@@ -516,7 +516,7 @@ async fn handle_token_refresh(state: &AppState, user_id: &str) {
              token_expires_at = now() + make_interval(secs => $4),
              last_error = NULL, refresh_blocked = false,
              connection_state = 'pending', state_updated_at = now(),
-             config_version = config_version + 1
+             config_version = nextval('pulsoid_config_version_seq')
          WHERE user_id = $5 AND source = 'oauth'
          RETURNING config_version",
     )

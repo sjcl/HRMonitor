@@ -135,7 +135,7 @@ pub async fn set_manual_pulsoid_token(
             refresh_blocked = false,
             connection_state = 'pending',
             state_updated_at = now(),
-            config_version = pulsoid_connections.config_version + 1
+            config_version = nextval('pulsoid_config_version_seq')
          RETURNING config_version",
     )
     .bind(&user_id)
