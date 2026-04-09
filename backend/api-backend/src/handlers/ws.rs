@@ -303,7 +303,6 @@ async fn read_snapshot(
         }
     }
 
-    let mut cache_refills = Vec::new();
     if !missing_keys.is_empty() {
         let rows = sqlx::query_as::<_, (String, i32, i64)>(
             "SELECT DISTINCT ON (user_id) user_id, bpm, \
@@ -319,7 +318,7 @@ async fn read_snapshot(
         .unwrap_or_default();
 
         for (user_id, bpm, recorded_at) in rows {
-            if let Some(key) = missing_keys.remove(&user_id) {
+            if missing_keys.remove(&user_id).is_some() {
                 let update = HeartRateReceived {
                     user_id: user_id.clone(),
                     bpm,
@@ -327,20 +326,6 @@ async fn read_snapshot(
                     received_at: recorded_at,
                 };
                 results.insert(user_id, Some(update.clone()));
-                cache_refills.push((key, update));
-            }
-        }
-    }
-
-    if !cache_refills.is_empty() {
-        let mut redis = state.redis.lock().await;
-        for (key, update) in cache_refills {
-            if let Ok(json) = serde_json::to_string(&update) {
-                let _: Result<Option<String>, _> = redis::cmd("SET")
-                    .arg(&key)
-                    .arg(&json)
-                    .query_async(&mut *redis)
-                    .await;
             }
         }
     }
