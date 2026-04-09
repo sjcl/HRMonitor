@@ -258,4 +258,3 @@ pub struct GroupMinuteStatsResponse {
     pub max_bpm: i32,
     pub sample_count: i64,
 }
-

@@ -223,9 +223,7 @@ pub async fn run_worker(
                 while let Some(msg) = read.next().await {
                     match msg {
                         Ok(tokio_tungstenite::tungstenite::Message::Text(text)) => {
-                            if let Err(e) =
-                                handle_message(&db, &nats, &user_id, &text).await
-                            {
+                            if let Err(e) = handle_message(&db, &nats, &user_id, &text).await {
                                 tracing::warn!(user_id = %user_id, "Failed to handle message: {e}");
                             }
                         }
@@ -367,13 +365,20 @@ async fn handle_message(
 
     // Publish to NATS for api-backend to update Redis cache + WS broadcast
     let payload = serde_json::to_vec(&update).unwrap();
-    let retries = [None, Some(Duration::from_millis(100)), Some(Duration::from_millis(500))];
+    let retries = [
+        None,
+        Some(Duration::from_millis(100)),
+        Some(Duration::from_millis(500)),
+    ];
     let last = retries.len() - 1;
     for (i, delay) in retries.into_iter().enumerate() {
         if let Some(d) = delay {
             tokio::time::sleep(d).await;
         }
-        match nats.publish(subjects::HR_RECEIVED, payload.clone().into()).await {
+        match nats
+            .publish(subjects::HR_RECEIVED, payload.clone().into())
+            .await
+        {
             Ok(()) => break,
             Err(e) if i == last => {
                 tracing::warn!(user_id = %user_id, "Failed to publish hr.received after {} attempts: {e}", last + 1);

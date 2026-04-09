@@ -8,8 +8,7 @@ use crate::worker::run_worker;
 
 /// Connections eligible for worker spawning.
 /// Excludes refresh_blocked error connections (terminal OAuth failure — user must re-authorize).
-const SPAWNABLE_CONNECTIONS_SQL: &str =
-    "SELECT user_id, config_version FROM pulsoid_connections \
+const SPAWNABLE_CONNECTIONS_SQL: &str = "SELECT user_id, config_version FROM pulsoid_connections \
      WHERE connection_state IN ('pending', 'connected') \
        OR (connection_state = 'error' AND NOT refresh_blocked \
            AND state_updated_at < now() - interval '5 minutes')";
@@ -40,17 +39,16 @@ impl WorkerManager {
     }
 
     pub async fn start_all_active(&self) {
-        let rows: Vec<(String, i32)> =
-            match sqlx::query_as(SPAWNABLE_CONNECTIONS_SQL)
-                .fetch_all(&self.db)
-                .await
-            {
-                Ok(rows) => rows,
-                Err(e) => {
-                    tracing::error!("Failed to fetch active connections: {e}");
-                    return;
-                }
-            };
+        let rows: Vec<(String, i32)> = match sqlx::query_as(SPAWNABLE_CONNECTIONS_SQL)
+            .fetch_all(&self.db)
+            .await
+        {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::error!("Failed to fetch active connections: {e}");
+                return;
+            }
+        };
 
         tracing::info!("Starting {} active workers", rows.len());
 
@@ -80,21 +78,20 @@ impl WorkerManager {
         }
 
         // Step 3: Check if connection still exists and get config_version
-        let conn: Option<(i32,)> = sqlx::query_as(
-            "SELECT config_version FROM pulsoid_connections WHERE user_id = $1",
-        )
-        .bind(user_id)
-        .fetch_optional(&self.db)
-        .await
-        .map_err(|e| format!("DB error: {e}"))?;
+        let conn: Option<(i32,)> =
+            sqlx::query_as("SELECT config_version FROM pulsoid_connections WHERE user_id = $1")
+                .bind(user_id)
+                .fetch_optional(&self.db)
+                .await
+                .map_err(|e| format!("DB error: {e}"))?;
 
         // Step 4: Determine staleness
         let actual_config_version = conn.map(|(cv,)| cv);
         let stale = match (expected_config_version, actual_config_version) {
             (Some(expected), Some(actual)) => expected != actual,
             (None, None) => false,
-            (None, Some(_)) => true,  // deleted but re-created
-            (Some(_), None) => true,  // created but already deleted
+            (None, Some(_)) => true, // deleted but re-created
+            (Some(_), None) => true, // created but already deleted
         };
 
         if stale {
@@ -123,8 +120,8 @@ impl WorkerManager {
     /// Detects new connections, removed connections, and config_version changes.
     pub async fn reconcile(&self) {
         let db_rows: Vec<(String, i32)> = match sqlx::query_as(SPAWNABLE_CONNECTIONS_SQL)
-        .fetch_all(&self.db)
-        .await
+            .fetch_all(&self.db)
+            .await
         {
             Ok(rows) => rows,
             Err(e) => {
@@ -133,19 +130,24 @@ impl WorkerManager {
             }
         };
 
-        let db_connections: HashMap<String, i32> =
-            db_rows.into_iter().collect();
+        let db_connections: HashMap<String, i32> = db_rows.into_iter().collect();
 
         let (snapshot, finished_workers): (HashMap<String, i32>, Vec<(String, JoinHandle<()>)>) = {
             let mut state = self.state.lock().await;
             let finished_user_ids: Vec<String> = state
                 .iter()
-                .filter_map(|(user_id, worker)| worker.handle.is_finished().then_some(user_id.clone()))
+                .filter_map(|(user_id, worker)| {
+                    worker.handle.is_finished().then_some(user_id.clone())
+                })
                 .collect();
 
             let finished_workers = finished_user_ids
                 .into_iter()
-                .filter_map(|user_id| state.remove(&user_id).map(|worker| (user_id, worker.handle)))
+                .filter_map(|user_id| {
+                    state
+                        .remove(&user_id)
+                        .map(|worker| (user_id, worker.handle))
+                })
                 .collect();
 
             let snapshot = state

@@ -11,9 +11,9 @@ use tokio::time::{Duration, interval};
 
 use crate::AppState;
 use crate::auth::{AuthenticatedUser, ViewableUserId, ensure_can_view_user};
-use common::messages::HeartRateReceived;
 use crate::error::AppError;
 use crate::handlers::groups::ensure_active_member;
+use common::messages::HeartRateReceived;
 
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

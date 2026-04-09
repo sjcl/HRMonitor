@@ -44,8 +44,7 @@ async fn main() {
 
     let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".into());
 
-    let nats_url =
-        std::env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".into());
+    let nats_url = std::env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".into());
 
     let pool = db::init_pool(&database_url)
         .await
@@ -375,32 +374,46 @@ impl Drop for InFlightGuard {
 /// and publishes a connection.changed event.
 async fn handle_token_refresh(state: &AppState, user_id: &str, request_config_version: i32) {
     // Fetch connection details
-    let row: Option<(String, Vec<u8>, Option<Vec<u8>>, i32, Option<i64>, bool, i32)> =
-        match sqlx::query_as(
-            "SELECT source, access_token, refresh_token, key_version,
+    let row: Option<(
+        String,
+        Vec<u8>,
+        Option<Vec<u8>>,
+        i32,
+        Option<i64>,
+        bool,
+        i32,
+    )> = match sqlx::query_as(
+        "SELECT source, access_token, refresh_token, key_version,
                     EXTRACT(EPOCH FROM token_expires_at)::BIGINT as token_expires_at,
                     refresh_blocked, config_version
              FROM pulsoid_connections WHERE user_id = $1",
-        )
-        .bind(user_id)
-        .fetch_optional(&state.db)
-        .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::error!(user_id, "Failed to fetch connection for refresh: {e}");
-                return;
-            }
-        };
+    )
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(user_id, "Failed to fetch connection for refresh: {e}");
+            return;
+        }
+    };
 
-    let (source, _access_token, refresh_token_enc, key_version, token_expires_at, refresh_blocked, db_config_version) =
-        match row {
-            Some(r) => r,
-            None => {
-                tracing::warn!(user_id, "No pulsoid connection found for refresh");
-                return;
-            }
-        };
+    let (
+        source,
+        _access_token,
+        refresh_token_enc,
+        key_version,
+        token_expires_at,
+        refresh_blocked,
+        db_config_version,
+    ) = match row {
+        Some(r) => r,
+        None => {
+            tracing::warn!(user_id, "No pulsoid connection found for refresh");
+            return;
+        }
+    };
 
     // If the connection has already been updated since the worker detected expiry, bail out
     if db_config_version != request_config_version {
@@ -448,7 +461,11 @@ async fn handle_token_refresh(state: &AppState, user_id: &str, request_config_ve
     .await
     {
         Ok(r) if r.rows_affected() == 0 => {
-            tracing::info!(user_id, request_config_version, "Token refresh abandoned: connection superseded");
+            tracing::info!(
+                user_id,
+                request_config_version,
+                "Token refresh abandoned: connection superseded"
+            );
             return;
         }
         Err(e) => {
@@ -474,7 +491,11 @@ async fn handle_token_refresh(state: &AppState, user_id: &str, request_config_ve
             .await
             {
                 Ok(r) if r.rows_affected() == 0 => {
-                    tracing::info!(user_id, request_config_version, "Error state not written: connection superseded");
+                    tracing::info!(
+                        user_id,
+                        request_config_version,
+                        "Error state not written: connection superseded"
+                    );
                 }
                 Err(e) => {
                     tracing::error!(user_id, "Failed to update connection error state: {e}");
@@ -504,7 +525,11 @@ async fn handle_token_refresh(state: &AppState, user_id: &str, request_config_ve
             .await
             {
                 Ok(r) if r.rows_affected() == 0 => {
-                    tracing::info!(user_id, request_config_version, "Error state not written: connection superseded");
+                    tracing::info!(
+                        user_id,
+                        request_config_version,
+                        "Error state not written: connection superseded"
+                    );
                 }
                 Err(e) => {
                     tracing::error!(user_id, "Failed to update connection error state: {e}");
@@ -516,7 +541,11 @@ async fn handle_token_refresh(state: &AppState, user_id: &str, request_config_ve
     };
 
     // Call Pulsoid OAuth refresh
-    let token_resp = match state.pulsoid_oauth.refresh_token(&refresh_token_plain).await {
+    let token_resp = match state
+        .pulsoid_oauth
+        .refresh_token(&refresh_token_plain)
+        .await
+    {
         Ok(resp) => resp,
         Err(e) => {
             tracing::warn!(user_id, "Token refresh failed: {e}");
@@ -545,14 +574,21 @@ async fn handle_token_refresh(state: &AppState, user_id: &str, request_config_ve
             .await
             {
                 Ok(r) if r.rows_affected() == 0 => {
-                    tracing::info!(user_id, request_config_version, "Error state not written: connection superseded");
+                    tracing::info!(
+                        user_id,
+                        request_config_version,
+                        "Error state not written: connection superseded"
+                    );
                 }
                 Err(e) => {
                     tracing::error!(user_id, "Failed to update connection error state: {e}");
                 }
                 _ => {
                     if is_terminal {
-                        tracing::warn!(user_id, "Terminal refresh failure, blocking further attempts");
+                        tracing::warn!(
+                            user_id,
+                            "Terminal refresh failure, blocking further attempts"
+                        );
                     }
                 }
             }
@@ -591,7 +627,11 @@ async fn handle_token_refresh(state: &AppState, user_id: &str, request_config_ve
     let config_version = match result {
         Ok(Some((cv,))) => cv,
         Ok(None) => {
-            tracing::warn!(user_id, request_config_version, "Refreshed tokens discarded: connection superseded");
+            tracing::warn!(
+                user_id,
+                request_config_version,
+                "Refreshed tokens discarded: connection superseded"
+            );
             return;
         }
         Err(e) => {
@@ -631,7 +671,10 @@ async fn handle_token_refresh(state: &AppState, user_id: &str, request_config_ve
             tracing::warn!(user_id, "NATS request failed after refresh: {e}");
         }
         Err(_) => {
-            tracing::warn!(user_id, "NATS request timed out after refresh (reconcile will catch up)");
+            tracing::warn!(
+                user_id,
+                "NATS request timed out after refresh (reconcile will catch up)"
+            );
         }
     }
 }

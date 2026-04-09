@@ -245,7 +245,9 @@ pub async fn callback(
     let payload = serde_json::to_vec(&cmd).unwrap().into();
     let pulsoid_status = match tokio::time::timeout(
         std::time::Duration::from_secs(3),
-        state.nats.request(common::messages::subjects::CONNECTION_CHANGED, payload),
+        state
+            .nats
+            .request(common::messages::subjects::CONNECTION_CHANGED, payload),
     )
     .await
     {

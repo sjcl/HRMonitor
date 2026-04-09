@@ -21,25 +21,28 @@ async fn nats_request_status(
     user_id: &str,
 ) -> &'static str {
     let payload = serde_json::to_vec(cmd).unwrap().into();
-    match tokio::time::timeout(NATS_REQUEST_TIMEOUT, nats.request(subjects::CONNECTION_CHANGED, payload)).await {
-        Ok(Ok(reply)) => {
-            match serde_json::from_slice::<ConnectionChangeAck>(&reply.payload) {
-                Ok(ack) if ack.applied => {
-                    if ack.stale {
-                        tracing::info!(user_id, actual_cv = ?ack.config_version, "Ingest applied (stale command)");
-                    }
-                    "applied"
+    match tokio::time::timeout(
+        NATS_REQUEST_TIMEOUT,
+        nats.request(subjects::CONNECTION_CHANGED, payload),
+    )
+    .await
+    {
+        Ok(Ok(reply)) => match serde_json::from_slice::<ConnectionChangeAck>(&reply.payload) {
+            Ok(ack) if ack.applied => {
+                if ack.stale {
+                    tracing::info!(user_id, actual_cv = ?ack.config_version, "Ingest applied (stale command)");
                 }
-                Ok(ack) => {
-                    tracing::warn!(user_id, error = ?ack.error, "Ingest did not apply");
-                    "pending"
-                }
-                Err(e) => {
-                    tracing::warn!(user_id, "Failed to parse ack: {e}");
-                    "pending"
-                }
+                "applied"
             }
-        }
+            Ok(ack) => {
+                tracing::warn!(user_id, error = ?ack.error, "Ingest did not apply");
+                "pending"
+            }
+            Err(e) => {
+                tracing::warn!(user_id, "Failed to parse ack: {e}");
+                "pending"
+            }
+        },
         Ok(Err(e)) => {
             tracing::warn!(user_id, "NATS request failed: {e}");
             "pending"

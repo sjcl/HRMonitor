@@ -7,13 +7,13 @@ use std::sync::Arc;
 
 use crate::AppState;
 use crate::auth::{AuthenticatedUser, ViewableUserId};
-use common::messages::HeartRateReceived;
 use crate::error::AppError;
 use crate::handlers::groups::ensure_active_member;
 use crate::models::{
     DailyStatsQuery, DailyStatsResponse, GroupHeartRateResponse, GroupMinuteStatsResponse,
     HeartRateByDateQuery, HeartRateQuery, HeartRateResponse, MinuteStatsResponse,
 };
+use common::messages::HeartRateReceived;
 
 fn parse_date(s: &str) -> Result<NaiveDate, AppError> {
     NaiveDate::parse_from_str(s, "%Y-%m-%d")
