@@ -68,7 +68,7 @@ export function PulsoidToken({
     onSuccess: (data) => {
       setPendingWarning(null);
       if (warningTimerRef.current) clearTimeout(warningTimerRef.current);
-      if (data?.notification === "pending") {
+      if (data.status === "pending") {
         setPendingWarning("Saved. Connection may take up to a minute.");
       }
       setManualToken("");
@@ -82,7 +82,7 @@ export function PulsoidToken({
     onSuccess: (data) => {
       setPendingWarning(null);
       if (warningTimerRef.current) clearTimeout(warningTimerRef.current);
-      if (data?.notification === "pending") {
+      if (data.status === "pending") {
         setPendingWarning("Disconnected. Worker may take up to a minute to stop.");
         warningTimerRef.current = setTimeout(() => setPendingWarning(null), 90_000);
       }

@@ -11,6 +11,11 @@ struct WorkerState {
     config_version: i32,
 }
 
+pub struct NotifyOutcome {
+    pub stale: bool,
+    pub actual_config_version: Option<i32>,
+}
+
 pub struct WorkerManager {
     db: PgPool,
     nats: async_nats::Client,
@@ -48,7 +53,12 @@ impl WorkerManager {
 
     /// Notify that a user's pulsoid connection changed (created, updated, or deleted).
     /// Stops the old worker and starts a new one if a connection still exists.
-    pub async fn notify_connection_changed(&self, user_id: &str) {
+    /// Returns NotifyOutcome on success, or an error string on DB failure.
+    pub async fn notify_connection_changed(
+        &self,
+        user_id: &str,
+        expected_config_version: Option<i32>,
+    ) -> Result<NotifyOutcome, String> {
         // Step 1: Remove old handle under lock
         let old_state = {
             let mut state = self.state.lock().await;
@@ -62,29 +72,43 @@ impl WorkerManager {
         }
 
         // Step 3: Check if connection still exists and get config_version
-        let conn: Option<(i32,)> = match sqlx::query_as(
+        let conn: Option<(i32,)> = sqlx::query_as(
             "SELECT config_version FROM pulsoid_connections WHERE user_id = $1",
         )
         .bind(user_id)
         .fetch_optional(&self.db)
         .await
-        {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::error!(
-                    user_id,
-                    "Failed to check pulsoid connection, assuming exists: {e}"
-                );
-                None
-            }
+        .map_err(|e| format!("DB error: {e}"))?;
+
+        // Step 4: Determine staleness
+        let actual_config_version = conn.map(|(cv,)| cv);
+        let stale = match (expected_config_version, actual_config_version) {
+            (Some(expected), Some(actual)) => expected != actual,
+            (None, None) => false,
+            (None, Some(_)) => true,  // deleted but re-created
+            (Some(_), None) => true,  // created but already deleted
         };
 
-        // Step 4: Spawn new worker if needed
-        if let Some((config_version,)) = conn {
+        if stale {
+            tracing::info!(
+                user_id,
+                expected = ?expected_config_version,
+                actual = ?actual_config_version,
+                "Stale connection change command"
+            );
+        }
+
+        // Step 5: Spawn new worker if needed (always based on DB state)
+        if let Some(config_version) = actual_config_version {
             self.spawn_worker(user_id, config_version).await;
         } else {
             tracing::info!(user_id, "No pulsoid connection, worker not started");
         }
+
+        Ok(NotifyOutcome {
+            stale,
+            actual_config_version,
+        })
     }
 
     /// Reconcile active workers with DB state.

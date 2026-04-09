@@ -510,42 +510,64 @@ async fn handle_token_refresh(state: &AppState, user_id: &str) {
     };
 
     // Save to DB with config_version increment and last_error = NULL
-    let result = sqlx::query(
+    let result: Result<(i32,), _> = sqlx::query_as(
         "UPDATE pulsoid_connections
          SET access_token = $1, refresh_token = $2, key_version = $3,
              token_expires_at = now() + make_interval(secs => $4),
              last_error = NULL, refresh_blocked = false,
              connection_state = 'pending', state_updated_at = now(),
              config_version = config_version + 1
-         WHERE user_id = $5 AND source = 'oauth'",
+         WHERE user_id = $5 AND source = 'oauth'
+         RETURNING config_version",
     )
     .bind(&enc_access)
     .bind(&enc_refresh)
     .bind(new_key_version as i32)
     .bind(token_resp.expires_in as f64)
     .bind(user_id)
-    .execute(&state.db)
+    .fetch_one(&state.db)
     .await;
 
-    if let Err(e) = result {
-        tracing::error!(user_id, "Failed to save refreshed tokens: {e}");
-        return;
-    }
+    let config_version = match result {
+        Ok((cv,)) => cv,
+        Err(e) => {
+            tracing::error!(user_id, "Failed to save refreshed tokens: {e}");
+            return;
+        }
+    };
 
     tracing::info!(user_id, "Token refreshed successfully");
 
-    // Notify pulsoid-ingest to reconnect with new token
-    let event = common::messages::ConnectionChangedEvent {
+    // Notify pulsoid-ingest to reconnect with new token via request/reply
+    let cmd = common::messages::ConnectionChangeCommand {
         user_id: user_id.to_string(),
+        config_version: Some(config_version),
     };
-    if let Err(e) = state
-        .nats
-        .publish(
-            subjects::CONNECTION_CHANGED,
-            serde_json::to_vec(&event).unwrap().into(),
-        )
-        .await
+    let payload = serde_json::to_vec(&cmd).unwrap().into();
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        state.nats.request(subjects::CONNECTION_CHANGED, payload),
+    )
+    .await
     {
-        tracing::warn!(user_id, "Failed to publish connection.changed after refresh: {e}");
+        Ok(Ok(reply)) => {
+            match serde_json::from_slice::<common::messages::ConnectionChangeAck>(&reply.payload) {
+                Ok(ack) if ack.applied => {
+                    tracing::info!(user_id, "Ingest acknowledged reconnection after refresh");
+                }
+                Ok(ack) => {
+                    tracing::warn!(user_id, error = ?ack.error, "Ingest did not apply after refresh");
+                }
+                Err(e) => {
+                    tracing::warn!(user_id, "Failed to parse ack after refresh: {e}");
+                }
+            }
+        }
+        Ok(Err(e)) => {
+            tracing::warn!(user_id, "NATS request failed after refresh: {e}");
+        }
+        Err(_) => {
+            tracing::warn!(user_id, "NATS request timed out after refresh (reconcile will catch up)");
+        }
     }
 }

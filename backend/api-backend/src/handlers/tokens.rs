@@ -1,17 +1,55 @@
 use axum::Extension;
 use axum::Json;
 use axum::extract::State;
-use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde_json::json;
 use std::sync::Arc;
+use std::time::Duration;
 
-use common::messages::{ConnectionChangedEvent, subjects};
+use common::messages::{ConnectionChangeAck, ConnectionChangeCommand, subjects};
 
 use crate::AppState;
 use crate::auth::AuthenticatedUser;
 use crate::error::AppError;
 use crate::models::{PulsoidTokenResponse, SetManualTokenRequest};
+
+const NATS_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
+
+async fn nats_request_status(
+    nats: &async_nats::Client,
+    cmd: &ConnectionChangeCommand,
+    user_id: &str,
+) -> &'static str {
+    let payload = serde_json::to_vec(cmd).unwrap().into();
+    match tokio::time::timeout(NATS_REQUEST_TIMEOUT, nats.request(subjects::CONNECTION_CHANGED, payload)).await {
+        Ok(Ok(reply)) => {
+            match serde_json::from_slice::<ConnectionChangeAck>(&reply.payload) {
+                Ok(ack) if ack.applied => {
+                    if ack.stale {
+                        tracing::info!(user_id, actual_cv = ?ack.config_version, "Ingest applied (stale command)");
+                    }
+                    "applied"
+                }
+                Ok(ack) => {
+                    tracing::warn!(user_id, error = ?ack.error, "Ingest did not apply");
+                    "pending"
+                }
+                Err(e) => {
+                    tracing::warn!(user_id, "Failed to parse ack: {e}");
+                    "pending"
+                }
+            }
+        }
+        Ok(Err(e)) => {
+            tracing::warn!(user_id, "NATS request failed: {e}");
+            "pending"
+        }
+        Err(_) => {
+            tracing::warn!(user_id, "NATS request timed out (ingest may be down)");
+            "pending"
+        }
+    }
+}
 
 pub async fn get_pulsoid_token(
     State(state): State<Arc<AppState>>,
@@ -59,23 +97,14 @@ pub async fn delete_pulsoid_token(
         return Err(AppError::NotFound("Pulsoid token not configured".into()));
     }
 
-    // Notify pulsoid-ingest via NATS
-    let event = ConnectionChangedEvent {
+    // Notify pulsoid-ingest via NATS request/reply
+    let cmd = ConnectionChangeCommand {
         user_id: user_id.to_string(),
+        config_version: None,
     };
-    if let Err(e) = state
-        .nats
-        .publish(
-            subjects::CONNECTION_CHANGED,
-            serde_json::to_vec(&event).unwrap().into(),
-        )
-        .await
-    {
-        tracing::warn!(user_id, "Failed to publish connection.changed: {e}");
-        return Ok(Json(json!({"notification": "pending"})).into_response());
-    }
+    let status = nats_request_status(&state.nats, &cmd, user_id).await;
 
-    Ok(StatusCode::NO_CONTENT.into_response())
+    Ok(Json(json!({"status": status})).into_response())
 }
 
 pub async fn set_manual_pulsoid_token(
@@ -92,7 +121,7 @@ pub async fn set_manual_pulsoid_token(
 
     let (enc_access, key_version) = state.token_encryption.encrypt(token);
 
-    sqlx::query(
+    let (config_version,): (i32,) = sqlx::query_as(
         "INSERT INTO pulsoid_connections (user_id, source, access_token, key_version, refresh_token, token_expires_at, last_connected_at, last_error, refresh_blocked, connection_state, state_updated_at)
          VALUES ($1, 'manual', $2, $3, NULL, NULL, NULL, NULL, false, 'pending', now())
          ON CONFLICT (user_id) DO UPDATE SET
@@ -106,29 +135,21 @@ pub async fn set_manual_pulsoid_token(
             refresh_blocked = false,
             connection_state = 'pending',
             state_updated_at = now(),
-            config_version = pulsoid_connections.config_version + 1",
+            config_version = pulsoid_connections.config_version + 1
+         RETURNING config_version",
     )
     .bind(&user_id)
     .bind(&enc_access)
     .bind(key_version as i32)
-    .execute(&state.db)
+    .fetch_one(&state.db)
     .await?;
 
-    // Notify pulsoid-ingest via NATS
-    let event = ConnectionChangedEvent {
+    // Notify pulsoid-ingest via NATS request/reply
+    let cmd = ConnectionChangeCommand {
         user_id: user_id.to_string(),
+        config_version: Some(config_version),
     };
-    if let Err(e) = state
-        .nats
-        .publish(
-            subjects::CONNECTION_CHANGED,
-            serde_json::to_vec(&event).unwrap().into(),
-        )
-        .await
-    {
-        tracing::warn!(user_id, "Failed to publish connection.changed: {e}");
-        return Ok(Json(json!({"notification": "pending"})).into_response());
-    }
+    let status = nats_request_status(&state.nats, &cmd, user_id).await;
 
-    Ok(StatusCode::NO_CONTENT.into_response())
+    Ok(Json(json!({"status": status})).into_response())
 }

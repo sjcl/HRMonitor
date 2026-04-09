@@ -204,7 +204,7 @@ pub async fn callback(
     let (enc_refresh, _) = state.token_encryption.encrypt(&refresh_token_plain);
 
     // 8. UPSERT into pulsoid_connections
-    let upsert_result = sqlx::query(
+    let upsert_result: Result<(i32,), _> = sqlx::query_as(
         "INSERT INTO pulsoid_connections (user_id, source, access_token, refresh_token, key_version, token_expires_at, last_error, refresh_blocked, connection_state, state_updated_at)
          VALUES ($1, 'oauth', $2, $3, $4, now() + make_interval(secs => $5), NULL, false, 'pending', now())
          ON CONFLICT (user_id) DO UPDATE SET
@@ -218,37 +218,47 @@ pub async fn callback(
             refresh_blocked = false,
             connection_state = 'pending',
             state_updated_at = now(),
-            config_version = pulsoid_connections.config_version + 1",
+            config_version = pulsoid_connections.config_version + 1
+         RETURNING config_version",
     )
     .bind(user_id)
     .bind(&enc_access)
     .bind(&enc_refresh)
     .bind(key_version as i32)
     .bind(token_response.expires_in as f64)
-    .execute(&state.db)
+    .fetch_one(&state.db)
     .await;
 
-    if let Err(e) = upsert_result {
-        tracing::error!(user_id = %user_id, "Failed to save tokens: {e}");
-        return Redirect::to(&format!("{return_to}?pulsoid=exchange_failed")).into_response();
-    }
-
-    // 9. Notify pulsoid-ingest via NATS
-    let event = common::messages::ConnectionChangedEvent {
-        user_id: user_id.to_string(),
+    let config_version = match upsert_result {
+        Ok((cv,)) => cv,
+        Err(e) => {
+            tracing::error!(user_id = %user_id, "Failed to save tokens: {e}");
+            return Redirect::to(&format!("{return_to}?pulsoid=exchange_failed")).into_response();
+        }
     };
-    let pulsoid_status = if let Err(e) = state
-        .nats
-        .publish(
-            common::messages::subjects::CONNECTION_CHANGED,
-            serde_json::to_vec(&event).unwrap().into(),
-        )
-        .await
+
+    // 9. Notify pulsoid-ingest via NATS request/reply
+    let cmd = common::messages::ConnectionChangeCommand {
+        user_id: user_id.to_string(),
+        config_version: Some(config_version),
+    };
+    let payload = serde_json::to_vec(&cmd).unwrap().into();
+    let pulsoid_status = match tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        state.nats.request(common::messages::subjects::CONNECTION_CHANGED, payload),
+    )
+    .await
     {
-        tracing::warn!(user_id = %user_id, "Failed to publish connection.changed: {e}");
-        "authorized_pending"
-    } else {
-        "authorized"
+        Ok(Ok(reply)) => {
+            match serde_json::from_slice::<common::messages::ConnectionChangeAck>(&reply.payload) {
+                Ok(ack) if ack.applied => "authorized",
+                _ => "authorized_pending",
+            }
+        }
+        _ => {
+            tracing::warn!(user_id = %user_id, "NATS request failed or timed out");
+            "authorized_pending"
+        }
     };
 
     tracing::info!(user_id = %user_id, "Pulsoid authorized successfully");

@@ -15,8 +15,17 @@ pub struct HeartRateReceived {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConnectionChangedEvent {
+pub struct ConnectionChangeCommand {
     pub user_id: String,
+    pub config_version: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectionChangeAck {
+    pub applied: bool,
+    pub stale: bool,
+    pub config_version: Option<i32>,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
