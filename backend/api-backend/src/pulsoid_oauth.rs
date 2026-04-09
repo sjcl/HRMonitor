@@ -52,7 +52,10 @@ impl PulsoidOAuthConfig {
             client_id,
             client_secret,
             redirect_uri,
-            client: Client::new(),
+            client: Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .expect("Failed to build HTTP client"),
         }
     }
 

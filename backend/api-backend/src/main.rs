@@ -10,6 +10,7 @@ use axum::middleware;
 use axum::routing::get;
 use futures_util::StreamExt;
 use redis::AsyncCommands;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::broadcast as tokio_broadcast;
 use tower_http::cors::CorsLayer;
@@ -129,6 +130,9 @@ async fn main() {
             .expect("Failed to subscribe to token.refresh_needed");
 
         tokio::spawn(async move {
+            let in_flight: Arc<std::sync::Mutex<HashSet<String>>> =
+                Arc::new(std::sync::Mutex::new(HashSet::new()));
+
             while let Some(msg) = refresh_sub.next().await {
                 let req = match serde_json::from_slice::<TokenRefreshRequest>(&msg.payload) {
                     Ok(r) => r,
@@ -138,8 +142,26 @@ async fn main() {
                     }
                 };
 
+                // Skip if a refresh is already in-flight for this user
+                {
+                    let mut set = in_flight.lock().unwrap();
+                    if !set.insert(req.user_id.clone()) {
+                        tracing::debug!(user_id = %req.user_id, "Refresh already in-flight, skipping");
+                        continue;
+                    }
+                }
+
                 tracing::info!(user_id = %req.user_id, "Received token refresh request");
-                handle_token_refresh(&state, &req.user_id).await;
+                let state = state.clone();
+                let in_flight = in_flight.clone();
+                let user_id = req.user_id.clone();
+                tokio::spawn(async move {
+                    let _guard = InFlightGuard {
+                        user_id: user_id.clone(),
+                        set: in_flight,
+                    };
+                    handle_token_refresh(&state, &user_id).await;
+                });
             }
         });
     }
@@ -300,6 +322,17 @@ async fn main() {
 
     tracing::info!("Server listening on 0.0.0.0:3001");
     axum::serve(listener, app).await.expect("Server error");
+}
+
+struct InFlightGuard {
+    user_id: String,
+    set: Arc<std::sync::Mutex<HashSet<String>>>,
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.set.lock().unwrap().remove(&self.user_id);
+    }
 }
 
 /// Handle a token refresh request from pulsoid-ingest.
