@@ -31,4 +31,5 @@ pub struct ConnectionChangeAck {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenRefreshRequest {
     pub user_id: String,
+    pub config_version: i32,
 }

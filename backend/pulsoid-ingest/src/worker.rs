@@ -73,6 +73,7 @@ pub async fn run_worker(db: PgPool, nats: async_nats::Client, user_id: String) {
                     // Token expired or about to expire — request refresh from api-backend
                     let req = TokenRefreshRequest {
                         user_id: user_id.to_string(),
+                        config_version: conn.config_version,
                     };
                     if let Err(e) = nats
                         .publish(

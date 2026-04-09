@@ -189,12 +189,13 @@ async fn main() {
                 let state = state.clone();
                 let in_flight = in_flight.clone();
                 let user_id = req.user_id.clone();
+                let request_config_version = req.config_version;
                 tokio::spawn(async move {
                     let _guard = InFlightGuard {
                         user_id: user_id.clone(),
                         set: in_flight,
                     };
-                    handle_token_refresh(&state, &user_id).await;
+                    handle_token_refresh(&state, &user_id, request_config_version).await;
                 });
             }
         });
@@ -372,13 +373,13 @@ impl Drop for InFlightGuard {
 /// Handle a token refresh request from pulsoid-ingest.
 /// Fetches the connection from DB, refreshes the OAuth token, saves the new tokens,
 /// and publishes a connection.changed event.
-async fn handle_token_refresh(state: &AppState, user_id: &str) {
+async fn handle_token_refresh(state: &AppState, user_id: &str, request_config_version: i32) {
     // Fetch connection details
-    let row: Option<(String, Vec<u8>, Option<Vec<u8>>, i32, Option<i64>, bool)> =
+    let row: Option<(String, Vec<u8>, Option<Vec<u8>>, i32, Option<i64>, bool, i32)> =
         match sqlx::query_as(
             "SELECT source, access_token, refresh_token, key_version,
                     EXTRACT(EPOCH FROM token_expires_at)::BIGINT as token_expires_at,
-                    refresh_blocked
+                    refresh_blocked, config_version
              FROM pulsoid_connections WHERE user_id = $1",
         )
         .bind(user_id)
@@ -392,7 +393,7 @@ async fn handle_token_refresh(state: &AppState, user_id: &str) {
             }
         };
 
-    let (source, _access_token, refresh_token_enc, key_version, token_expires_at, refresh_blocked) =
+    let (source, _access_token, refresh_token_enc, key_version, token_expires_at, refresh_blocked, db_config_version) =
         match row {
             Some(r) => r,
             None => {
@@ -400,6 +401,17 @@ async fn handle_token_refresh(state: &AppState, user_id: &str) {
                 return;
             }
         };
+
+    // If the connection has already been updated since the worker detected expiry, bail out
+    if db_config_version != request_config_version {
+        tracing::info!(
+            user_id,
+            request_config_version,
+            db_config_version,
+            "Token refresh skipped: connection superseded (config_version mismatch)"
+        );
+        return;
+    }
 
     // Only process OAuth connections
     if source != "oauth" {
@@ -426,25 +438,49 @@ async fn handle_token_refresh(state: &AppState, user_id: &str) {
     }
 
     // Set connection_state to pending at refresh start
-    let _ = sqlx::query(
-        "UPDATE pulsoid_connections SET connection_state = 'pending', state_updated_at = now() WHERE user_id = $1",
+    match sqlx::query(
+        "UPDATE pulsoid_connections SET connection_state = 'pending', state_updated_at = now() \
+         WHERE user_id = $1 AND config_version = $2",
     )
     .bind(user_id)
+    .bind(request_config_version)
     .execute(&state.db)
-    .await;
+    .await
+    {
+        Ok(r) if r.rows_affected() == 0 => {
+            tracing::info!(user_id, request_config_version, "Token refresh abandoned: connection superseded");
+            return;
+        }
+        Err(e) => {
+            tracing::error!(user_id, "Failed to set pending state: {e}");
+        }
+        _ => {}
+    }
 
     // Decrypt refresh token
     let refresh_token_bytes = match refresh_token_enc {
         Some(rt) => rt,
         None => {
             tracing::error!(user_id, "OAuth connection has no refresh_token");
-            let _ = sqlx::query(
-                "UPDATE pulsoid_connections SET last_error = $1, refresh_blocked = true, connection_state = 'error', state_updated_at = now() WHERE user_id = $2",
+            match sqlx::query(
+                "UPDATE pulsoid_connections SET last_error = $1, refresh_blocked = true, \
+                 connection_state = 'error', state_updated_at = now() \
+                 WHERE user_id = $2 AND config_version = $3",
             )
             .bind("No refresh token available")
             .bind(user_id)
+            .bind(request_config_version)
             .execute(&state.db)
-            .await;
+            .await
+            {
+                Ok(r) if r.rows_affected() == 0 => {
+                    tracing::info!(user_id, request_config_version, "Error state not written: connection superseded");
+                }
+                Err(e) => {
+                    tracing::error!(user_id, "Failed to update connection error state: {e}");
+                }
+                _ => {}
+            }
             return;
         }
     };
@@ -456,13 +492,25 @@ async fn handle_token_refresh(state: &AppState, user_id: &str) {
         Ok(t) => t,
         Err(e) => {
             tracing::error!(user_id, "Failed to decrypt refresh token: {e}");
-            let _ = sqlx::query(
-                "UPDATE pulsoid_connections SET last_error = $1, refresh_blocked = true, connection_state = 'error', state_updated_at = now() WHERE user_id = $2",
+            match sqlx::query(
+                "UPDATE pulsoid_connections SET last_error = $1, refresh_blocked = true, \
+                 connection_state = 'error', state_updated_at = now() \
+                 WHERE user_id = $2 AND config_version = $3",
             )
             .bind(format!("Failed to decrypt refresh token: {e}"))
             .bind(user_id)
+            .bind(request_config_version)
             .execute(&state.db)
-            .await;
+            .await
+            {
+                Ok(r) if r.rows_affected() == 0 => {
+                    tracing::info!(user_id, request_config_version, "Error state not written: connection superseded");
+                }
+                Err(e) => {
+                    tracing::error!(user_id, "Failed to update connection error state: {e}");
+                }
+                _ => {}
+            }
             return;
         }
     };
@@ -483,19 +531,30 @@ async fn handle_token_refresh(state: &AppState, user_id: &str) {
                 }
                 OAuthError::Request(_) => false,
             };
-            let _ = sqlx::query(
+            match sqlx::query(
                 "UPDATE pulsoid_connections SET last_error = $1, refresh_blocked = $3,
                  connection_state = CASE WHEN $3 THEN 'error' ELSE 'pending' END,
                  state_updated_at = now()
-                 WHERE user_id = $2",
+                 WHERE user_id = $2 AND config_version = $4",
             )
             .bind(format!("Token refresh failed: {e}"))
             .bind(user_id)
             .bind(is_terminal)
+            .bind(request_config_version)
             .execute(&state.db)
-            .await;
-            if is_terminal {
-                tracing::warn!(user_id, "Terminal refresh failure, blocking further attempts");
+            .await
+            {
+                Ok(r) if r.rows_affected() == 0 => {
+                    tracing::info!(user_id, request_config_version, "Error state not written: connection superseded");
+                }
+                Err(e) => {
+                    tracing::error!(user_id, "Failed to update connection error state: {e}");
+                }
+                _ => {
+                    if is_terminal {
+                        tracing::warn!(user_id, "Terminal refresh failure, blocking further attempts");
+                    }
+                }
             }
             return;
         }
@@ -510,14 +569,14 @@ async fn handle_token_refresh(state: &AppState, user_id: &str) {
     };
 
     // Save to DB with config_version increment and last_error = NULL
-    let result: Result<(i32,), _> = sqlx::query_as(
+    let result: Result<Option<(i32,)>, _> = sqlx::query_as(
         "UPDATE pulsoid_connections
          SET access_token = $1, refresh_token = $2, key_version = $3,
              token_expires_at = now() + make_interval(secs => $4),
              last_error = NULL, refresh_blocked = false,
              connection_state = 'pending', state_updated_at = now(),
              config_version = nextval('pulsoid_config_version_seq')
-         WHERE user_id = $5 AND source = 'oauth'
+         WHERE user_id = $5 AND source = 'oauth' AND config_version = $6
          RETURNING config_version",
     )
     .bind(&enc_access)
@@ -525,11 +584,16 @@ async fn handle_token_refresh(state: &AppState, user_id: &str) {
     .bind(new_key_version as i32)
     .bind(token_resp.expires_in as f64)
     .bind(user_id)
-    .fetch_one(&state.db)
+    .bind(request_config_version)
+    .fetch_optional(&state.db)
     .await;
 
     let config_version = match result {
-        Ok((cv,)) => cv,
+        Ok(Some((cv,))) => cv,
+        Ok(None) => {
+            tracing::warn!(user_id, request_config_version, "Refreshed tokens discarded: connection superseded");
+            return;
+        }
         Err(e) => {
             tracing::error!(user_id, "Failed to save refreshed tokens: {e}");
             return;
