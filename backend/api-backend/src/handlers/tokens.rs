@@ -2,6 +2,8 @@ use axum::Extension;
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use serde_json::json;
 use std::sync::Arc;
 
 use common::messages::{ConnectionChangedEvent, subjects};
@@ -41,7 +43,7 @@ pub async fn get_pulsoid_token(
 pub async fn delete_pulsoid_token(
     State(state): State<Arc<AppState>>,
     Extension(auth_user): Extension<AuthenticatedUser>,
-) -> Result<StatusCode, AppError> {
+) -> Result<Response, AppError> {
     let user_id = &auth_user.id;
 
     let result = sqlx::query("DELETE FROM pulsoid_connections WHERE user_id = $1")
@@ -57,22 +59,26 @@ pub async fn delete_pulsoid_token(
     let event = ConnectionChangedEvent {
         user_id: user_id.to_string(),
     };
-    let _ = state
+    if let Err(e) = state
         .nats
         .publish(
             subjects::CONNECTION_CHANGED,
             serde_json::to_vec(&event).unwrap().into(),
         )
-        .await;
+        .await
+    {
+        tracing::warn!(user_id, "Failed to publish connection.changed: {e}");
+        return Ok(Json(json!({"notification": "pending"})).into_response());
+    }
 
-    Ok(StatusCode::NO_CONTENT)
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 pub async fn set_manual_pulsoid_token(
     State(state): State<Arc<AppState>>,
     Extension(auth_user): Extension<AuthenticatedUser>,
     Json(body): Json<SetManualTokenRequest>,
-) -> Result<StatusCode, AppError> {
+) -> Result<Response, AppError> {
     let user_id = &auth_user.id;
 
     let token = body.access_token.trim();
@@ -105,13 +111,17 @@ pub async fn set_manual_pulsoid_token(
     let event = ConnectionChangedEvent {
         user_id: user_id.to_string(),
     };
-    let _ = state
+    if let Err(e) = state
         .nats
         .publish(
             subjects::CONNECTION_CHANGED,
             serde_json::to_vec(&event).unwrap().into(),
         )
-        .await;
+        .await
+    {
+        tracing::warn!(user_id, "Failed to publish connection.changed: {e}");
+        return Ok(Json(json!({"notification": "pending"})).into_response());
+    }
 
-    Ok(StatusCode::NO_CONTENT)
+    Ok(StatusCode::NO_CONTENT.into_response())
 }

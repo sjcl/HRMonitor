@@ -1,11 +1,12 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { getPulsoidToken, createPulsoidConnect, setManualPulsoidToken, deletePulsoidToken } from "@/lib/api";
 
 const RESULT_MESSAGES: Record<string, { text: string; color: string }> = {
   authorized: { text: "Pulsoid authorized. Connecting...", color: "text-blue-400" },
+  authorized_pending: { text: "Pulsoid authorized. Connection may take up to a minute.", color: "text-yellow-400" },
   denied: { text: "Pulsoid authorization was denied.", color: "text-yellow-400" },
   exchange_failed: { text: "Connection failed. Please try again.", color: "text-red-400" },
   invalid_state: { text: "Security verification failed. Please try again.", color: "text-red-400" },
@@ -18,6 +19,8 @@ export function PulsoidToken({
 }) {
   const queryClient = useQueryClient();
   const [manualToken, setManualToken] = useState("");
+  const [pendingWarning, setPendingWarning] = useState<string | null>(null);
+  const warningTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Clear the query param from URL after displaying
   useEffect(() => {
@@ -39,6 +42,20 @@ export function PulsoidToken({
     },
   });
 
+  // Clear warning when token reaches a terminal state (connected or errored)
+  useEffect(() => {
+    if (token && (token.last_connected_at != null || token.last_error != null)) {
+      setPendingWarning(null);
+    }
+  }, [token]);
+
+  // Cleanup timer on unmount
+  useEffect(() => {
+    return () => {
+      if (warningTimerRef.current) clearTimeout(warningTimerRef.current);
+    };
+  }, []);
+
   const connectMutation = useMutation({
     mutationFn: () => createPulsoidConnect("/settings"),
     onSuccess: (data) => {
@@ -48,7 +65,12 @@ export function PulsoidToken({
 
   const manualMutation = useMutation({
     mutationFn: (accessToken: string) => setManualPulsoidToken(accessToken),
-    onSuccess: () => {
+    onSuccess: (data) => {
+      setPendingWarning(null);
+      if (warningTimerRef.current) clearTimeout(warningTimerRef.current);
+      if (data?.notification === "pending") {
+        setPendingWarning("Saved. Connection may take up to a minute.");
+      }
       setManualToken("");
       queryClient.invalidateQueries({ queryKey: ["pulsoid-token"] });
       queryClient.invalidateQueries({ queryKey: ["users"] });
@@ -57,7 +79,13 @@ export function PulsoidToken({
 
   const disconnectMutation = useMutation({
     mutationFn: () => deletePulsoidToken(),
-    onSuccess: () => {
+    onSuccess: (data) => {
+      setPendingWarning(null);
+      if (warningTimerRef.current) clearTimeout(warningTimerRef.current);
+      if (data?.notification === "pending") {
+        setPendingWarning("Disconnected. Worker may take up to a minute to stop.");
+        warningTimerRef.current = setTimeout(() => setPendingWarning(null), 90_000);
+      }
       queryClient.invalidateQueries({ queryKey: ["pulsoid-token"] });
       queryClient.invalidateQueries({ queryKey: ["users"] });
     },
@@ -75,6 +103,9 @@ export function PulsoidToken({
       <div className="border border-gray-800 rounded-lg p-4 space-y-4">
         {resultMessage && (
           <p className={`text-sm ${resultMessage.color}`}>{resultMessage.text}</p>
+        )}
+        {pendingWarning && (
+          <p className="text-sm text-yellow-400">{pendingWarning}</p>
         )}
         <p className="text-gray-500 text-sm">No Pulsoid connection configured</p>
 
@@ -132,6 +163,9 @@ export function PulsoidToken({
     <div className="border border-gray-800 rounded-lg p-4 space-y-3">
       {resultMessage && (
         <p className={`text-sm ${resultMessage.color}`}>{resultMessage.text}</p>
+      )}
+      {pendingWarning && (
+        <p className="text-sm text-yellow-400">{pendingWarning}</p>
       )}
       <div className="flex items-center justify-between">
         <div>

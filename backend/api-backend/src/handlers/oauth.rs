@@ -234,14 +234,20 @@ pub async fn callback(
     let event = common::messages::ConnectionChangedEvent {
         user_id: user_id.to_string(),
     };
-    let _ = state
+    let pulsoid_status = if let Err(e) = state
         .nats
         .publish(
             common::messages::subjects::CONNECTION_CHANGED,
             serde_json::to_vec(&event).unwrap().into(),
         )
-        .await;
+        .await
+    {
+        tracing::warn!(user_id = %user_id, "Failed to publish connection.changed: {e}");
+        "authorized_pending"
+    } else {
+        "authorized"
+    };
 
     tracing::info!(user_id = %user_id, "Pulsoid authorized successfully");
-    Redirect::to(&format!("{return_to}?pulsoid=authorized")).into_response()
+    Redirect::to(&format!("{return_to}?pulsoid={pulsoid_status}")).into_response()
 }

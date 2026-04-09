@@ -23,6 +23,10 @@ export interface PulsoidTokenStatus {
   last_error: string | null;
 }
 
+export interface TokenMutationResult {
+  notification?: "pending";
+}
+
 export interface HeartRateRecord {
   bpm: number;
   timestamp: number;
@@ -90,7 +94,7 @@ export function createPulsoidConnect(returnTo?: string) {
 }
 
 export function setManualPulsoidToken(accessToken: string) {
-  return fetchJson<void>(`/api/users/me/pulsoid-token`, {
+  return fetchJson<TokenMutationResult | undefined>(`/api/users/me/pulsoid-token`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ access_token: accessToken }),
@@ -98,7 +102,7 @@ export function setManualPulsoidToken(accessToken: string) {
 }
 
 export function deletePulsoidToken() {
-  return fetchJson<void>(`/api/users/me/pulsoid-token`, {
+  return fetchJson<TokenMutationResult | undefined>(`/api/users/me/pulsoid-token`, {
     method: "DELETE",
   });
 }
