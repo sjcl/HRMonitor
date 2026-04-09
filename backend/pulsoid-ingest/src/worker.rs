@@ -198,14 +198,22 @@ async fn handle_message(
     };
 
     // Publish to NATS for api-backend to update Redis cache + WS broadcast
-    if let Err(e) = nats
-        .publish(
-            subjects::HR_RECEIVED,
-            serde_json::to_vec(&update).unwrap().into(),
-        )
-        .await
-    {
-        tracing::warn!(user_id = %user_id, "Failed to publish hr.received: {e}");
+    let payload = serde_json::to_vec(&update).unwrap();
+    let retries = [None, Some(Duration::from_millis(100)), Some(Duration::from_millis(500))];
+    let last = retries.len() - 1;
+    for (i, delay) in retries.into_iter().enumerate() {
+        if let Some(d) = delay {
+            tokio::time::sleep(d).await;
+        }
+        match nats.publish(subjects::HR_RECEIVED, payload.clone().into()).await {
+            Ok(()) => break,
+            Err(e) if i == last => {
+                tracing::warn!(user_id = %user_id, "Failed to publish hr.received after {} attempts: {e}", last + 1);
+            }
+            Err(e) => {
+                tracing::debug!(user_id = %user_id, attempt = i + 1, "Retrying hr.received publish: {e}");
+            }
+        }
     }
 
     Ok(())
