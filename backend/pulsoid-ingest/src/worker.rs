@@ -21,7 +21,7 @@ pub async fn run_worker(db: PgPool, nats: async_nats::Client, user_id: String) {
             "SELECT id, user_id, source, access_token, refresh_token, key_version,
                     EXTRACT(EPOCH FROM token_expires_at)::BIGINT as token_expires_at,
                     EXTRACT(EPOCH FROM last_connected_at)::BIGINT as last_connected_at,
-                    last_error, config_version
+                    last_error, refresh_blocked, config_version
              FROM pulsoid_connections WHERE user_id = $1",
         )
         .bind(&user_id)
@@ -60,6 +60,12 @@ pub async fn run_worker(db: PgPool, nats: async_nats::Client, user_id: String) {
 
         // Check token expiry for OAuth connections — request refresh via NATS
         if conn.source == SOURCE_OAUTH {
+            if conn.refresh_blocked {
+                tracing::warn!(user_id = %user_id, last_error = ?conn.last_error,
+                    "Refresh blocked due to terminal failure, worker exiting. User must re-authorize.");
+                return;
+            }
+
             if let Some(expires_at) = conn.token_expires_at {
                 let now = system_now();
                 if now >= expires_at - REFRESH_SAFETY_MARGIN_SECS {

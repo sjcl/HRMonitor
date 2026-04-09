@@ -205,8 +205,8 @@ pub async fn callback(
 
     // 8. UPSERT into pulsoid_connections
     let upsert_result = sqlx::query(
-        "INSERT INTO pulsoid_connections (user_id, source, access_token, refresh_token, key_version, token_expires_at, last_error)
-         VALUES ($1, 'oauth', $2, $3, $4, now() + make_interval(secs => $5), NULL)
+        "INSERT INTO pulsoid_connections (user_id, source, access_token, refresh_token, key_version, token_expires_at, last_error, refresh_blocked)
+         VALUES ($1, 'oauth', $2, $3, $4, now() + make_interval(secs => $5), NULL, false)
          ON CONFLICT (user_id) DO UPDATE SET
             source = 'oauth',
             access_token = EXCLUDED.access_token,
@@ -215,6 +215,7 @@ pub async fn callback(
             token_expires_at = EXCLUDED.token_expires_at,
             last_connected_at = NULL,
             last_error = NULL,
+            refresh_blocked = false,
             config_version = pulsoid_connections.config_version + 1",
     )
     .bind(user_id)

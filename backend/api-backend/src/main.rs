@@ -18,7 +18,7 @@ use tower_http::cors::CorsLayer;
 use auth::AuthConfig;
 use common::messages::{HeartRateReceived, TokenRefreshRequest, subjects};
 use common::token_encryption::TokenEncryption;
-use pulsoid_oauth::PulsoidOAuthConfig;
+use pulsoid_oauth::{OAuthError, PulsoidOAuthConfig};
 
 pub struct AppState {
     pub db: sqlx::PgPool,
@@ -340,33 +340,42 @@ impl Drop for InFlightGuard {
 /// and publishes a connection.changed event.
 async fn handle_token_refresh(state: &AppState, user_id: &str) {
     // Fetch connection details
-    let row: Option<(String, Vec<u8>, Option<Vec<u8>>, i32, Option<i64>)> = match sqlx::query_as(
-        "SELECT source, access_token, refresh_token, key_version,
-                EXTRACT(EPOCH FROM token_expires_at)::BIGINT as token_expires_at
-         FROM pulsoid_connections WHERE user_id = $1",
-    )
-    .bind(user_id)
-    .fetch_optional(&state.db)
-    .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::error!(user_id, "Failed to fetch connection for refresh: {e}");
-            return;
-        }
-    };
+    let row: Option<(String, Vec<u8>, Option<Vec<u8>>, i32, Option<i64>, bool)> =
+        match sqlx::query_as(
+            "SELECT source, access_token, refresh_token, key_version,
+                    EXTRACT(EPOCH FROM token_expires_at)::BIGINT as token_expires_at,
+                    refresh_blocked
+             FROM pulsoid_connections WHERE user_id = $1",
+        )
+        .bind(user_id)
+        .fetch_optional(&state.db)
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(user_id, "Failed to fetch connection for refresh: {e}");
+                return;
+            }
+        };
 
-    let (source, _access_token, refresh_token_enc, key_version, token_expires_at) = match row {
-        Some(r) => r,
-        None => {
-            tracing::warn!(user_id, "No pulsoid connection found for refresh");
-            return;
-        }
-    };
+    let (source, _access_token, refresh_token_enc, key_version, token_expires_at, refresh_blocked) =
+        match row {
+            Some(r) => r,
+            None => {
+                tracing::warn!(user_id, "No pulsoid connection found for refresh");
+                return;
+            }
+        };
 
     // Only process OAuth connections
     if source != "oauth" {
         tracing::debug!(user_id, "Ignoring refresh request for non-OAuth connection");
+        return;
+    }
+
+    // Circuit breaker: skip if already blocked due to terminal failure
+    if refresh_blocked {
+        tracing::debug!(user_id, "Refresh already blocked, ignoring request");
         return;
     }
 
@@ -388,7 +397,7 @@ async fn handle_token_refresh(state: &AppState, user_id: &str) {
         None => {
             tracing::error!(user_id, "OAuth connection has no refresh_token");
             let _ = sqlx::query(
-                "UPDATE pulsoid_connections SET last_error = $1 WHERE user_id = $2",
+                "UPDATE pulsoid_connections SET last_error = $1, refresh_blocked = true WHERE user_id = $2",
             )
             .bind("No refresh token available")
             .bind(user_id)
@@ -406,7 +415,7 @@ async fn handle_token_refresh(state: &AppState, user_id: &str) {
         Err(e) => {
             tracing::error!(user_id, "Failed to decrypt refresh token: {e}");
             let _ = sqlx::query(
-                "UPDATE pulsoid_connections SET last_error = $1 WHERE user_id = $2",
+                "UPDATE pulsoid_connections SET last_error = $1, refresh_blocked = true WHERE user_id = $2",
             )
             .bind(format!("Failed to decrypt refresh token: {e}"))
             .bind(user_id)
@@ -421,13 +430,28 @@ async fn handle_token_refresh(state: &AppState, user_id: &str) {
         Ok(resp) => resp,
         Err(e) => {
             tracing::warn!(user_id, "Token refresh failed: {e}");
+            let is_terminal = match &e {
+                OAuthError::TokenEndpoint { status, body } => {
+                    // 401 from refresh endpoint means refresh token is dead
+                    *status == 401
+                        || serde_json::from_str::<serde_json::Value>(body)
+                            .ok()
+                            .and_then(|v| v.get("error")?.as_str().map(|s| s == "invalid_grant"))
+                            .unwrap_or(false)
+                }
+                OAuthError::Request(_) => false,
+            };
             let _ = sqlx::query(
-                "UPDATE pulsoid_connections SET last_error = $1 WHERE user_id = $2",
+                "UPDATE pulsoid_connections SET last_error = $1, refresh_blocked = $3 WHERE user_id = $2",
             )
             .bind(format!("Token refresh failed: {e}"))
             .bind(user_id)
+            .bind(is_terminal)
             .execute(&state.db)
             .await;
+            if is_terminal {
+                tracing::warn!(user_id, "Terminal refresh failure, blocking further attempts");
+            }
             return;
         }
     };
@@ -445,7 +469,7 @@ async fn handle_token_refresh(state: &AppState, user_id: &str) {
         "UPDATE pulsoid_connections
          SET access_token = $1, refresh_token = $2, key_version = $3,
              token_expires_at = now() + make_interval(secs => $4),
-             last_error = NULL, config_version = config_version + 1
+             last_error = NULL, refresh_blocked = false, config_version = config_version + 1
          WHERE user_id = $5 AND source = 'oauth'",
     )
     .bind(&enc_access)
