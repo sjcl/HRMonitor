@@ -155,6 +155,3 @@ export function getHeartRatesByDate(userId: string, date: string) {
   );
 }
 
-export function getLatestHeartRate(userId: string) {
-  return fetchJson<HeartRateRecord>(`/api/users/${userId}/latest-heart-rate`);
-}

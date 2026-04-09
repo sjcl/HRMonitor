@@ -2,7 +2,6 @@ use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use chrono::NaiveDate;
-use redis::AsyncCommands;
 use std::sync::Arc;
 
 use crate::AppState;
@@ -13,7 +12,6 @@ use crate::models::{
     DailyStatsQuery, DailyStatsResponse, GroupHeartRateResponse, GroupMinuteStatsResponse,
     HeartRateByDateQuery, HeartRateQuery, HeartRateResponse, MinuteStatsResponse,
 };
-use common::messages::HeartRateReceived;
 
 fn parse_date(s: &str) -> Result<NaiveDate, AppError> {
     NaiveDate::parse_from_str(s, "%Y-%m-%d")
@@ -170,55 +168,6 @@ pub async fn minute_stats_by_date(
     .await?;
 
     Ok(Json(records))
-}
-
-pub async fn latest_heart_rate(
-    State(state): State<Arc<AppState>>,
-    ViewableUserId(user_id): ViewableUserId,
-) -> Result<Json<HeartRateResponse>, AppError> {
-    // Try Redis first
-    {
-        let mut redis = state.redis.lock().await;
-        let key = format!("latest_bpm:{user_id}");
-        if let Ok(Some(value)) = redis.get::<_, Option<String>>(&key).await
-            && let Ok(cached) = serde_json::from_str::<HeartRateReceived>(&value)
-        {
-            return Ok(Json(HeartRateResponse {
-                bpm: cached.bpm,
-                timestamp: cached.recorded_at,
-            }));
-        }
-    }
-
-    // Fall back to DB
-    let record: HeartRateResponse = sqlx::query_as(
-        "SELECT bpm, EXTRACT(EPOCH FROM recorded_at)::BIGINT as timestamp FROM heart_rate_records WHERE user_id = $1 ORDER BY recorded_at DESC LIMIT 1"
-    )
-    .bind(&user_id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| AppError::NotFound("No heart rate data found".into()))?;
-
-    // Write back to Redis
-    {
-        let update = HeartRateReceived {
-            user_id: user_id.clone(),
-            bpm: record.bpm,
-            recorded_at: record.timestamp,
-            received_at: record.timestamp,
-        };
-        if let Ok(json) = serde_json::to_string(&update) {
-            let mut redis = state.redis.lock().await;
-            let key = format!("latest_bpm:{user_id}");
-            let _: Result<Option<String>, _> = redis::cmd("SET")
-                .arg(&key)
-                .arg(&json)
-                .query_async(&mut *redis)
-                .await;
-        }
-    }
-
-    Ok(Json(record))
 }
 
 pub async fn group_heart_rates(

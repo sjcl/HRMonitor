@@ -297,10 +297,6 @@ async fn main() {
             get(handlers::heart_rates::list_heart_rates),
         )
         .route(
-            "/api/users/{id}/latest-heart-rate",
-            get(handlers::heart_rates::latest_heart_rate),
-        )
-        .route(
             "/api/groups",
             get(handlers::groups::list_groups).post(handlers::groups::create_group),
         )

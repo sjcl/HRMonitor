@@ -70,7 +70,6 @@ docker compose up --build
 - `GET/PUT/DELETE /api/users/me/pulsoid-token`
 - `GET /api/users/{id}/heart-rates?period=`, `GET /api/users/{id}/heart-rates/by-date?date=` (`{id}` に `me` 可)
 - `GET /api/users/{id}/heart-rates/daily-stats?date=`, `GET /api/users/{id}/heart-rates/minute-stats?period=`
-- `GET /api/users/{id}/latest-heart-rate` (Redis優先、DBフォールバック)
 - `WS /api/ws/me`, `WS /api/ws/users/{id}`, `WS /api/ws/groups/{id}`
 
 ## アーキテクチャ要点
