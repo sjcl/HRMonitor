@@ -52,12 +52,46 @@ async fn main() {
         .expect("Failed to initialize database");
 
     let redis_client = redis::Client::open(redis_url).expect("Invalid REDIS_URL");
-    let redis_conn = redis_client
+    let mut redis_conn = redis_client
         .get_multiplexed_async_connection()
         .await
         .expect("Failed to connect to Redis");
 
     tracing::info!("Connected to Redis");
+
+    // Invalidate stale BPM cache from previous run
+    {
+        let mut cursor: u64 = 0;
+        let mut deleted = 0u64;
+        loop {
+            let (next_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg("latest_bpm:*")
+                .arg("COUNT")
+                .arg(100)
+                .query_async(&mut redis_conn)
+                .await
+                .expect("Failed to scan Redis keys");
+
+            if !keys.is_empty() {
+                let mut cmd = redis::cmd("DEL");
+                for key in &keys {
+                    cmd.arg(key);
+                }
+                let count: u64 = cmd.query_async(&mut redis_conn).await.unwrap_or(0);
+                deleted += count;
+            }
+
+            cursor = next_cursor;
+            if cursor == 0 {
+                break;
+            }
+        }
+        if deleted > 0 {
+            tracing::info!(count = deleted, "Invalidated stale BPM cache entries");
+        }
+    }
 
     let nats = async_nats::connect(&nats_url)
         .await
