@@ -83,7 +83,7 @@ pub async fn run_worker(db: PgPool, nats: async_nats::Client, user_id: String) {
                     {
                         tracing::warn!(user_id = %user_id, "Failed to publish refresh_needed: {e}");
                     }
-                    update_last_error(&db, &user_id, "Token expired, refresh requested").await;
+                    update_connection_state(&db, &user_id, "pending", Some("Token expired, refresh requested")).await;
                     tracing::info!(user_id = %user_id, backoff_secs = backoff.as_secs(), "Token expired, waiting for refresh");
                     tokio::time::sleep(backoff).await;
                     backoff = (backoff * 2).min(max_backoff);
@@ -91,10 +91,11 @@ pub async fn run_worker(db: PgPool, nats: async_nats::Client, user_id: String) {
                 }
             } else {
                 tracing::error!(user_id = %user_id, "OAuth connection missing token_expires_at");
-                update_last_error(
+                update_connection_state(
                     &db,
                     &user_id,
-                    "OAuth connection missing expiry (data inconsistency)",
+                    "error",
+                    Some("OAuth connection missing expiry (data inconsistency)"),
                 )
                 .await;
                 tokio::time::sleep(backoff).await;
@@ -143,11 +144,13 @@ pub async fn run_worker(db: PgPool, nats: async_nats::Client, user_id: String) {
                         _ => {}
                     }
                 }
+
+                update_connection_state(&db, &user_id, "pending", Some("WebSocket disconnected, reconnecting")).await;
             }
             Err(e) => {
                 let error_msg = format!("{e}");
                 tracing::warn!(user_id = %user_id, "Failed to connect: {error_msg}");
-                update_last_error(&db, &user_id, &error_msg).await;
+                update_connection_state(&db, &user_id, "pending", Some(&error_msg)).await;
             }
         }
 
@@ -155,14 +158,6 @@ pub async fn run_worker(db: PgPool, nats: async_nats::Client, user_id: String) {
         tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(max_backoff);
     }
-}
-
-async fn update_last_error(db: &PgPool, user_id: &str, error: &str) {
-    let _ = sqlx::query("UPDATE pulsoid_connections SET last_error = $1 WHERE user_id = $2")
-        .bind(error)
-        .bind(user_id)
-        .execute(db)
-        .await;
 }
 
 async fn update_connection_state(db: &PgPool, user_id: &str, state: &str, error: Option<&str>) {

@@ -186,7 +186,11 @@ export function PulsoidToken({
                 )}
               </>
             ) : (
-              <span className="text-yellow-400">Connecting...</span>
+              <span className="text-yellow-400">
+                {token.last_error
+                  ? `Reconnecting: ${token.last_error}`
+                  : "Connecting..."}
+              </span>
             )}
           </span>
         </div>
