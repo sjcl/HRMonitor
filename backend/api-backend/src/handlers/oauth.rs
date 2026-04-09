@@ -9,6 +9,7 @@ use std::sync::Arc;
 use crate::AppState;
 use crate::auth::AuthenticatedUser;
 use crate::error::AppError;
+use crate::handlers::utils::connection_change_applied;
 
 // --- ReturnTo enum (open redirect prevention) ---
 
@@ -253,7 +254,7 @@ pub async fn callback(
     {
         Ok(Ok(reply)) => {
             match serde_json::from_slice::<common::messages::ConnectionChangeAck>(&reply.payload) {
-                Ok(ack) if ack.applied => "authorized",
+                Ok(ack) if connection_change_applied(&ack, user_id) => "authorized",
                 _ => "authorized_pending",
             }
         }

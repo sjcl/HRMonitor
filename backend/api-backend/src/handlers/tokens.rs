@@ -10,6 +10,7 @@ use common::messages::{subjects, ConnectionChangeAck, ConnectionChangeCommand};
 
 use crate::auth::AuthenticatedUser;
 use crate::error::AppError;
+use crate::handlers::utils::connection_change_applied;
 use crate::models::{PulsoidTokenResponse, SetManualTokenRequest};
 use crate::AppState;
 
@@ -30,16 +31,8 @@ async fn nats_request_status(
     .await
     {
         Ok(Ok(reply)) => match serde_json::from_slice::<ConnectionChangeAck>(&reply.payload) {
-            Ok(ack) if ack.applied => {
-                if ack.stale {
-                    tracing::info!(user_id, actual_cv = ?ack.config_version, "Ingest applied (stale command)");
-                }
-                "applied"
-            }
-            Ok(ack) => {
-                tracing::warn!(user_id, error = ?ack.error, "Ingest did not apply");
-                "pending"
-            }
+            Ok(ack) if connection_change_applied(&ack, user_id) => "applied",
+            Ok(_) => "pending",
             Err(e) => {
                 tracing::warn!(user_id, "Failed to parse ack: {e}");
                 "pending"
