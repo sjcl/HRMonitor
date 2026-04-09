@@ -5,8 +5,8 @@ ALTER TABLE pulsoid_connections ADD COLUMN state_updated_at TIMESTAMPTZ;
 -- Backfill existing rows
 UPDATE pulsoid_connections SET
   connection_state = CASE
-    WHEN last_connected_at IS NOT NULL THEN 'connected'
     WHEN last_error IS NOT NULL THEN 'error'
+    WHEN last_connected_at IS NOT NULL THEN 'connected'
     ELSE 'pending'
   END,
   state_updated_at = COALESCE(last_connected_at, now());
