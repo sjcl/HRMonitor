@@ -1,17 +1,19 @@
-use axum::Extension;
-use axum::Json;
 use axum::extract::State;
 use axum::response::{IntoResponse, Response};
+use axum::Extension;
+use axum::Json;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::messages::{ConnectionChangeAck, ConnectionChangeCommand, subjects};
+use common::messages::{subjects, ConnectionChangeAck, ConnectionChangeCommand};
 
-use crate::AppState;
 use crate::auth::AuthenticatedUser;
 use crate::error::AppError;
 use crate::models::{PulsoidTokenResponse, SetManualTokenRequest};
+use crate::AppState;
+
+type PulsoidConnectionRow = (String, String, i64, Option<i64>, Option<String>);
 
 const NATS_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -60,7 +62,7 @@ pub async fn get_pulsoid_token(
 ) -> Result<Json<PulsoidTokenResponse>, AppError> {
     let user_id = &auth_user.id;
 
-    let row: Option<(String, String, i64, Option<i64>, Option<String>)> = sqlx::query_as(
+    let row: Option<PulsoidConnectionRow> = sqlx::query_as(
         "SELECT source,
                 connection_state,
                 EXTRACT(EPOCH FROM state_updated_at)::BIGINT as state_updated_at,
@@ -69,7 +71,7 @@ pub async fn get_pulsoid_token(
          FROM pulsoid_connections
          WHERE user_id = $1",
     )
-    .bind(&user_id)
+    .bind(user_id)
     .fetch_optional(&state.db)
     .await?;
 
@@ -92,7 +94,7 @@ pub async fn delete_pulsoid_token(
     let user_id = &auth_user.id;
 
     let result = sqlx::query("DELETE FROM pulsoid_connections WHERE user_id = $1")
-        .bind(&user_id)
+        .bind(user_id)
         .execute(&state.db)
         .await?;
 
@@ -141,7 +143,7 @@ pub async fn set_manual_pulsoid_token(
             config_version = nextval('pulsoid_config_version_seq')
          RETURNING config_version",
     )
-    .bind(&user_id)
+    .bind(user_id)
     .bind(&enc_access)
     .bind(key_version as i32)
     .fetch_one(&state.db)

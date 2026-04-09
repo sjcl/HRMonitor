@@ -5,9 +5,9 @@ mod handlers;
 mod models;
 mod pulsoid_oauth;
 
-use axum::Router;
 use axum::middleware;
 use axum::routing::get;
+use axum::Router;
 use futures_util::StreamExt;
 use redis::AsyncCommands;
 use std::collections::HashSet;
@@ -16,9 +16,19 @@ use tokio::sync::broadcast as tokio_broadcast;
 use tower_http::cors::CorsLayer;
 
 use auth::AuthConfig;
-use common::messages::{HeartRateReceived, TokenRefreshRequest, subjects};
+use common::messages::{subjects, HeartRateReceived, TokenRefreshRequest};
 use common::token_encryption::TokenEncryption;
 use pulsoid_oauth::{OAuthError, PulsoidOAuthConfig};
+
+type TokenRefreshRow = (
+    String,
+    Vec<u8>,
+    Option<Vec<u8>>,
+    i32,
+    Option<i64>,
+    bool,
+    i32,
+);
 
 pub struct AppState {
     pub db: sqlx::PgPool,
@@ -374,15 +384,7 @@ impl Drop for InFlightGuard {
 /// and publishes a connection.changed event.
 async fn handle_token_refresh(state: &AppState, user_id: &str, request_config_version: i32) {
     // Fetch connection details
-    let row: Option<(
-        String,
-        Vec<u8>,
-        Option<Vec<u8>>,
-        i32,
-        Option<i64>,
-        bool,
-        i32,
-    )> = match sqlx::query_as(
+    let row: Option<TokenRefreshRow> = match sqlx::query_as(
         "SELECT source, access_token, refresh_token, key_version,
                     EXTRACT(EPOCH FROM token_expires_at)::BIGINT as token_expires_at,
                     refresh_blocked, config_version

@@ -312,7 +312,7 @@ async fn read_snapshot(
              WHERE user_id = ANY($1) \
              ORDER BY user_id, recorded_at DESC",
         )
-        .bind(&missing_keys.keys().cloned().collect::<Vec<_>>())
+        .bind(missing_keys.keys().cloned().collect::<Vec<_>>())
         .fetch_all(&state.db)
         .await
         .inspect_err(|e| tracing::warn!("batch latest HR query failed: {e}"))

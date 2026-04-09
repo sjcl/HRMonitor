@@ -6,6 +6,8 @@ use tokio::task::JoinHandle;
 
 use crate::worker::run_worker;
 
+type ReconcileSnapshot = (HashMap<String, i32>, Vec<(String, JoinHandle<()>)>);
+
 /// Connections eligible for worker spawning.
 /// Excludes refresh_blocked error connections (terminal OAuth failure — user must re-authorize).
 const SPAWNABLE_CONNECTIONS_SQL: &str = "SELECT user_id, config_version FROM pulsoid_connections \
@@ -132,7 +134,7 @@ impl WorkerManager {
 
         let db_connections: HashMap<String, i32> = db_rows.into_iter().collect();
 
-        let (snapshot, finished_workers): (HashMap<String, i32>, Vec<(String, JoinHandle<()>)>) = {
+        let (snapshot, finished_workers): ReconcileSnapshot = {
             let mut state = self.state.lock().await;
             let finished_user_ids: Vec<String> = state
                 .iter()
@@ -192,16 +194,15 @@ impl WorkerManager {
         for user_id in db_user_ids.intersection(&active_user_ids) {
             if let (Some(&active_ver), Some(&db_ver)) =
                 (snapshot.get(user_id), db_connections.get(user_id))
+                && db_ver != active_ver
             {
-                if db_ver != active_ver {
-                    tracing::info!(
-                        user_id = %user_id,
-                        old_version = active_ver,
-                        new_version = db_ver,
-                        "Reconcile: config_version changed, restarting worker"
-                    );
-                    self.spawn_worker(user_id, db_ver).await;
-                }
+                tracing::info!(
+                    user_id = %user_id,
+                    old_version = active_ver,
+                    new_version = db_ver,
+                    "Reconcile: config_version changed, restarting worker"
+                );
+                self.spawn_worker(user_id, db_ver).await;
             }
         }
     }

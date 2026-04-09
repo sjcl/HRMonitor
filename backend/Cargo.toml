@@ -1,2 +1,8 @@
 [workspace]
-members = ["api-backend", "common", "migration", "pulsoid-ingest"]
+members = [
+    "api-backend",
+    "common",
+    "migration",
+    "pulsoid-ingest"
+]
+resolver = "3"
