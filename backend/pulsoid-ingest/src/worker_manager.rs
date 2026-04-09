@@ -6,6 +6,14 @@ use tokio::task::JoinHandle;
 
 use crate::worker::run_worker;
 
+/// Connections eligible for worker spawning.
+/// Excludes refresh_blocked error connections (terminal OAuth failure — user must re-authorize).
+const SPAWNABLE_CONNECTIONS_SQL: &str =
+    "SELECT user_id, config_version FROM pulsoid_connections \
+     WHERE connection_state IN ('pending', 'connected') \
+       OR (connection_state = 'error' AND NOT refresh_blocked \
+           AND state_updated_at < now() - interval '5 minutes')";
+
 struct WorkerState {
     handle: JoinHandle<()>,
     config_version: i32,
@@ -33,7 +41,7 @@ impl WorkerManager {
 
     pub async fn start_all_active(&self) {
         let rows: Vec<(String, i32)> =
-            match sqlx::query_as("SELECT user_id, config_version FROM pulsoid_connections")
+            match sqlx::query_as(SPAWNABLE_CONNECTIONS_SQL)
                 .fetch_all(&self.db)
                 .await
             {
@@ -114,9 +122,7 @@ impl WorkerManager {
     /// Reconcile active workers with DB state.
     /// Detects new connections, removed connections, and config_version changes.
     pub async fn reconcile(&self) {
-        let db_rows: Vec<(String, i32)> = match sqlx::query_as(
-            "SELECT user_id, config_version FROM pulsoid_connections",
-        )
+        let db_rows: Vec<(String, i32)> = match sqlx::query_as(SPAWNABLE_CONNECTIONS_SQL)
         .fetch_all(&self.db)
         .await
         {
@@ -130,13 +136,39 @@ impl WorkerManager {
         let db_connections: HashMap<String, i32> =
             db_rows.into_iter().collect();
 
-        let snapshot: HashMap<String, i32> = {
-            let state = self.state.lock().await;
-            state
+        let (snapshot, finished_workers): (HashMap<String, i32>, Vec<(String, JoinHandle<()>)>) = {
+            let mut state = self.state.lock().await;
+            let finished_user_ids: Vec<String> = state
+                .iter()
+                .filter_map(|(user_id, worker)| worker.handle.is_finished().then_some(user_id.clone()))
+                .collect();
+
+            let finished_workers = finished_user_ids
+                .into_iter()
+                .filter_map(|user_id| state.remove(&user_id).map(|worker| (user_id, worker.handle)))
+                .collect();
+
+            let snapshot = state
                 .iter()
                 .map(|(k, v)| (k.clone(), v.config_version))
-                .collect()
+                .collect();
+
+            (snapshot, finished_workers)
         };
+
+        for (user_id, handle) in finished_workers {
+            match handle.await {
+                Ok(()) => {
+                    tracing::info!(user_id = %user_id, "Reconcile: removed finished worker");
+                }
+                Err(e) if e.is_cancelled() => {
+                    tracing::info!(user_id = %user_id, "Reconcile: removed cancelled worker");
+                }
+                Err(e) => {
+                    tracing::warn!(user_id = %user_id, "Reconcile: removed failed worker: {e}");
+                }
+            }
+        }
 
         let db_user_ids: HashSet<String> = db_connections.keys().cloned().collect();
         let active_user_ids: HashSet<String> = snapshot.keys().cloned().collect();
@@ -184,7 +216,7 @@ impl WorkerManager {
         let db = self.db.clone();
         let nats = self.nats.clone();
         let uid = user_id.to_string();
-        let handle = tokio::spawn(run_worker(db, nats, uid));
+        let handle = tokio::spawn(run_worker(db, nats, uid, config_version));
         state.insert(
             user_id.to_string(),
             WorkerState {

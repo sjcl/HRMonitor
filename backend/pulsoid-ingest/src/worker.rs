@@ -11,7 +11,12 @@ use crate::models::{PulsoidConnectionRow, PulsoidMessage, SOURCE_OAUTH};
 const PULSOID_WS_URL: &str = "wss://dev.pulsoid.net/api/v1/data/real_time";
 const REFRESH_SAFETY_MARGIN_SECS: i64 = 60;
 
-pub async fn run_worker(db: PgPool, nats: async_nats::Client, user_id: String) {
+pub async fn run_worker(
+    db: PgPool,
+    nats: async_nats::Client,
+    user_id: String,
+    config_version: i32,
+) {
     let mut backoff = Duration::from_secs(1);
     let max_backoff = Duration::from_secs(60);
 
@@ -46,6 +51,16 @@ pub async fn run_worker(db: PgPool, nats: async_nats::Client, user_id: String) {
             }
         };
 
+        if conn.config_version != config_version {
+            tracing::info!(
+                user_id = %user_id,
+                worker_version = config_version,
+                db_version = conn.config_version,
+                "Stale worker detected (config_version mismatch at fetch), exiting"
+            );
+            return;
+        }
+
         let encryption = TokenEncryption::from_env();
 
         // Decrypt access token
@@ -53,7 +68,21 @@ pub async fn run_worker(db: PgPool, nats: async_nats::Client, user_id: String) {
             Ok(t) => t,
             Err(e) => {
                 tracing::error!(user_id = %user_id, "Failed to decrypt access token: {e}");
-                update_connection_state(&db, &user_id, "error", Some("Failed to decrypt access token")).await;
+                if let Err(update_err) = update_connection_state(
+                    &db,
+                    &user_id,
+                    config_version,
+                    "error",
+                    Some("Failed to decrypt access token"),
+                )
+                .await
+                {
+                    tracing::warn!(
+                        user_id = %user_id,
+                        config_version,
+                        "Failed to persist terminal error state: {update_err}"
+                    );
+                }
                 return;
             }
         };
@@ -63,7 +92,21 @@ pub async fn run_worker(db: PgPool, nats: async_nats::Client, user_id: String) {
             if conn.refresh_blocked {
                 tracing::warn!(user_id = %user_id, last_error = ?conn.last_error,
                     "Refresh blocked due to terminal failure, worker exiting. User must re-authorize.");
-                update_connection_state(&db, &user_id, "error", conn.last_error.as_deref()).await;
+                if let Err(update_err) = update_connection_state(
+                    &db,
+                    &user_id,
+                    config_version,
+                    "error",
+                    conn.last_error.as_deref(),
+                )
+                .await
+                {
+                    tracing::warn!(
+                        user_id = %user_id,
+                        config_version,
+                        "Failed to persist terminal error state: {update_err}"
+                    );
+                }
                 return;
             }
 
@@ -73,7 +116,7 @@ pub async fn run_worker(db: PgPool, nats: async_nats::Client, user_id: String) {
                     // Token expired or about to expire — request refresh from api-backend
                     let req = TokenRefreshRequest {
                         user_id: user_id.to_string(),
-                        config_version: conn.config_version,
+                        config_version,
                     };
                     if let Err(e) = nats
                         .publish(
@@ -84,7 +127,32 @@ pub async fn run_worker(db: PgPool, nats: async_nats::Client, user_id: String) {
                     {
                         tracing::warn!(user_id = %user_id, "Failed to publish refresh_needed: {e}");
                     }
-                    update_connection_state(&db, &user_id, "pending", Some("Token expired, refresh requested")).await;
+                    match update_connection_state(
+                        &db,
+                        &user_id,
+                        config_version,
+                        "pending",
+                        Some("Token expired, refresh requested"),
+                    )
+                    .await
+                    {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            tracing::info!(
+                                user_id = %user_id,
+                                config_version,
+                                "Stale worker detected (config_version mismatch), exiting"
+                            );
+                            return;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                user_id = %user_id,
+                                config_version,
+                                "Failed to set pending state after refresh request: {e}"
+                            );
+                        }
+                    }
                     tracing::info!(user_id = %user_id, backoff_secs = backoff.as_secs(), "Token expired, waiting for refresh");
                     tokio::time::sleep(backoff).await;
                     backoff = (backoff * 2).min(max_backoff);
@@ -92,13 +160,21 @@ pub async fn run_worker(db: PgPool, nats: async_nats::Client, user_id: String) {
                 }
             } else {
                 tracing::error!(user_id = %user_id, "OAuth connection missing token_expires_at");
-                update_connection_state(
+                if let Err(update_err) = update_connection_state(
                     &db,
                     &user_id,
+                    config_version,
                     "error",
                     Some("OAuth connection missing expiry (data inconsistency)"),
                 )
-                .await;
+                .await
+                {
+                    tracing::warn!(
+                        user_id = %user_id,
+                        config_version,
+                        "Failed to persist terminal error state: {update_err}"
+                    );
+                }
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(max_backoff);
                 continue;
@@ -113,13 +189,32 @@ pub async fn run_worker(db: PgPool, nats: async_nats::Client, user_id: String) {
                 backoff = Duration::from_secs(1);
 
                 let now = system_now();
-                let _ = sqlx::query(
-                    "UPDATE pulsoid_connections SET last_connected_at = to_timestamp($1), last_error = NULL, connection_state = 'connected', state_updated_at = now() WHERE user_id = $2",
+                match sqlx::query(
+                    "UPDATE pulsoid_connections SET last_connected_at = to_timestamp($1), last_error = NULL, connection_state = 'connected', state_updated_at = now() WHERE user_id = $2 AND config_version = $3",
                 )
                 .bind(now)
                 .bind(&user_id)
+                .bind(config_version)
                 .execute(&db)
-                .await;
+                .await
+                {
+                    Ok(result) if result.rows_affected() == 0 => {
+                        tracing::info!(
+                            user_id = %user_id,
+                            config_version,
+                            "Stale worker detected (config_version mismatch), exiting"
+                        );
+                        return;
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            user_id = %user_id,
+                            config_version,
+                            "Failed to set connected state: {e}"
+                        );
+                    }
+                }
 
                 tracing::info!(user_id = %user_id, "Connected to Pulsoid WebSocket");
 
@@ -146,12 +241,62 @@ pub async fn run_worker(db: PgPool, nats: async_nats::Client, user_id: String) {
                     }
                 }
 
-                update_connection_state(&db, &user_id, "pending", Some("WebSocket disconnected, reconnecting")).await;
+                match update_connection_state(
+                    &db,
+                    &user_id,
+                    config_version,
+                    "pending",
+                    Some("WebSocket disconnected, reconnecting"),
+                )
+                .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        tracing::info!(
+                            user_id = %user_id,
+                            config_version,
+                            "Stale worker detected (config_version mismatch), exiting"
+                        );
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            user_id = %user_id,
+                            config_version,
+                            "Failed to set pending state after disconnect: {e}"
+                        );
+                    }
+                }
             }
             Err(e) => {
                 let error_msg = format!("{e}");
                 tracing::warn!(user_id = %user_id, "Failed to connect: {error_msg}");
-                update_connection_state(&db, &user_id, "pending", Some(&error_msg)).await;
+                match update_connection_state(
+                    &db,
+                    &user_id,
+                    config_version,
+                    "pending",
+                    Some(&error_msg),
+                )
+                .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        tracing::info!(
+                            user_id = %user_id,
+                            config_version,
+                            "Stale worker detected (config_version mismatch), exiting"
+                        );
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            user_id = %user_id,
+                            config_version,
+                            "Failed to set pending state after connection error: {e}"
+                        );
+                    }
+                }
             }
         }
 
@@ -161,15 +306,24 @@ pub async fn run_worker(db: PgPool, nats: async_nats::Client, user_id: String) {
     }
 }
 
-async fn update_connection_state(db: &PgPool, user_id: &str, state: &str, error: Option<&str>) {
-    let _ = sqlx::query(
-        "UPDATE pulsoid_connections SET connection_state = $1, state_updated_at = now(), last_error = $2 WHERE user_id = $3",
+async fn update_connection_state(
+    db: &PgPool,
+    user_id: &str,
+    config_version: i32,
+    state: &str,
+    error: Option<&str>,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE pulsoid_connections SET connection_state = $1, state_updated_at = now(), last_error = $2 WHERE user_id = $3 AND config_version = $4",
     )
     .bind(state)
     .bind(error)
     .bind(user_id)
+    .bind(config_version)
     .execute(db)
-    .await;
+    .await?;
+
+    Ok(result.rows_affected() > 0)
 }
 
 async fn handle_message(
