@@ -75,7 +75,7 @@ impl WorkerManager {
                     user_id,
                     "Failed to check pulsoid connection, assuming exists: {e}"
                 );
-                Some((1,))
+                None
             }
         };
 
