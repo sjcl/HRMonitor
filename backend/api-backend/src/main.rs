@@ -391,13 +391,21 @@ async fn handle_token_refresh(state: &AppState, user_id: &str) {
         }
     }
 
+    // Set connection_state to pending at refresh start
+    let _ = sqlx::query(
+        "UPDATE pulsoid_connections SET connection_state = 'pending', state_updated_at = now() WHERE user_id = $1",
+    )
+    .bind(user_id)
+    .execute(&state.db)
+    .await;
+
     // Decrypt refresh token
     let refresh_token_bytes = match refresh_token_enc {
         Some(rt) => rt,
         None => {
             tracing::error!(user_id, "OAuth connection has no refresh_token");
             let _ = sqlx::query(
-                "UPDATE pulsoid_connections SET last_error = $1, refresh_blocked = true WHERE user_id = $2",
+                "UPDATE pulsoid_connections SET last_error = $1, refresh_blocked = true, connection_state = 'error', state_updated_at = now() WHERE user_id = $2",
             )
             .bind("No refresh token available")
             .bind(user_id)
@@ -415,7 +423,7 @@ async fn handle_token_refresh(state: &AppState, user_id: &str) {
         Err(e) => {
             tracing::error!(user_id, "Failed to decrypt refresh token: {e}");
             let _ = sqlx::query(
-                "UPDATE pulsoid_connections SET last_error = $1, refresh_blocked = true WHERE user_id = $2",
+                "UPDATE pulsoid_connections SET last_error = $1, refresh_blocked = true, connection_state = 'error', state_updated_at = now() WHERE user_id = $2",
             )
             .bind(format!("Failed to decrypt refresh token: {e}"))
             .bind(user_id)
@@ -442,7 +450,10 @@ async fn handle_token_refresh(state: &AppState, user_id: &str) {
                 OAuthError::Request(_) => false,
             };
             let _ = sqlx::query(
-                "UPDATE pulsoid_connections SET last_error = $1, refresh_blocked = $3 WHERE user_id = $2",
+                "UPDATE pulsoid_connections SET last_error = $1, refresh_blocked = $3,
+                 connection_state = CASE WHEN $3 THEN 'error' ELSE 'pending' END,
+                 state_updated_at = now()
+                 WHERE user_id = $2",
             )
             .bind(format!("Token refresh failed: {e}"))
             .bind(user_id)
@@ -469,7 +480,9 @@ async fn handle_token_refresh(state: &AppState, user_id: &str) {
         "UPDATE pulsoid_connections
          SET access_token = $1, refresh_token = $2, key_version = $3,
              token_expires_at = now() + make_interval(secs => $4),
-             last_error = NULL, refresh_blocked = false, config_version = config_version + 1
+             last_error = NULL, refresh_blocked = false,
+             connection_state = 'pending', state_updated_at = now(),
+             config_version = config_version + 1
          WHERE user_id = $5 AND source = 'oauth'",
     )
     .bind(&enc_access)

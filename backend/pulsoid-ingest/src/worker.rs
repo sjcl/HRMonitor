@@ -21,7 +21,7 @@ pub async fn run_worker(db: PgPool, nats: async_nats::Client, user_id: String) {
             "SELECT id, user_id, source, access_token, refresh_token, key_version,
                     EXTRACT(EPOCH FROM token_expires_at)::BIGINT as token_expires_at,
                     EXTRACT(EPOCH FROM last_connected_at)::BIGINT as last_connected_at,
-                    last_error, refresh_blocked, config_version
+                    last_error, refresh_blocked, config_version, connection_state
              FROM pulsoid_connections WHERE user_id = $1",
         )
         .bind(&user_id)
@@ -53,7 +53,7 @@ pub async fn run_worker(db: PgPool, nats: async_nats::Client, user_id: String) {
             Ok(t) => t,
             Err(e) => {
                 tracing::error!(user_id = %user_id, "Failed to decrypt access token: {e}");
-                update_last_error(&db, &user_id, "Failed to decrypt access token").await;
+                update_connection_state(&db, &user_id, "error", Some("Failed to decrypt access token")).await;
                 return;
             }
         };
@@ -63,6 +63,7 @@ pub async fn run_worker(db: PgPool, nats: async_nats::Client, user_id: String) {
             if conn.refresh_blocked {
                 tracing::warn!(user_id = %user_id, last_error = ?conn.last_error,
                     "Refresh blocked due to terminal failure, worker exiting. User must re-authorize.");
+                update_connection_state(&db, &user_id, "error", conn.last_error.as_deref()).await;
                 return;
             }
 
@@ -111,7 +112,7 @@ pub async fn run_worker(db: PgPool, nats: async_nats::Client, user_id: String) {
 
                 let now = system_now();
                 let _ = sqlx::query(
-                    "UPDATE pulsoid_connections SET last_connected_at = to_timestamp($1), last_error = NULL WHERE user_id = $2",
+                    "UPDATE pulsoid_connections SET last_connected_at = to_timestamp($1), last_error = NULL, connection_state = 'connected', state_updated_at = now() WHERE user_id = $2",
                 )
                 .bind(now)
                 .bind(&user_id)
@@ -162,6 +163,17 @@ async fn update_last_error(db: &PgPool, user_id: &str, error: &str) {
         .bind(user_id)
         .execute(db)
         .await;
+}
+
+async fn update_connection_state(db: &PgPool, user_id: &str, state: &str, error: Option<&str>) {
+    let _ = sqlx::query(
+        "UPDATE pulsoid_connections SET connection_state = $1, state_updated_at = now(), last_error = $2 WHERE user_id = $3",
+    )
+    .bind(state)
+    .bind(error)
+    .bind(user_id)
+    .execute(db)
+    .await;
 }
 
 async fn handle_message(

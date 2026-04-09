@@ -19,8 +19,10 @@ pub async fn get_pulsoid_token(
 ) -> Result<Json<PulsoidTokenResponse>, AppError> {
     let user_id = &auth_user.id;
 
-    let row: Option<(String, Option<i64>, Option<String>)> = sqlx::query_as(
+    let row: Option<(String, String, i64, Option<i64>, Option<String>)> = sqlx::query_as(
         "SELECT source,
+                connection_state,
+                EXTRACT(EPOCH FROM state_updated_at)::BIGINT as state_updated_at,
                 EXTRACT(EPOCH FROM last_connected_at)::BIGINT as last_connected_at,
                 last_error
          FROM pulsoid_connections
@@ -30,11 +32,13 @@ pub async fn get_pulsoid_token(
     .fetch_optional(&state.db)
     .await?;
 
-    let (source, last_connected_at, last_error) =
+    let (source, connection_state, state_updated_at, last_connected_at, last_error) =
         row.ok_or_else(|| AppError::NotFound("Pulsoid token not configured".into()))?;
 
     Ok(Json(PulsoidTokenResponse {
         source,
+        connection_state,
+        state_updated_at,
         last_connected_at,
         last_error,
     }))
@@ -89,8 +93,8 @@ pub async fn set_manual_pulsoid_token(
     let (enc_access, key_version) = state.token_encryption.encrypt(token);
 
     sqlx::query(
-        "INSERT INTO pulsoid_connections (user_id, source, access_token, key_version, refresh_token, token_expires_at, last_connected_at, last_error, refresh_blocked)
-         VALUES ($1, 'manual', $2, $3, NULL, NULL, NULL, NULL, false)
+        "INSERT INTO pulsoid_connections (user_id, source, access_token, key_version, refresh_token, token_expires_at, last_connected_at, last_error, refresh_blocked, connection_state, state_updated_at)
+         VALUES ($1, 'manual', $2, $3, NULL, NULL, NULL, NULL, false, 'pending', now())
          ON CONFLICT (user_id) DO UPDATE SET
             source = 'manual',
             access_token = EXCLUDED.access_token,
@@ -100,6 +104,8 @@ pub async fn set_manual_pulsoid_token(
             last_connected_at = NULL,
             last_error = NULL,
             refresh_blocked = false,
+            connection_state = 'pending',
+            state_updated_at = now(),
             config_version = pulsoid_connections.config_version + 1",
     )
     .bind(&user_id)

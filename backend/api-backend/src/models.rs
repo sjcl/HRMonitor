@@ -93,6 +93,8 @@ pub struct DailyStatsQuery {
 #[derive(Debug, Serialize)]
 pub struct PulsoidTokenResponse {
     pub source: String,
+    pub connection_state: String,
+    pub state_updated_at: i64,
     pub last_connected_at: Option<i64>,
     pub last_error: Option<String>,
 }

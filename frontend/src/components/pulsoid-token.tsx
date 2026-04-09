@@ -35,7 +35,7 @@ export function PulsoidToken({
     refetchOnWindowFocus: false,
     refetchInterval: (query) => {
       const data = query.state.data;
-      if (data && !data.last_connected_at && !data.last_error) {
+      if (data && data.connection_state === "pending") {
         return 2000;
       }
       return false;
@@ -44,7 +44,7 @@ export function PulsoidToken({
 
   // Clear warning when token reaches a terminal state (connected or errored)
   useEffect(() => {
-    if (token && (token.last_connected_at != null || token.last_error != null)) {
+    if (token && token.connection_state !== "pending") {
       setPendingWarning(null);
     }
   }, [token]);
@@ -173,15 +173,17 @@ export function PulsoidToken({
             {sourceLabel}
           </span>
           <span className="text-sm text-gray-400">
-            {token.last_error ? (
-              <span className="text-red-400">Error: {token.last_error}</span>
-            ) : token.last_connected_at ? (
+            {token.connection_state === "error" ? (
+              <span className="text-red-400">Error: {token.last_error ?? "Unknown error"}</span>
+            ) : token.connection_state === "connected" ? (
               <>
                 <span className="text-green-400">Connected</span>
-                <span className="ml-3">
-                  Last connected:{" "}
-                  {new Date(token.last_connected_at * 1000).toLocaleString()}
-                </span>
+                {token.last_connected_at && (
+                  <span className="ml-3">
+                    Last connected:{" "}
+                    {new Date(token.last_connected_at * 1000).toLocaleString()}
+                  </span>
+                )}
               </>
             ) : (
               <span className="text-yellow-400">Connecting...</span>

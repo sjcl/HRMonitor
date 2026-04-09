@@ -19,6 +19,8 @@ export interface HeartRateProfile {
 
 export interface PulsoidTokenStatus {
   source: "oauth" | "manual";
+  connection_state: "pending" | "connected" | "error";
+  state_updated_at: number;
   last_connected_at: number | null;
   last_error: string | null;
 }

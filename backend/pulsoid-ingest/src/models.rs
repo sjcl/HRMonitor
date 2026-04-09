@@ -16,6 +16,7 @@ pub struct PulsoidConnectionRow {
     pub last_error: Option<String>,
     pub refresh_blocked: bool,
     pub config_version: i32,
+    pub connection_state: String,
 }
 
 #[derive(Debug, Deserialize)]
