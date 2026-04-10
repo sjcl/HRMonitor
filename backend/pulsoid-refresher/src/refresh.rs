@@ -52,12 +52,12 @@ const ADVISORY_LOCK_NAMESPACE: i32 = 4242;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)] // variants are constructed via enum returns; fields used in tracing
 pub enum RefreshOutcome {
-    /// Refresh succeeded and the new `config_version` landed in the DB.
-    Refreshed { new_config_version: i32 },
+    /// Refresh succeeded and the new `revision` landed in the DB.
+    Refreshed { new_revision: i32 },
     /// Token is still valid (internal re-check after advisory lock).
     SkippedStillValid,
     /// Row was superseded before we could apply the update — a concurrent
-    /// writer (OAuth callback, manual PUT) bumped `config_version` or
+    /// writer (OAuth callback, manual PUT) bumped `revision` or
     /// removed the row entirely.
     SkippedSuperseded,
     /// Row is in the terminal `'error'` state. Only fresh re-auth can
@@ -72,7 +72,7 @@ pub enum RefreshOutcome {
     TransientFailure,
 }
 
-/// Attempt to refresh the OAuth token for `user_id` if its `config_version`
+/// Attempt to refresh the OAuth token for `user_id` if its `revision`
 /// still matches the value the scanner observed. All side effects are
 /// described in the module docs; the returned [`RefreshOutcome`] is the
 /// only channel the caller has to tell what happened.
@@ -82,7 +82,7 @@ pub async fn refresh_if_expiring(
     encryption: &TokenEncryption,
     oauth: &PulsoidOAuthConfig,
     user_id: &str,
-    expected_config_version: i32,
+    expected_revision: i32,
 ) -> RefreshOutcome {
     // ---- Tx A: advisory lock only ------------------------------------------------
     // This transaction exists solely to hold the xact-scoped advisory lock
@@ -124,7 +124,7 @@ pub async fn refresh_if_expiring(
     // function. All DML runs on *different* connections obtained from the
     // pool, so the row locks they take are short-lived while the advisory
     // lock stays held.
-    let outcome = refresh_inner(db, nats, encryption, oauth, user_id, expected_config_version)
+    let outcome = refresh_inner(db, nats, encryption, oauth, user_id, expected_revision)
         .await;
 
     // Release the advisory lock. Either direction is fine (commit vs
@@ -145,7 +145,7 @@ async fn refresh_inner(
     encryption: &TokenEncryption,
     oauth: &PulsoidOAuthConfig,
     user_id: &str,
-    expected_config_version: i32,
+    expected_revision: i32,
 ) -> RefreshOutcome {
     // ---- Tx B: SELECT current row + flip to 'pending' -----------------------------
     // Short-lived. Uses a fresh connection from the pool (NOT `lock_tx`).
@@ -162,7 +162,7 @@ async fn refresh_inner(
     let row: Option<Row> = match sqlx::query_as(
         "SELECT source, refresh_token, key_version,
                 EXTRACT(EPOCH FROM token_expires_at)::BIGINT as token_expires_at,
-                connection_state, config_version
+                connection_state, revision
          FROM pulsoid_connections WHERE user_id = $1",
     )
     .bind(user_id)
@@ -177,7 +177,7 @@ async fn refresh_inner(
         }
     };
 
-    let (source, refresh_token_enc, key_version, token_expires_at, connection_state, db_cv) =
+    let (source, refresh_token_enc, key_version, token_expires_at, connection_state, db_revision) =
         match row {
             Some(r) => r,
             None => {
@@ -187,12 +187,12 @@ async fn refresh_inner(
             }
         };
 
-    if db_cv != expected_config_version {
+    if db_revision != expected_revision {
         tracing::info!(
             user_id,
-            expected_config_version,
-            db_cv,
-            "Refresh skipped: connection superseded (config_version mismatch)"
+            expected_revision,
+            db_revision,
+            "Refresh skipped: connection superseded (revision mismatch)"
         );
         let _ = tx_b.rollback().await;
         return RefreshOutcome::SkippedSuperseded;
@@ -237,7 +237,7 @@ async fn refresh_inner(
             write_error_state(
                 db,
                 user_id,
-                expected_config_version,
+                expected_revision,
                 "No refresh token available",
                 true,
             )
@@ -254,7 +254,7 @@ async fn refresh_inner(
             write_error_state(
                 db,
                 user_id,
-                expected_config_version,
+                expected_revision,
                 &format!("Failed to decrypt refresh token: {e}"),
                 true,
             )
@@ -268,20 +268,20 @@ async fn refresh_inner(
     // writer could have flipped it between our SELECT and this UPDATE.
     match sqlx::query(
         "UPDATE pulsoid_connections SET connection_state = 'pending', state_updated_at = now() \
-         WHERE user_id = $1 AND config_version = $2 AND connection_state != 'error'",
+         WHERE user_id = $1 AND revision = $2 AND connection_state != 'error'",
     )
     .bind(user_id)
-    .bind(expected_config_version)
+    .bind(expected_revision)
     .execute(&mut *tx_b)
     .await
     {
         Ok(r) if r.rows_affected() == 0 => {
             let _ = tx_b.rollback().await;
-            match classify_no_op(db, user_id, expected_config_version).await {
+            match classify_no_op(db, user_id, expected_revision).await {
                 Ok(WriteOutcome::StickyError) => {
                     tracing::warn!(
                         user_id,
-                        expected_config_version,
+                        expected_revision,
                         "Refresh abandoned: row is in sticky error state"
                     );
                     return RefreshOutcome::SkippedStickyError;
@@ -289,7 +289,7 @@ async fn refresh_inner(
                 Ok(_) => {
                     tracing::info!(
                         user_id,
-                        expected_config_version,
+                        expected_revision,
                         "Token refresh abandoned: connection superseded"
                     );
                     return RefreshOutcome::SkippedSuperseded;
@@ -297,7 +297,7 @@ async fn refresh_inner(
                 Err(e) => {
                     tracing::warn!(
                         user_id,
-                        expected_config_version,
+                        expected_revision,
                         "Failed to classify zero-row update: {e}"
                     );
                     return RefreshOutcome::TransientFailure;
@@ -340,7 +340,7 @@ async fn refresh_inner(
             write_error_state(
                 db,
                 user_id,
-                expected_config_version,
+                expected_revision,
                 &format!("Token refresh failed: {e}"),
                 is_terminal,
             )
@@ -377,29 +377,29 @@ async fn refresh_inner(
              token_expires_at = now() + make_interval(secs => $4),
              last_error = NULL,
              connection_state = 'pending', state_updated_at = now(),
-             config_version = nextval('pulsoid_config_version_seq')
-         WHERE user_id = $5 AND source = 'oauth' AND config_version = $6
+             revision = nextval('pulsoid_revision_seq')
+         WHERE user_id = $5 AND source = 'oauth' AND revision = $6
            AND connection_state != 'error'
-         RETURNING config_version",
+         RETURNING revision",
     )
     .bind(&enc_access)
     .bind(&enc_refresh)
     .bind(new_key_version as i32)
     .bind(token_resp.expires_in as f64)
     .bind(user_id)
-    .bind(expected_config_version)
+    .bind(expected_revision)
     .fetch_optional(&mut *tx_c)
     .await;
 
-    let new_config_version = match result {
-        Ok(Some((cv,))) => cv,
+    let new_revision = match result {
+        Ok(Some((rev,))) => rev,
         Ok(None) => {
             let _ = tx_c.rollback().await;
-            match classify_no_op(db, user_id, expected_config_version).await {
+            match classify_no_op(db, user_id, expected_revision).await {
                 Ok(WriteOutcome::StickyError) => {
                     tracing::warn!(
                         user_id,
-                        expected_config_version,
+                        expected_revision,
                         "Refreshed tokens discarded: row is in sticky error state (resurrect only via fresh re-auth)"
                     );
                     return RefreshOutcome::SkippedStickyError;
@@ -407,7 +407,7 @@ async fn refresh_inner(
                 Ok(_) => {
                     tracing::warn!(
                         user_id,
-                        expected_config_version,
+                        expected_revision,
                         "Refreshed tokens discarded: connection superseded"
                     );
                     return RefreshOutcome::SkippedSuperseded;
@@ -415,7 +415,7 @@ async fn refresh_inner(
                 Err(e) => {
                     tracing::warn!(
                         user_id,
-                        expected_config_version,
+                        expected_revision,
                         "Failed to classify zero-row update: {e}"
                     );
                     return RefreshOutcome::TransientFailure;
@@ -436,12 +436,12 @@ async fn refresh_inner(
 
     tracing::info!(
         user_id,
-        config_version = new_config_version,
+        revision = new_revision,
         "Token refreshed successfully"
     );
 
     // Publish the CONNECTION_CHANGED hint AFTER Tx C commit. Publishing
-    // before commit would risk pulsoid-ingest chasing a new config_version
+    // before commit would risk pulsoid-ingest chasing a new revision
     // that never lands (if commit fails).
     let cmd = common::messages::ConnectionChangeCommand {
         user_id: user_id.to_string(),
@@ -454,7 +454,7 @@ async fn refresh_inner(
             {
                 tracing::warn!(
                     user_id,
-                    config_version = new_config_version,
+                    revision = new_revision,
                     "Failed to publish connection change hint after refresh: {e}"
                 );
             }
@@ -467,9 +467,7 @@ async fn refresh_inner(
         }
     }
 
-    RefreshOutcome::Refreshed {
-        new_config_version,
-    }
+    RefreshOutcome::Refreshed { new_revision }
 }
 
 /// Write an error state to `pulsoid_connections` in a dedicated short-lived
@@ -478,13 +476,13 @@ async fn refresh_inner(
 /// attempts.
 ///
 /// When `is_terminal` is true the write is unconditional within the
-/// `config_version` check (sticky-error guard is disabled). Otherwise the
+/// `revision` check (sticky-error guard is disabled). Otherwise the
 /// guard is enforced so we don't overwrite an existing `'error'` row with
 /// `'pending'`.
 async fn write_error_state(
     db: &PgPool,
     user_id: &str,
-    expected_config_version: i32,
+    expected_revision: i32,
     last_error: &str,
     is_terminal: bool,
 ) {
@@ -500,37 +498,37 @@ async fn write_error_state(
         "UPDATE pulsoid_connections SET last_error = $1,
          connection_state = CASE WHEN $3 THEN 'error' ELSE 'pending' END,
          state_updated_at = now()
-         WHERE user_id = $2 AND config_version = $4
+         WHERE user_id = $2 AND revision = $4
            AND ($3 OR connection_state != 'error')",
     )
     .bind(last_error)
     .bind(user_id)
     .bind(is_terminal)
-    .bind(expected_config_version)
+    .bind(expected_revision)
     .execute(&mut *tx)
     .await;
 
     match res {
         Ok(r) if r.rows_affected() == 0 => {
-            match classify_no_op(db, user_id, expected_config_version).await {
+            match classify_no_op(db, user_id, expected_revision).await {
                 Ok(WriteOutcome::StickyError) => {
                     tracing::warn!(
                         user_id,
-                        expected_config_version,
+                        expected_revision,
                         "Non-terminal refresh error not written: row is in sticky error state"
                     );
                 }
                 Ok(_) => {
                     tracing::info!(
                         user_id,
-                        expected_config_version,
+                        expected_revision,
                         "Error state not written: connection superseded"
                     );
                 }
                 Err(e) => {
                     tracing::warn!(
                         user_id,
-                        expected_config_version,
+                        expected_revision,
                         "Failed to classify zero-row update: {e}"
                     );
                 }

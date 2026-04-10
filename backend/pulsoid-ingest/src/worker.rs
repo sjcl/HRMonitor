@@ -17,7 +17,7 @@ use crate::models::{PulsoidConnectionRow, PulsoidMessage, SOURCE_OAUTH};
 const PULSOID_WS_URL: &str = "wss://dev.pulsoid.net/api/v1/data/real_time";
 /// Worker-side expiry floor: if `token_expires_at` is within this many
 /// seconds of `now()` the worker will NOT attempt a WS connect and will
-/// instead back off until pulsoid-refresher bumps `config_version`. This
+/// instead back off until pulsoid-refresher bumps `revision`. This
 /// is deliberately smaller than the refresher's own
 /// `REFRESH_SAFETY_MARGIN_SECS` (300s) so that in steady state the
 /// refresher always has a window to swap in a fresh token before the
@@ -27,7 +27,7 @@ const REFRESH_SAFETY_MARGIN_SECS: i64 = 60;
 /// Aborts the wrapped `JoinHandle` when dropped. Used so that the per-worker
 /// NATS publish task (spawned at the top of `run_worker`) is cancelled on
 /// every `run_worker` exit path — normal `return`, decrypt failure, stale
-/// config_version, or external `WorkerManager::replace_worker` abort. Without
+/// revision, or external `WorkerManager::replace_worker` abort. Without
 /// this, a detached spawn could outlive its parent worker and emit delayed
 /// `hr.received` events after abort.
 ///
@@ -48,7 +48,7 @@ pub async fn run_worker(
     mut redis: redis::aio::MultiplexedConnection,
     encryption: Arc<TokenEncryption>,
     user_id: String,
-    config_version: i32,
+    revision: i32,
 ) {
     // Decouple NATS `hr.received` publishing from the Pulsoid WS read loop.
     // Even without retries, `publish().await` can stall briefly while
@@ -127,7 +127,7 @@ pub async fn run_worker(
         let conn: Option<PulsoidConnectionRow> = match sqlx::query_as(
             "SELECT source, access_token, key_version,
                     EXTRACT(EPOCH FROM token_expires_at)::BIGINT as token_expires_at,
-                    last_error, connection_state, config_version
+                    last_error, connection_state, revision
              FROM pulsoid_connections WHERE user_id = $1",
         )
         .bind(&user_id)
@@ -152,12 +152,12 @@ pub async fn run_worker(
             }
         };
 
-        if conn.config_version != config_version {
+        if conn.revision != revision {
             tracing::info!(
                 user_id = %user_id,
-                worker_version = config_version,
-                db_version = conn.config_version,
-                "Stale worker detected (config_version mismatch at fetch), exiting"
+                worker_revision = revision,
+                db_revision = conn.revision,
+                "Stale worker detected (revision mismatch at fetch), exiting"
             );
             return;
         }
@@ -170,7 +170,7 @@ pub async fn run_worker(
                 if let Err(update_err) = update_connection_state(
                     &db,
                     &user_id,
-                    config_version,
+                    revision,
                     "error",
                     Some("Failed to decrypt access token"),
                 )
@@ -178,7 +178,7 @@ pub async fn run_worker(
                 {
                     tracing::warn!(
                         user_id = %user_id,
-                        config_version,
+                        revision,
                         "Failed to persist terminal error state: {update_err}"
                     );
                 }
@@ -191,7 +191,7 @@ pub async fn run_worker(
         // `token_expires_at` is within its own (larger) safety margin, so
         // all we need to do here is refuse to (re)connect with a token that
         // is already too close to expiry and sleep. The refresher will bump
-        // `config_version` once it has swapped in a fresh token, at which
+        // `revision` once it has swapped in a fresh token, at which
         // point the stale-version guard above tears this worker down and
         // WorkerManager spawns a new one.
         if conn.source == SOURCE_OAUTH {
@@ -201,12 +201,12 @@ pub async fn run_worker(
                 // Best-effort refresh of `last_error`/`state_updated_at`. The
                 // target state is 'error' so the sticky guard is disabled; a
                 // zero-row result means the row was superseded (stale
-                // config_version) or concurrently removed — either way we're
+                // revision) or concurrently removed — either way we're
                 // already about to `return`.
                 if let Err(update_err) = update_connection_state(
                     &db,
                     &user_id,
-                    config_version,
+                    revision,
                     "error",
                     conn.last_error.as_deref(),
                 )
@@ -214,7 +214,7 @@ pub async fn run_worker(
                 {
                     tracing::warn!(
                         user_id = %user_id,
-                        config_version,
+                        revision,
                         "Failed to persist terminal error state: {update_err}"
                     );
                 }
@@ -238,7 +238,7 @@ pub async fn run_worker(
                 if let Err(update_err) = update_connection_state(
                     &db,
                     &user_id,
-                    config_version,
+                    revision,
                     "error",
                     Some("OAuth connection missing expiry (data inconsistency)"),
                 )
@@ -246,7 +246,7 @@ pub async fn run_worker(
                 {
                     tracing::warn!(
                         user_id = %user_id,
-                        config_version,
+                        revision,
                         "Failed to persist terminal error state: {update_err}"
                     );
                 }
@@ -287,37 +287,37 @@ pub async fn run_worker(
                     "UPDATE pulsoid_connections
                      SET last_connected_at = to_timestamp($1), last_error = NULL,
                          connection_state = 'connected', state_updated_at = now()
-                     WHERE user_id = $2 AND config_version = $3
+                     WHERE user_id = $2 AND revision = $3
                        AND connection_state != 'error'",
                 )
                 .bind(now)
                 .bind(&user_id)
-                .bind(config_version)
+                .bind(revision)
                 .execute(&db)
                 .await
                 {
                     Ok(result) if result.rows_affected() == 0 => {
-                        // Disambiguate: stale config_version vs. sticky error
+                        // Disambiguate: stale revision vs. sticky error
                         // state flipped by api-backend during WS connect.
-                        match classify_no_op(&db, &user_id, config_version).await {
+                        match classify_no_op(&db, &user_id, revision).await {
                             Ok(WriteOutcome::StaleOrMissing) | Ok(WriteOutcome::Applied) => {
                                 tracing::info!(
                                     user_id = %user_id,
-                                    config_version,
-                                    "Stale worker detected (config_version mismatch), exiting"
+                                    revision,
+                                    "Stale worker detected (revision mismatch), exiting"
                                 );
                             }
                             Ok(WriteOutcome::StickyError) => {
                                 tracing::warn!(
                                     user_id = %user_id,
-                                    config_version,
+                                    revision,
                                     "Refused to mark connected: row in sticky error state, exiting"
                                 );
                             }
                             Err(e) => {
                                 tracing::warn!(
                                     user_id = %user_id,
-                                    config_version,
+                                    revision,
                                     "Failed to classify zero-row update: {e}; exiting"
                                 );
                             }
@@ -328,7 +328,7 @@ pub async fn run_worker(
                     Err(e) => {
                         tracing::warn!(
                             user_id = %user_id,
-                            config_version,
+                            revision,
                             "Failed to set connected state: {e}"
                         );
                     }
@@ -363,7 +363,7 @@ pub async fn run_worker(
                 match update_connection_state(
                     &db,
                     &user_id,
-                    config_version,
+                    revision,
                     "pending",
                     Some("WebSocket disconnected, reconnecting"),
                 )
@@ -373,15 +373,15 @@ pub async fn run_worker(
                     Ok(WriteOutcome::StaleOrMissing) => {
                         tracing::info!(
                             user_id = %user_id,
-                            config_version,
-                            "Stale worker detected (config_version mismatch), exiting"
+                            revision,
+                            "Stale worker detected (revision mismatch), exiting"
                         );
                         return;
                     }
                     Ok(WriteOutcome::StickyError) => {
                         tracing::warn!(
                             user_id = %user_id,
-                            config_version,
+                            revision,
                             "WS disconnected and row is now in sticky error state, exiting"
                         );
                         return;
@@ -389,7 +389,7 @@ pub async fn run_worker(
                     Err(e) => {
                         tracing::warn!(
                             user_id = %user_id,
-                            config_version,
+                            revision,
                             "Failed to set pending state after disconnect: {e}"
                         );
                     }
@@ -397,7 +397,7 @@ pub async fn run_worker(
             }
             Err(error_msg) => {
                 tracing::warn!(user_id = %user_id, "Failed to connect: {error_msg}");
-                if persist_pending_or_stale(&db, &user_id, config_version, &error_msg).await {
+                if persist_pending_or_stale(&db, &user_id, revision, &error_msg).await {
                     return;
                 }
             }
@@ -412,7 +412,7 @@ pub async fn run_worker(
 /// Update `connection_state` for the worker's row.
 ///
 /// Sticky-error guard: if the target `state` is `'error'` the write is
-/// unconditional (within the usual `config_version` check). If the target is
+/// unconditional (within the usual `revision` check). If the target is
 /// `'pending'` or `'connected'` the WHERE clause additionally requires
 /// `connection_state != 'error'` — a row already in the terminal state can
 /// only be resurrected by a fresh re-auth (OAuth callback or manual token
@@ -426,27 +426,27 @@ pub async fn run_worker(
 async fn update_connection_state(
     db: &PgPool,
     user_id: &str,
-    config_version: i32,
+    revision: i32,
     state: &str,
     error: Option<&str>,
 ) -> Result<WriteOutcome, sqlx::Error> {
     let result = sqlx::query(
         "UPDATE pulsoid_connections
          SET connection_state = $1, state_updated_at = now(), last_error = $2
-         WHERE user_id = $3 AND config_version = $4
+         WHERE user_id = $3 AND revision = $4
            AND ($1 = 'error' OR connection_state != 'error')",
     )
     .bind(state)
     .bind(error)
     .bind(user_id)
-    .bind(config_version)
+    .bind(revision)
     .execute(db)
     .await?;
 
     if result.rows_affected() > 0 {
         Ok(WriteOutcome::Applied)
     } else {
-        classify_no_op(db, user_id, config_version).await
+        classify_no_op(db, user_id, revision).await
     }
 }
 
@@ -531,7 +531,7 @@ fn system_now() -> i64 {
 }
 
 /// Update the connection to `pending` with a pre-sanitized error message.
-/// Returns `true` if the worker should exit (stale config_version **or** the
+/// Returns `true` if the worker should exit (stale revision **or** the
 /// row has since been flipped to sticky `'error'` by api-backend), `false`
 /// otherwise. DB errors are logged and treated as "continue" to match the
 /// existing behavior. Callers remain responsible for sleeping/backing off
@@ -539,23 +539,23 @@ fn system_now() -> i64 {
 async fn persist_pending_or_stale(
     db: &PgPool,
     user_id: &str,
-    config_version: i32,
+    revision: i32,
     error_msg: &str,
 ) -> bool {
-    match update_connection_state(db, user_id, config_version, "pending", Some(error_msg)).await {
+    match update_connection_state(db, user_id, revision, "pending", Some(error_msg)).await {
         Ok(WriteOutcome::Applied) => false,
         Ok(WriteOutcome::StaleOrMissing) => {
             tracing::info!(
                 user_id = %user_id,
-                config_version,
-                "Stale worker detected (config_version mismatch), exiting"
+                revision,
+                "Stale worker detected (revision mismatch), exiting"
             );
             true
         }
         Ok(WriteOutcome::StickyError) => {
             tracing::warn!(
                 user_id = %user_id,
-                config_version,
+                revision,
                 "Connection error persist refused: row is in sticky error state, exiting"
             );
             true
@@ -563,7 +563,7 @@ async fn persist_pending_or_stale(
         Err(e) => {
             tracing::warn!(
                 user_id = %user_id,
-                config_version,
+                revision,
                 "Failed to set pending state after connection error: {e}"
             );
             false

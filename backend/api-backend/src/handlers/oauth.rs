@@ -217,8 +217,8 @@ pub async fn callback(
             last_error = NULL,
             connection_state = 'pending',
             state_updated_at = now(),
-            config_version = nextval('pulsoid_config_version_seq')
-         RETURNING config_version",
+            revision = nextval('pulsoid_revision_seq')
+         RETURNING revision",
     )
     .bind(user_id)
     .bind(&enc_access)
@@ -228,8 +228,8 @@ pub async fn callback(
     .fetch_one(&state.db)
     .await;
 
-    let config_version = match upsert_result {
-        Ok((cv,)) => cv,
+    let revision = match upsert_result {
+        Ok((rev,)) => rev,
         Err(e) => {
             tracing::error!(user_id = %user_id, "Failed to save tokens: {e}");
             return Redirect::to(&format!("{return_to}?pulsoid=exchange_failed")).into_response();
@@ -249,11 +249,11 @@ pub async fn callback(
     {
         tracing::warn!(
             user_id = %user_id,
-            config_version,
+            revision,
             "Failed to publish connection change hint: {e}"
         );
     }
 
-    tracing::info!(user_id = %user_id, config_version, "Pulsoid authorized successfully");
+    tracing::info!(user_id = %user_id, revision, "Pulsoid authorized successfully");
     Redirect::to(&format!("{return_to}?pulsoid=authorized")).into_response()
 }

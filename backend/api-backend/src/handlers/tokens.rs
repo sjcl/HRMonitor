@@ -21,7 +21,7 @@ type PulsoidConnectionRow = (String, String, i64, Option<i64>, Option<String>);
 async fn publish_connection_change_hint(
     nats: &async_nats::Client,
     user_id: &str,
-    config_version: i32,
+    revision: i32,
 ) {
     let cmd = ConnectionChangeCommand {
         user_id: user_id.to_string(),
@@ -30,7 +30,7 @@ async fn publish_connection_change_hint(
     if let Err(e) = nats.publish(subjects::CONNECTION_CHANGED, payload).await {
         tracing::warn!(
             user_id,
-            config_version,
+            revision,
             "Failed to publish connection change hint: {e}"
         );
     }
@@ -74,19 +74,19 @@ pub async fn delete_pulsoid_token(
     let user_id = &auth_user.id;
 
     let deleted: Option<(i32,)> = sqlx::query_as(
-        "DELETE FROM pulsoid_connections WHERE user_id = $1 RETURNING config_version",
+        "DELETE FROM pulsoid_connections WHERE user_id = $1 RETURNING revision",
     )
     .bind(user_id)
     .fetch_optional(&state.db)
     .await?;
 
-    let config_version = match deleted {
-        Some((cv,)) => cv,
+    let revision = match deleted {
+        Some((rev,)) => rev,
         None => return Err(AppError::NotFound("Pulsoid token not configured".into())),
     };
 
-    tracing::info!(user_id, config_version, "Pulsoid connection deleted");
-    publish_connection_change_hint(&state.nats, user_id, config_version).await;
+    tracing::info!(user_id, revision, "Pulsoid connection deleted");
+    publish_connection_change_hint(&state.nats, user_id, revision).await;
 
     Ok(Json(json!({"status": "syncing"})).into_response())
 }
@@ -105,7 +105,7 @@ pub async fn set_manual_pulsoid_token(
 
     let (enc_access, key_version) = state.token_encryption.encrypt(token);
 
-    let (config_version,): (i32,) = sqlx::query_as(
+    let (revision,): (i32,) = sqlx::query_as(
         "INSERT INTO pulsoid_connections (user_id, source, access_token, key_version, refresh_token, token_expires_at, last_connected_at, last_error, connection_state, state_updated_at)
          VALUES ($1, 'manual', $2, $3, NULL, NULL, NULL, NULL, 'pending', now())
          ON CONFLICT (user_id) DO UPDATE SET
@@ -118,8 +118,8 @@ pub async fn set_manual_pulsoid_token(
             last_error = NULL,
             connection_state = 'pending',
             state_updated_at = now(),
-            config_version = nextval('pulsoid_config_version_seq')
-         RETURNING config_version",
+            revision = nextval('pulsoid_revision_seq')
+         RETURNING revision",
     )
     .bind(user_id)
     .bind(&enc_access)
@@ -127,8 +127,8 @@ pub async fn set_manual_pulsoid_token(
     .fetch_one(&state.db)
     .await?;
 
-    tracing::info!(user_id, config_version, "Manual Pulsoid token saved");
-    publish_connection_change_hint(&state.nats, user_id, config_version).await;
+    tracing::info!(user_id, revision, "Manual Pulsoid token saved");
+    publish_connection_change_hint(&state.nats, user_id, revision).await;
 
     Ok(Json(json!({"status": "syncing"})).into_response())
 }

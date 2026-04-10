@@ -30,7 +30,7 @@ pub async fn scan_and_refresh_once(
     // ~10 concurrent expirations per scan (30s worst-case HTTP × 10 =
     // 300s) before the last one misses the deadline.
     let candidates: Vec<(String, i32)> = match sqlx::query_as(
-        "SELECT user_id, config_version FROM pulsoid_connections
+        "SELECT user_id, revision FROM pulsoid_connections
          WHERE source = 'oauth'
            AND connection_state != 'error'
            AND token_expires_at IS NOT NULL
@@ -60,14 +60,14 @@ pub async fn scan_and_refresh_once(
     let mut skipped = 0u32;
     let mut failed = 0u32;
 
-    for (user_id, expected_config_version) in candidates {
+    for (user_id, expected_revision) in candidates {
         let outcome = refresh::refresh_if_expiring(
             db,
             nats,
             encryption,
             oauth,
             &user_id,
-            expected_config_version,
+            expected_revision,
         )
         .await;
 

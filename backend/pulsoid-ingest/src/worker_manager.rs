@@ -11,20 +11,20 @@ use crate::worker::run_worker;
 type ReconcileSnapshot = (HashMap<String, i32>, Vec<(String, JoinHandle<()>)>);
 
 /// Connections eligible for worker spawning.
-/// Error states are terminal — recovery requires a config_version bump
+/// Error states are terminal — recovery requires a revision bump
 /// (re-auth, new manual token, successful token refresh, etc.), which
 /// re-admits the row via the 'pending' path.
-const SPAWNABLE_CONNECTIONS_SQL: &str = "SELECT user_id, config_version FROM pulsoid_connections \
+const SPAWNABLE_CONNECTIONS_SQL: &str = "SELECT user_id, revision FROM pulsoid_connections \
      WHERE connection_state IN ('pending', 'connected')";
 
 /// Single-user variant of SPAWNABLE_CONNECTIONS_SQL used by reconcile_user.
-const SPAWNABLE_USER_SQL: &str = "SELECT config_version FROM pulsoid_connections \
+const SPAWNABLE_USER_SQL: &str = "SELECT revision FROM pulsoid_connections \
      WHERE user_id = $1 \
        AND connection_state IN ('pending', 'connected')";
 
 struct WorkerState {
     handle: JoinHandle<()>,
-    config_version: i32,
+    revision: i32,
 }
 
 pub struct WorkerManager {
@@ -65,8 +65,8 @@ impl WorkerManager {
 
         tracing::info!("Starting {} active workers", rows.len());
 
-        for (user_id, config_version) in rows {
-            self.replace_worker(&user_id, config_version, None).await;
+        for (user_id, revision) in rows {
+            self.replace_worker(&user_id, revision, None).await;
         }
     }
 
@@ -80,7 +80,7 @@ impl WorkerManager {
             .fetch_optional(&self.db)
             .await
         {
-            Ok(row) => row.map(|(cv,)| cv),
+            Ok(row) => row.map(|(rev,)| rev),
             Err(e) => {
                 tracing::warn!(user_id, "reconcile_user DB error: {e}");
                 return;
@@ -90,7 +90,7 @@ impl WorkerManager {
         // 2. Snapshot the in-memory worker version
         let active_version = {
             let state = self.state.lock().await;
-            state.get(user_id).map(|ws| ws.config_version)
+            state.get(user_id).map(|ws| ws.revision)
         };
 
         // 3. Delegate to the shared decision function
@@ -140,7 +140,7 @@ impl WorkerManager {
     }
 
     /// Reconcile active workers with DB state.
-    /// Detects new connections, removed connections, and config_version changes.
+    /// Detects new connections, removed connections, and revision changes.
     pub async fn reconcile(&self) {
         let db_rows: Vec<(String, i32)> = match sqlx::query_as(SPAWNABLE_CONNECTIONS_SQL)
             .fetch_all(&self.db)
@@ -175,7 +175,7 @@ impl WorkerManager {
 
             let snapshot = state
                 .iter()
-                .map(|(k, v)| (k.clone(), v.config_version))
+                .map(|(k, v)| (k.clone(), v.revision))
                 .collect();
 
             (snapshot, finished_workers)
@@ -227,7 +227,7 @@ impl WorkerManager {
     async fn replace_worker(
         &self,
         user_id: &str,
-        new_config_version: i32,
+        new_revision: i32,
         expected_current_version: Option<i32>,
     ) -> bool {
         // Phase 1: lock, check, remove handle if allowed
@@ -235,7 +235,7 @@ impl WorkerManager {
             let mut state = self.state.lock().await;
             match state.get(user_id) {
                 Some(current) => match expected_current_version {
-                    Some(expected) if current.config_version == expected => {
+                    Some(expected) if current.revision == expected => {
                         state.remove(user_id).map(|ws| ws.handle)
                     }
                     _ => return false,
@@ -268,18 +268,18 @@ impl WorkerManager {
             redis,
             encryption,
             uid,
-            new_config_version,
+            new_revision,
         ));
         state.insert(
             user_id.to_string(),
             WorkerState {
                 handle,
-                config_version: new_config_version,
+                revision: new_revision,
             },
         );
         tracing::info!(
             user_id,
-            new_config_version,
+            new_revision,
             ?expected_current_version,
             "Worker spawned"
         );
@@ -293,7 +293,7 @@ impl WorkerManager {
         let old_handle = {
             let mut state = self.state.lock().await;
             match state.get(user_id) {
-                Some(current) if current.config_version == expected_version => {
+                Some(current) if current.revision == expected_version => {
                     state.remove(user_id).map(|ws| ws.handle)
                 }
                 _ => return false,

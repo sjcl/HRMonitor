@@ -11,7 +11,7 @@ pub struct PulsoidConnectionRow {
     pub token_expires_at: Option<i64>,
     pub last_error: Option<String>,
     pub connection_state: String,
-    pub config_version: i32,
+    pub revision: i32,
 }
 
 #[derive(Debug, Deserialize)]

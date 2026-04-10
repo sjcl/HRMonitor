@@ -7,7 +7,7 @@
 //! != 'error')` guard so they can't resurrect a dead row.
 //!
 //! When a guarded UPDATE returns `rows_affected = 0` there are three distinct
-//! causes (row gone, stale `config_version`, sticky error refused). This module
+//! causes (row gone, stale `revision`, sticky error refused). This module
 //! provides the disambiguation SELECT so both binaries log the cases identically.
 
 /// Outcome of a guarded UPDATE against `pulsoid_connections`.
@@ -15,7 +15,7 @@
 pub enum WriteOutcome {
     /// The UPDATE affected a row — the write succeeded.
     Applied,
-    /// The row no longer exists or the caller's `config_version` no longer
+    /// The row no longer exists or the caller's `revision` no longer
     /// matches the DB. Caller should treat itself as superseded and exit.
     StaleOrMissing,
     /// The row is in `connection_state = 'error'` and the sticky guard refused
@@ -31,22 +31,22 @@ pub enum WriteOutcome {
 pub async fn classify_no_op<'e, E>(
     db: E,
     user_id: &str,
-    expected_config_version: i32,
+    expected_revision: i32,
 ) -> Result<WriteOutcome, sqlx::Error>
 where
     E: sqlx::PgExecutor<'e>,
 {
     let row: Option<(String, i32)> = sqlx::query_as(
-        "SELECT connection_state, config_version FROM pulsoid_connections WHERE user_id = $1",
+        "SELECT connection_state, revision FROM pulsoid_connections WHERE user_id = $1",
     )
     .bind(user_id)
     .fetch_optional(db)
     .await?;
     Ok(match row {
         None => WriteOutcome::StaleOrMissing,
-        Some((_, cv)) if cv != expected_config_version => WriteOutcome::StaleOrMissing,
+        Some((_, rev)) if rev != expected_revision => WriteOutcome::StaleOrMissing,
         Some((cs, _)) if cs == "error" => WriteOutcome::StickyError,
-        // Defensive fallback: the row exists, config_version matches, and it
+        // Defensive fallback: the row exists, revision matches, and it
         // is not in error — some concurrent recovery write must have landed
         // between our guarded UPDATE and this SELECT. Treat as stale so the
         // caller bails out; the recovery write will spawn a fresh worker.
