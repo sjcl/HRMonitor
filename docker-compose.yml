@@ -65,11 +65,14 @@ services:
       dockerfile: pulsoid-ingest/Dockerfile
     environment:
       - DATABASE_URL=postgres://hrmonitor:hrmonitor@timescaledb:5432/hrmonitor
+      - REDIS_URL=redis://redis:6379
       - NATS_URL=nats://nats:4222
       - RUST_LOG=pulsoid_ingest=info
       - TOKEN_ENCRYPTION_KEY=${TOKEN_ENCRYPTION_KEY}
     depends_on:
       timescaledb:
+        condition: service_started
+      redis:
         condition: service_started
       nats:
         condition: service_started
