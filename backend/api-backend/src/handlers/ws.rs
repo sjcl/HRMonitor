@@ -86,11 +86,15 @@ async fn handle_single_user_ws(
     let mut broadcast_rx = state.hr_broadcast.subscribe();
 
     // Send initial snapshot
-    let snapshot = read_snapshot(&state, std::slice::from_ref(&target_user_id)).await;
-    let mut last_sent: Option<HeartRateReceived> = snapshot
-        .get(&target_user_id)
-        .and_then(|slot| slot.clone());
-    let msg = WsServerMessage::Snapshot { data: snapshot };
+    let snap = read_snapshot(&state, std::slice::from_ref(&target_user_id)).await;
+    log_snapshot_errors("single_user initial", &snap);
+    let mut last_sent: Option<HeartRateReceived> = match snap.get(&target_user_id) {
+        Some(SnapshotEntry::Hit(hr)) => Some(hr.clone()),
+        _ => None,
+    };
+    let msg = WsServerMessage::Snapshot {
+        data: to_ws_snapshot(snap),
+    };
     if let Ok(json) = serde_json::to_string(&msg)
         && sender.send(Message::Text(json.into())).await.is_err()
     {
@@ -141,13 +145,16 @@ async fn handle_single_user_ws(
             }
             _ = self_heal_interval.tick() => {
                 // Reread Redis directly to recover from NATS publish loss or
-                // TTL expiry. On Some→Some where any field of the payload
-                // differs from what we last sent, send an Update. On Some→None
-                // (cache expired), send a Snapshot with null so the client
-                // drops the stale value.
+                // TTL expiry. On Hit where any field of the payload differs
+                // from what we last sent, send an Update. On Miss (cache
+                // expired / key deleted) send a Snapshot with null so the
+                // client drops the stale value. On Error (Redis read failure)
+                // keep last_sent as-is and send nothing — otherwise a
+                // transient outage would clear the client's display.
                 let snap = read_snapshot(&state, std::slice::from_ref(&target_user_id)).await;
+                log_snapshot_errors("single_user self_heal", &snap);
                 match snap.get(&target_user_id) {
-                    Some(Some(hr)) => {
+                    Some(SnapshotEntry::Hit(hr)) => {
                         if last_sent.as_ref() != Some(hr) {
                             last_sent = Some(hr.clone());
                             let msg = WsServerMessage::Update { data: hr.clone() };
@@ -158,7 +165,7 @@ async fn handle_single_user_ws(
                             }
                         }
                     }
-                    _ => {
+                    Some(SnapshotEntry::Miss) | None => {
                         if last_sent.is_some() {
                             last_sent = None;
                             let mut data: HashMap<String, Option<HeartRateReceived>> =
@@ -171,6 +178,9 @@ async fn handle_single_user_ws(
                                 break;
                             }
                         }
+                    }
+                    Some(SnapshotEntry::Error) => {
+                        // Preserve last_sent; log already emitted above.
                     }
                 }
             }
@@ -205,13 +215,16 @@ async fn handle_group_ws(
 
     // Send initial snapshot
     let user_ids: Vec<String> = members.iter().cloned().collect();
-    let snapshot = read_snapshot(&state, &user_ids).await;
-    for (uid, slot) in &snapshot {
-        if let Some(hr) = slot {
+    let snap = read_snapshot(&state, &user_ids).await;
+    log_snapshot_errors("group initial", &snap);
+    for (uid, entry) in &snap {
+        if let SnapshotEntry::Hit(hr) = entry {
             last_sent.insert(uid.clone(), hr.clone());
         }
     }
-    let msg = WsServerMessage::Snapshot { data: snapshot };
+    let msg = WsServerMessage::Snapshot {
+        data: to_ws_snapshot(snap),
+    };
     if let Ok(json) = serde_json::to_string(&msg)
         && sender.send(Message::Text(json.into())).await.is_err()
     {
@@ -285,13 +298,16 @@ async fn handle_group_ws(
                 // Detect added members → send snapshot with their data
                 let added: Vec<String> = new_members.difference(&members).cloned().collect();
                 if !added.is_empty() {
-                    let snapshot = read_snapshot(&state, &added).await;
-                    for (uid, slot) in &snapshot {
-                        if let Some(hr) = slot {
+                    let snap = read_snapshot(&state, &added).await;
+                    log_snapshot_errors("group added_members", &snap);
+                    for (uid, entry) in &snap {
+                        if let SnapshotEntry::Hit(hr) = entry {
                             last_sent.insert(uid.clone(), hr.clone());
                         }
                     }
-                    let msg = WsServerMessage::Snapshot { data: snapshot };
+                    let msg = WsServerMessage::Snapshot {
+                        data: to_ws_snapshot(snap),
+                    };
                     if let Ok(json) = serde_json::to_string(&msg)
                         && sender.send(Message::Text(json.into())).await.is_err()
                     {
@@ -304,23 +320,29 @@ async fn handle_group_ws(
             _ = self_heal_interval.tick() => {
                 // Reread Redis for all current members and emit a Snapshot
                 // with only the diffs: new values (any field of the payload
-                // differs from what we last sent) and Some→None transitions
-                // (TTL expiry).
+                // differs from what we last sent) and Hit→Miss transitions
+                // (TTL expiry). On Redis read Error, preserve last_sent for
+                // that user and skip it — otherwise a transient outage would
+                // clear every connected client's display.
                 let user_ids: Vec<String> = members.iter().cloned().collect();
                 let snap = read_snapshot(&state, &user_ids).await;
+                log_snapshot_errors("group self_heal", &snap);
                 let mut diffs: HashMap<String, Option<HeartRateReceived>> = HashMap::new();
-                for (uid, slot) in snap {
-                    match slot {
-                        Some(hr) => {
+                for (uid, entry) in snap {
+                    match entry {
+                        SnapshotEntry::Hit(hr) => {
                             if last_sent.get(&uid) != Some(&hr) {
                                 last_sent.insert(uid.clone(), hr.clone());
                                 diffs.insert(uid, Some(hr));
                             }
                         }
-                        None => {
+                        SnapshotEntry::Miss => {
                             if last_sent.remove(&uid).is_some() {
                                 diffs.insert(uid, None);
                             }
+                        }
+                        SnapshotEntry::Error => {
+                            // Preserve last_sent for this user; log above.
                         }
                     }
                 }
@@ -371,26 +393,94 @@ async fn fetch_sharing_members(
     Ok(set)
 }
 
+/// Per-user outcome of a Redis snapshot read.
+///
+/// `Miss` means the cache is authoritatively empty (key absent / TTL expired /
+/// payload corrupt): the client should stop showing a stale value. `Error`
+/// means we could not read Redis at all (connection reset, timeout, etc.) and
+/// the caller must preserve whatever it last sent — otherwise a transient
+/// Redis outage would briefly clear every client's display.
+enum SnapshotEntry {
+    Hit(HeartRateReceived),
+    Miss,
+    Error,
+}
+
 /// Read the latest heart rate for each user from Redis.
 ///
 /// Redis is the authoritative latest-state store (populated on boot via
 /// warm-up and on every heartbeat by pulsoid-ingest). There is deliberately
 /// no DB fallback: if a user's key is missing or expired, they are reported
-/// as `None` ("no recent data") rather than surfacing stale hypertable rows.
+/// as `Miss` ("no recent data") rather than surfacing stale hypertable rows.
+///
+/// This function does **not** log Redis connection errors on its own: the
+/// group self-heal path calls it every 10 s with N users, so logging per key
+/// would spam N × ticks lines during an outage. Callers should invoke
+/// [`log_snapshot_errors`] once per call to emit a single aggregated warn.
 async fn read_snapshot(
     state: &AppState,
     user_ids: &[String],
-) -> HashMap<String, Option<HeartRateReceived>> {
-    let mut results: HashMap<String, Option<HeartRateReceived>> =
-        HashMap::with_capacity(user_ids.len());
+) -> HashMap<String, SnapshotEntry> {
+    let mut results: HashMap<String, SnapshotEntry> = HashMap::with_capacity(user_ids.len());
 
     let mut redis = state.redis.clone();
     for user_id in user_ids {
         let key = latest_bpm_key(user_id);
-        let value: Option<String> = redis.get(&key).await.unwrap_or(None);
-        let parsed = value.and_then(|v| serde_json::from_str::<HeartRateReceived>(&v).ok());
-        results.insert(user_id.clone(), parsed);
+        let entry = match redis.get::<_, Option<String>>(&key).await {
+            Ok(Some(s)) => match serde_json::from_str::<HeartRateReceived>(&s) {
+                Ok(hr) => SnapshotEntry::Hit(hr),
+                Err(e) => {
+                    tracing::warn!(
+                        user_id = %user_id,
+                        error = %e,
+                        "failed to parse latest_bpm payload; treating as miss"
+                    );
+                    SnapshotEntry::Miss
+                }
+            },
+            Ok(None) => SnapshotEntry::Miss,
+            Err(_) => SnapshotEntry::Error,
+        };
+        results.insert(user_id.clone(), entry);
     }
 
     results
+}
+
+/// Emit at most one `warn` line per snapshot read if any users hit a Redis
+/// error. Aggregating here keeps group WS self-heal from spamming N lines
+/// every 10 seconds during an outage.
+fn log_snapshot_errors(context: &str, entries: &HashMap<String, SnapshotEntry>) {
+    let error_count = entries
+        .values()
+        .filter(|e| matches!(e, SnapshotEntry::Error))
+        .count();
+    if error_count > 0 {
+        tracing::warn!(
+            context,
+            error_count,
+            total = entries.len(),
+            "redis snapshot read had errors; preserving last sent values"
+        );
+    }
+}
+
+/// Convert a snapshot read result into the wire format the WS protocol uses.
+/// Both `Miss` and `Error` are reported to the client as `None` because the
+/// wire protocol has no third state — callers that need to distinguish them
+/// for self-heal bookkeeping must inspect [`SnapshotEntry`] directly before
+/// calling this.
+fn to_ws_snapshot(
+    entries: HashMap<String, SnapshotEntry>,
+) -> HashMap<String, Option<HeartRateReceived>> {
+    entries
+        .into_iter()
+        .map(|(k, v)| {
+            let slot = match v {
+                SnapshotEntry::Hit(hr) => Some(hr),
+                SnapshotEntry::Miss | SnapshotEntry::Error => None,
+            };
+            (k, slot)
+        })
+        .collect()
 }
