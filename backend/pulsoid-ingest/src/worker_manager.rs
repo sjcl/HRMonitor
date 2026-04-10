@@ -32,8 +32,11 @@ enum NotifyAction {
     Stale,
     /// DB state matches the running worker — nothing to do.
     NoChange,
-    /// Replace the current worker (stop old, start new if DB has a connection).
-    Replace,
+    /// Install `actual_config_version` as the new worker (or stop it when
+    /// `actual_config_version` is `None`), guarded against `current_version`:
+    /// the version the running worker must hold for the swap to apply, or
+    /// `None` when the slot is empty.
+    Replace { current_version: Option<i32> },
 }
 
 pub struct WorkerManager {
@@ -111,20 +114,32 @@ impl WorkerManager {
             let state = self.state.lock().await;
             let current_version = state.get(user_id).map(|c| c.config_version);
 
-            match current_version {
-                Some(cv) if cv != expected => NotifyAction::Stale,
-                Some(cv) if actual_config_version == Some(cv) => NotifyAction::NoChange,
-                Some(_) => NotifyAction::Replace,
-                None => {
-                    // No worker running. If DB moved past our version, stale.
-                    if actual_config_version.is_some()
-                        && actual_config_version != Some(expected)
-                    {
-                        NotifyAction::Stale
-                    } else {
-                        NotifyAction::Replace
-                    }
-                }
+            match (current_version, actual_config_version) {
+                // DB moved past this command — a newer publisher already
+                // wrote. (config_version is monotonic, so actual != expected
+                // here means actual > expected.)
+                (_, Some(actual)) if actual != expected => NotifyAction::Stale,
+
+                // DB at expected, worker already there — nothing to do.
+                (Some(cv), Some(actual)) if cv == actual => NotifyAction::NoChange,
+
+                // DB at expected, worker missing or at an older version — install.
+                (current_opt, Some(_)) => NotifyAction::Replace {
+                    current_version: current_opt,
+                },
+
+                // Delete command: DB row gone, no worker — no-op.
+                (None, None) => NotifyAction::NoChange,
+
+                // Delete command matching the running worker — stop it.
+                (Some(cv), None) if cv == expected => NotifyAction::Replace {
+                    current_version: Some(cv),
+                },
+
+                // Delete command, but the worker holds a version that
+                // doesn't match the deleted command's `expected` — a newer
+                // write/delete raced ahead of us.
+                (Some(_), None) => NotifyAction::Stale,
             }
         };
 
@@ -153,26 +168,35 @@ impl WorkerManager {
                     actual_config_version,
                 })
             }
-            NotifyAction::Replace => {
-                let applied = if let Some(config_version) = actual_config_version {
+            NotifyAction::Replace { current_version } => {
+                let applied = if let Some(new_version) = actual_config_version {
+                    // Install the new DB version. `current_version` is the
+                    // pre-swap worker version (or None when the slot is
+                    // empty), which is exactly what `replace_worker`'s guard
+                    // expects.
                     let ok = self
-                        .replace_worker(user_id, config_version, Some(expected))
+                        .replace_worker(user_id, new_version, current_version)
                         .await;
                     if !ok {
                         tracing::info!(
                             user_id,
-                            config_version,
+                            new_version,
+                            ?current_version,
                             "Replace skipped: worker already updated by another call"
                         );
                     }
                     ok
                 } else {
-                    // Connection deleted — stop with version guard
-                    let ok = self.guarded_stop(user_id, expected).await;
+                    // Connection deleted — stop with version guard. The
+                    // decision match guarantees `current_version` is
+                    // `Some(expected)` whenever we land here.
+                    let guard = current_version
+                        .expect("Replace with actual=None implies current_version is Some");
+                    let ok = self.guarded_stop(user_id, guard).await;
                     if !ok {
                         tracing::info!(
                             user_id,
-                            expected,
+                            guard,
                             "Stop skipped: worker already updated by another call"
                         );
                     }
