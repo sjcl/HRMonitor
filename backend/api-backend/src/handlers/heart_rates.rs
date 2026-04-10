@@ -18,15 +18,15 @@ fn parse_date(s: &str) -> Result<NaiveDate, AppError> {
         .map_err(|_| AppError::BadRequest(format!("Invalid date: {s}, expected YYYY-MM-DD")))
 }
 
-fn parse_period(s: &str) -> Result<(i64, i64), AppError> {
+fn parse_period(s: &str) -> Result<i64, AppError> {
     match s {
-        "10m" => Ok((600, 600)),
-        "30m" => Ok((1800, 1800)),
-        "1h" => Ok((3600, 3600)),
-        "3h" => Ok((10800, 10800)),
-        "6h" => Ok((21600, 21600)),
-        "12h" => Ok((43200, 43200)),
-        "24h" => Ok((86400, 86400)),
+        "10m" => Ok(600),
+        "30m" => Ok(1800),
+        "1h" => Ok(3600),
+        "3h" => Ok(10800),
+        "6h" => Ok(21600),
+        "12h" => Ok(43200),
+        "24h" => Ok(86400),
         _ => Err(AppError::BadRequest(format!(
             "Invalid period: {s}. Allowed: 10m, 30m, 1h, 3h, 6h, 12h, 24h"
         ))),
@@ -38,7 +38,7 @@ pub async fn list_heart_rates(
     ViewableUserId(user_id): ViewableUserId,
     Query(params): Query<HeartRateQuery>,
 ) -> Result<Json<Vec<HeartRateResponse>>, AppError> {
-    let (seconds, limit) = parse_period(&params.period)?;
+    let seconds = parse_period(&params.period)?;
     let now = chrono::Utc::now().timestamp();
     let from = now - seconds;
 
@@ -51,7 +51,7 @@ pub async fn list_heart_rates(
     )
     .bind(&user_id)
     .bind(from)
-    .bind(limit)
+    .bind(seconds)
     .fetch_all(&state.db)
     .await?;
 
@@ -117,7 +117,7 @@ pub async fn minute_stats(
     ViewableUserId(user_id): ViewableUserId,
     Query(params): Query<HeartRateQuery>,
 ) -> Result<Json<Vec<MinuteStatsResponse>>, AppError> {
-    let (seconds, _) = parse_period(&params.period)?;
+    let seconds = parse_period(&params.period)?;
     let now = chrono::Utc::now().timestamp();
     let from = now - seconds;
 
@@ -176,7 +176,7 @@ pub async fn group_heart_rates(
     Extension(auth_user): Extension<AuthenticatedUser>,
     Query(params): Query<HeartRateQuery>,
 ) -> Result<Json<Vec<GroupHeartRateResponse>>, AppError> {
-    let (seconds, _) = parse_period(&params.period)?;
+    let seconds = parse_period(&params.period)?;
     let now = chrono::Utc::now().timestamp();
     let from = now - seconds;
 
@@ -211,7 +211,7 @@ pub async fn group_minute_stats(
     Extension(auth_user): Extension<AuthenticatedUser>,
     Query(params): Query<HeartRateQuery>,
 ) -> Result<Json<Vec<GroupMinuteStatsResponse>>, AppError> {
-    let (seconds, _) = parse_period(&params.period)?;
+    let seconds = parse_period(&params.period)?;
     let now = chrono::Utc::now().timestamp();
     let from = now - seconds;
 
