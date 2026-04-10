@@ -11,18 +11,16 @@ use crate::worker::run_worker;
 type ReconcileSnapshot = (HashMap<String, i32>, Vec<(String, JoinHandle<()>)>);
 
 /// Connections eligible for worker spawning.
-/// Excludes refresh_blocked error connections (terminal OAuth failure — user must re-authorize).
+/// Error states are terminal — recovery requires a config_version bump
+/// (re-auth, new manual token, successful token refresh, etc.), which
+/// re-admits the row via the 'pending' path.
 const SPAWNABLE_CONNECTIONS_SQL: &str = "SELECT user_id, config_version FROM pulsoid_connections \
-     WHERE connection_state IN ('pending', 'connected') \
-       OR (connection_state = 'error' AND NOT refresh_blocked \
-           AND state_updated_at < now() - interval '5 minutes')";
+     WHERE connection_state IN ('pending', 'connected')";
 
 /// Single-user variant of SPAWNABLE_CONNECTIONS_SQL used by reconcile_user.
 const SPAWNABLE_USER_SQL: &str = "SELECT config_version FROM pulsoid_connections \
      WHERE user_id = $1 \
-       AND (connection_state IN ('pending', 'connected') \
-            OR (connection_state = 'error' AND NOT refresh_blocked \
-                AND state_updated_at < now() - interval '5 minutes'))";
+       AND connection_state IN ('pending', 'connected')";
 
 struct WorkerState {
     handle: JoinHandle<()>,
