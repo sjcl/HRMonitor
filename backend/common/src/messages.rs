@@ -6,7 +6,7 @@ pub mod subjects {
     pub const TOKEN_REFRESH_NEEDED: &str = "pulsoid.token.refresh_needed";
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HeartRateReceived {
     pub user_id: String,
     pub bpm: i32,

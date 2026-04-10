@@ -87,9 +87,9 @@ async fn handle_single_user_ws(
 
     // Send initial snapshot
     let snapshot = read_snapshot(&state, std::slice::from_ref(&target_user_id)).await;
-    let mut last_sent_recorded_at: Option<i64> = snapshot
+    let mut last_sent: Option<HeartRateReceived> = snapshot
         .get(&target_user_id)
-        .and_then(|slot| slot.as_ref().map(|hr| hr.recorded_at));
+        .and_then(|slot| slot.clone());
     let msg = WsServerMessage::Snapshot { data: snapshot };
     if let Ok(json) = serde_json::to_string(&msg)
         && sender.send(Message::Text(json.into())).await.is_err()
@@ -115,7 +115,7 @@ async fn handle_single_user_ws(
                 match result {
                     Ok(update) => {
                         if update.user_id == target_user_id {
-                            last_sent_recorded_at = Some(update.recorded_at);
+                            last_sent = Some(update.clone());
                             let msg = WsServerMessage::Update { data: update };
                             if let Ok(json) = serde_json::to_string(&msg)
                                 && sender.send(Message::Text(json.into())).await.is_err()
@@ -141,14 +141,15 @@ async fn handle_single_user_ws(
             }
             _ = self_heal_interval.tick() => {
                 // Reread Redis directly to recover from NATS publish loss or
-                // TTL expiry. On Some→Some with a new recorded_at, send an
-                // Update. On Some→None (cache expired), send a Snapshot with
-                // null so the client drops the stale value.
+                // TTL expiry. On Some→Some where any field of the payload
+                // differs from what we last sent, send an Update. On Some→None
+                // (cache expired), send a Snapshot with null so the client
+                // drops the stale value.
                 let snap = read_snapshot(&state, std::slice::from_ref(&target_user_id)).await;
                 match snap.get(&target_user_id) {
                     Some(Some(hr)) => {
-                        if last_sent_recorded_at != Some(hr.recorded_at) {
-                            last_sent_recorded_at = Some(hr.recorded_at);
+                        if last_sent.as_ref() != Some(hr) {
+                            last_sent = Some(hr.clone());
                             let msg = WsServerMessage::Update { data: hr.clone() };
                             if let Ok(json) = serde_json::to_string(&msg)
                                 && sender.send(Message::Text(json.into())).await.is_err()
@@ -158,8 +159,8 @@ async fn handle_single_user_ws(
                         }
                     }
                     _ => {
-                        if last_sent_recorded_at.is_some() {
-                            last_sent_recorded_at = None;
+                        if last_sent.is_some() {
+                            last_sent = None;
                             let mut data: HashMap<String, Option<HeartRateReceived>> =
                                 HashMap::with_capacity(1);
                             data.insert(target_user_id.clone(), None);
@@ -197,16 +198,17 @@ async fn handle_group_ws(
             Err(_) => return,
         };
 
-    // Track the recorded_at of the last value we sent per user so self-heal
-    // can detect both Some→Some updates and Some→None expiries.
-    let mut last_sent: HashMap<String, i64> = HashMap::new();
+    // Track the full last value we sent per user so self-heal can detect
+    // both Some→Some updates (including same-second bpm changes) and
+    // Some→None expiries.
+    let mut last_sent: HashMap<String, HeartRateReceived> = HashMap::new();
 
     // Send initial snapshot
     let user_ids: Vec<String> = members.iter().cloned().collect();
     let snapshot = read_snapshot(&state, &user_ids).await;
     for (uid, slot) in &snapshot {
         if let Some(hr) = slot {
-            last_sent.insert(uid.clone(), hr.recorded_at);
+            last_sent.insert(uid.clone(), hr.clone());
         }
     }
     let msg = WsServerMessage::Snapshot { data: snapshot };
@@ -234,7 +236,7 @@ async fn handle_group_ws(
                 match result {
                     Ok(update) => {
                         if members.contains(&update.user_id) {
-                            last_sent.insert(update.user_id.clone(), update.recorded_at);
+                            last_sent.insert(update.user_id.clone(), update.clone());
                             let msg = WsServerMessage::Update { data: update };
                             if let Ok(json) = serde_json::to_string(&msg)
                                 && sender.send(Message::Text(json.into())).await.is_err()
@@ -286,7 +288,7 @@ async fn handle_group_ws(
                     let snapshot = read_snapshot(&state, &added).await;
                     for (uid, slot) in &snapshot {
                         if let Some(hr) = slot {
-                            last_sent.insert(uid.clone(), hr.recorded_at);
+                            last_sent.insert(uid.clone(), hr.clone());
                         }
                     }
                     let msg = WsServerMessage::Snapshot { data: snapshot };
@@ -301,16 +303,17 @@ async fn handle_group_ws(
             }
             _ = self_heal_interval.tick() => {
                 // Reread Redis for all current members and emit a Snapshot
-                // with only the diffs: new values (different recorded_at)
-                // and Some→None transitions (TTL expiry).
+                // with only the diffs: new values (any field of the payload
+                // differs from what we last sent) and Some→None transitions
+                // (TTL expiry).
                 let user_ids: Vec<String> = members.iter().cloned().collect();
                 let snap = read_snapshot(&state, &user_ids).await;
                 let mut diffs: HashMap<String, Option<HeartRateReceived>> = HashMap::new();
                 for (uid, slot) in snap {
                     match slot {
                         Some(hr) => {
-                            if last_sent.get(&uid) != Some(&hr.recorded_at) {
-                                last_sent.insert(uid.clone(), hr.recorded_at);
+                            if last_sent.get(&uid) != Some(&hr) {
+                                last_sent.insert(uid.clone(), hr.clone());
                                 diffs.insert(uid, Some(hr));
                             }
                         }
