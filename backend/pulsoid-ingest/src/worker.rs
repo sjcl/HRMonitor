@@ -21,6 +21,24 @@ const REFRESH_SAFETY_MARGIN_SECS: i64 = 60;
 /// re-publish every 60s indefinitely on non-terminal refresh failures.
 const REFRESH_REQUEST_MIN_INTERVAL: Duration = Duration::from_secs(300);
 
+/// Aborts the wrapped `JoinHandle` when dropped. Used so that the per-worker
+/// NATS publish task (spawned at the top of `run_worker`) is cancelled on
+/// every `run_worker` exit path — normal `return`, decrypt failure, stale
+/// config_version, or external `WorkerManager::replace_worker` abort. Without
+/// this, a detached spawn could outlive its parent worker and emit delayed
+/// `hr.received` events after abort.
+///
+/// Cancellation is cooperative: `abort()` takes effect at the task's next
+/// `.await` point. In practice that's sub-second (async-nats yields regularly),
+/// but it is not a hard preemption guarantee.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 pub async fn run_worker(
     db: PgPool,
     nats: async_nats::Client,
@@ -29,6 +47,75 @@ pub async fn run_worker(
     user_id: String,
     config_version: i32,
 ) {
+    // Decouple NATS `hr.received` publishing from the Pulsoid WS read loop.
+    // Even without retries, `publish().await` can stall briefly while
+    // async-nats is reconnecting or its write buffer is saturated; running
+    // that inline inside `handle_message` would stop draining the WS socket
+    // long enough for tungstenite to lose pongs and tear down the upstream
+    // connection every time NATS hiccuped.
+    //
+    // `watch` gives us "capacity-1, newest-wins" semantics: if multiple
+    // frames arrive while the publish task is blocked on a slow publish,
+    // only the most recent is ever delivered. This matches `hr.received`'s
+    // latest-live-state contract (api-backend just rebroadcasts; Redis
+    // already has the value). A bounded `mpsc` would be wrong here —
+    // `try_send` rejects the *newest* sender on `Full`, which would drain
+    // stale frames FIFO on recovery.
+    let (publish_tx, mut publish_rx) =
+        tokio::sync::watch::channel::<Option<HeartRateReceived>>(None);
+    let _publish_guard = {
+        let nats = nats.clone();
+        let user_id = user_id.clone();
+        AbortOnDrop(tokio::spawn(async move {
+            // Do NOT call `borrow_and_update()` here to "mark initial None as
+            // seen": a fresh `watch::Receiver` already treats the initial value
+            // as seen, and priming would race with an early producer `send`
+            // and discard the first real frame.
+            loop {
+                if publish_rx.changed().await.is_err() {
+                    // All senders dropped — worker exiting.
+                    break;
+                }
+                // Clone out of the borrow immediately; holding it across
+                // `.await` would deadlock concurrent `send` calls.
+                let update = publish_rx.borrow_and_update().clone();
+                let Some(update) = update else { continue };
+
+                let payload = match serde_json::to_vec(&update) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        // `HeartRateReceived` can't actually fail to encode,
+                        // but panicking here would break the AbortOnDrop
+                        // invariant (the task would be gone before the
+                        // producer noticed), so warn and continue instead.
+                        tracing::warn!(
+                            user_id = %user_id,
+                            "Failed to serialize hr.received: {e}"
+                        );
+                        continue;
+                    }
+                };
+
+                // Best-effort publish. `hr.received` is a live-notification
+                // hint only: history is already in the DB and the latest value
+                // is already in Redis, so dropping a frame is fine — the next
+                // Pulsoid frame (1–2 s away) will re-deliver fresh state, and
+                // api-backend's Redis self-heal covers WS clients in the
+                // meantime. Retrying would only trade freshness for a stale
+                // rebroadcast, which is the wrong tradeoff for live push.
+                if let Err(e) = nats
+                    .publish(subjects::HR_RECEIVED, payload.into())
+                    .await
+                {
+                    tracing::warn!(
+                        user_id = %user_id,
+                        "Dropped hr.received publish (best-effort, next frame will refresh live state): {e}"
+                    );
+                }
+            }
+        }))
+    };
+
     let mut backoff = Duration::from_secs(1);
     let max_backoff = Duration::from_secs(60);
     // Cooldown state for `TOKEN_REFRESH_NEEDED` publishes. Monotonic clock so
@@ -307,7 +394,7 @@ pub async fn run_worker(
                     match msg {
                         Ok(tokio_tungstenite::tungstenite::Message::Text(text)) => {
                             if let Err(e) =
-                                handle_message(&db, &nats, &mut redis, &user_id, &text).await
+                                handle_message(&db, &publish_tx, &mut redis, &user_id, &text).await
                             {
                                 tracing::warn!(user_id = %user_id, "Failed to handle message: {e}");
                             }
@@ -388,7 +475,7 @@ async fn update_connection_state(
 
 async fn handle_message(
     db: &PgPool,
-    nats: &async_nats::Client,
+    publish_tx: &tokio::sync::watch::Sender<Option<HeartRateReceived>>,
     redis: &mut redis::aio::MultiplexedConnection,
     user_id: &str,
     text: &str,
@@ -444,30 +531,16 @@ async fn handle_message(
         return Err(format!("latest_bpm Redis write failed after DB insert: {e}"));
     }
 
-    // Publish to NATS for api-backend to broadcast via WebSocket (best-effort).
-    let payload = serde_json::to_vec(&update).unwrap();
-    let retries = [
-        None,
-        Some(Duration::from_millis(100)),
-        Some(Duration::from_millis(500)),
-    ];
-    let last = retries.len() - 1;
-    for (i, delay) in retries.into_iter().enumerate() {
-        if let Some(d) = delay {
-            tokio::time::sleep(d).await;
-        }
-        match nats
-            .publish(subjects::HR_RECEIVED, payload.clone().into())
-            .await
-        {
-            Ok(()) => break,
-            Err(e) if i == last => {
-                tracing::warn!(user_id = %user_id, "Failed to publish hr.received after {} attempts: {e}", last + 1);
-            }
-            Err(e) => {
-                tracing::debug!(user_id = %user_id, attempt = i + 1, "Retrying hr.received publish: {e}");
-            }
-        }
+    // Hand off to the per-worker publish task. This is non-blocking: `watch`
+    // overwrites any unread value, so intermediate frames collapse to the
+    // latest during a slow NATS period. NATS I/O happens off the WS read
+    // path so a stalled publish can never block tungstenite pongs. The only
+    // `Err` shape is "all receivers dropped", which in the happy path is
+    // unreachable — the receiver is owned by `run_worker`'s stack behind an
+    // AbortOnDrop guard. Logged defensively so an unexpected early exit of
+    // the publish task would not be silent.
+    if let Err(e) = publish_tx.send(Some(update)) {
+        tracing::warn!(user_id = %user_id, "hr.received publish task is gone: {e}");
     }
 
     Ok(())
