@@ -30,10 +30,9 @@ pub async fn run_worker(
     loop {
         // Fetch connection from DB
         let conn: Option<PulsoidConnectionRow> = match sqlx::query_as(
-            "SELECT id, user_id, source, access_token, refresh_token, key_version,
+            "SELECT source, access_token, key_version,
                     EXTRACT(EPOCH FROM token_expires_at)::BIGINT as token_expires_at,
-                    EXTRACT(EPOCH FROM last_connected_at)::BIGINT as last_connected_at,
-                    last_error, refresh_blocked, config_version, connection_state
+                    last_error, refresh_blocked, config_version
              FROM pulsoid_connections WHERE user_id = $1",
         )
         .bind(&user_id)
