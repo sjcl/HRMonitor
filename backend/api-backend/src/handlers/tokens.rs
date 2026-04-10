@@ -4,48 +4,35 @@ use axum::Extension;
 use axum::Json;
 use serde_json::json;
 use std::sync::Arc;
-use std::time::Duration;
 
-use common::messages::{subjects, ConnectionChangeAck, ConnectionChangeCommand};
+use common::messages::{subjects, ConnectionChangeCommand};
 
 use crate::auth::AuthenticatedUser;
 use crate::error::AppError;
-use crate::handlers::utils::connection_change_applied;
 use crate::models::{PulsoidTokenResponse, SetManualTokenRequest};
 use crate::AppState;
 
 type PulsoidConnectionRow = (String, String, i64, Option<i64>, Option<String>);
 
-const NATS_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
-
-async fn nats_request_status(
+/// Publish a connection change hint to pulsoid-ingest (fire-and-forget).
+///
+/// DB write is the primary success signal — if NATS publish fails, the
+/// 60-second periodic reconcile in pulsoid-ingest will catch up.
+async fn publish_connection_change_hint(
     nats: &async_nats::Client,
-    cmd: &ConnectionChangeCommand,
     user_id: &str,
-) -> &'static str {
-    let payload = serde_json::to_vec(cmd).unwrap().into();
-    match tokio::time::timeout(
-        NATS_REQUEST_TIMEOUT,
-        nats.request(subjects::CONNECTION_CHANGED, payload),
-    )
-    .await
-    {
-        Ok(Ok(reply)) => match serde_json::from_slice::<ConnectionChangeAck>(&reply.payload) {
-            Ok(ack) if connection_change_applied(&ack, user_id) => "applied",
-            Ok(_) => "pending",
-            Err(e) => {
-                tracing::warn!(user_id, "Failed to parse ack: {e}");
-                "pending"
-            }
-        },
-        Ok(Err(e)) => {
-            tracing::warn!(user_id, "NATS request failed: {e}");
-            "pending"
-        }
-        Err(_) => {
-            tracing::warn!(user_id, "NATS request timed out (ingest may be down)");
-            "pending"
-        }
+    config_version: i32,
+) {
+    let cmd = ConnectionChangeCommand {
+        user_id: user_id.to_string(),
+    };
+    let payload = serde_json::to_vec(&cmd).unwrap().into();
+    if let Err(e) = nats.publish(subjects::CONNECTION_CHANGED, payload).await {
+        tracing::warn!(
+            user_id,
+            config_version,
+            "Failed to publish connection change hint: {e}"
+        );
     }
 }
 
@@ -98,14 +85,10 @@ pub async fn delete_pulsoid_token(
         None => return Err(AppError::NotFound("Pulsoid token not configured".into())),
     };
 
-    // Notify pulsoid-ingest via NATS request/reply
-    let cmd = ConnectionChangeCommand {
-        user_id: user_id.to_string(),
-        config_version: Some(config_version),
-    };
-    let status = nats_request_status(&state.nats, &cmd, user_id).await;
+    tracing::info!(user_id, config_version, "Pulsoid connection deleted");
+    publish_connection_change_hint(&state.nats, user_id, config_version).await;
 
-    Ok(Json(json!({"status": status})).into_response())
+    Ok(Json(json!({"status": "syncing"})).into_response())
 }
 
 pub async fn set_manual_pulsoid_token(
@@ -145,12 +128,8 @@ pub async fn set_manual_pulsoid_token(
     .fetch_one(&state.db)
     .await?;
 
-    // Notify pulsoid-ingest via NATS request/reply
-    let cmd = ConnectionChangeCommand {
-        user_id: user_id.to_string(),
-        config_version: Some(config_version),
-    };
-    let status = nats_request_status(&state.nats, &cmd, user_id).await;
+    tracing::info!(user_id, config_version, "Manual Pulsoid token saved");
+    publish_connection_change_hint(&state.nats, user_id, config_version).await;
 
-    Ok(Json(json!({"status": status})).into_response())
+    Ok(Json(json!({"status": "syncing"})).into_response())
 }

@@ -17,26 +17,16 @@ const SPAWNABLE_CONNECTIONS_SQL: &str = "SELECT user_id, config_version FROM pul
        OR (connection_state = 'error' AND NOT refresh_blocked \
            AND state_updated_at < now() - interval '5 minutes')";
 
+/// Single-user variant of SPAWNABLE_CONNECTIONS_SQL used by reconcile_user.
+const SPAWNABLE_USER_SQL: &str = "SELECT config_version FROM pulsoid_connections \
+     WHERE user_id = $1 \
+       AND (connection_state IN ('pending', 'connected') \
+            OR (connection_state = 'error' AND NOT refresh_blocked \
+                AND state_updated_at < now() - interval '5 minutes'))";
+
 struct WorkerState {
     handle: JoinHandle<()>,
     config_version: i32,
-}
-
-pub struct NotifyOutcome {
-    pub stale: bool,
-    pub actual_config_version: Option<i32>,
-}
-
-enum NotifyAction {
-    /// Command is stale — a newer worker is already running or DB moved past expected.
-    Stale,
-    /// DB state matches the running worker — nothing to do.
-    NoChange,
-    /// Install `actual_config_version` as the new worker (or stop it when
-    /// `actual_config_version` is `None`), guarded against `current_version`:
-    /// the version the running worker must hold for the swap to apply, or
-    /// `None` when the slot is empty.
-    Replace { current_version: Option<i32> },
 }
 
 pub struct WorkerManager {
@@ -79,137 +69,72 @@ impl WorkerManager {
         }
     }
 
-    /// Notify that a user's pulsoid connection changed (created, updated, or deleted).
-    /// All mutations are version-guarded to prevent stale commands from rolling back
-    /// a newer worker. Queries the DB first so a transient DB failure leaves the
-    /// existing worker running.
-    pub async fn notify_connection_changed(
+    /// Reconcile the in-memory worker slot for a single user with DB state.
+    /// Called by the NATS connection-change subscriber as a fire-and-forget
+    /// hint. A DB error leaves the existing worker running and logs a warning.
+    pub async fn reconcile_user(&self, user_id: &str) {
+        // 1. Query DB (SPAWNABLE filter — same as periodic reconcile)
+        let db_version: Option<i32> = match sqlx::query_as::<_, (i32,)>(SPAWNABLE_USER_SQL)
+            .bind(user_id)
+            .fetch_optional(&self.db)
+            .await
+        {
+            Ok(row) => row.map(|(cv,)| cv),
+            Err(e) => {
+                tracing::warn!(user_id, "reconcile_user DB error: {e}");
+                return;
+            }
+        };
+
+        // 2. Snapshot the in-memory worker version
+        let active_version = {
+            let state = self.state.lock().await;
+            state.get(user_id).map(|ws| ws.config_version)
+        };
+
+        // 3. Delegate to the shared decision function
+        self.apply_db_state_for_user(user_id, db_version, active_version)
+            .await;
+    }
+
+    /// Apply DB state to the in-memory worker slot for one user.
+    /// Both versions are snapshotted by the caller (under lock or via atomic query).
+    /// Logs the branch taken at debug level only — info-level "state actually
+    /// changed" logs live in `replace_worker` / `guarded_stop` so that skipped
+    /// and no-op invocations do not get double-logged.
+    async fn apply_db_state_for_user(
         &self,
         user_id: &str,
-        expected_config_version: Option<i32>,
-    ) -> Result<NotifyOutcome, String> {
-        let Some(expected) = expected_config_version else {
-            // All NATS commands should include config_version after the DELETE
-            // handler fix. If we receive None, treat as error so the ack maps
-            // to applied: false.
-            tracing::warn!(
-                user_id,
-                "Received connection change without config_version, rejecting"
-            );
-            return Err("missing config_version in connection change command".to_string());
-        };
-
-        // Step 1: Query DB FIRST — if this fails, old worker keeps running
-        let conn: Option<(i32,)> =
-            sqlx::query_as("SELECT config_version FROM pulsoid_connections WHERE user_id = $1")
-                .bind(user_id)
-                .fetch_optional(&self.db)
-                .await
-                .map_err(|e| format!("DB error: {e}"))?;
-
-        let actual_config_version = conn.map(|(cv,)| cv);
-
-        // Step 2: Decide action under lock (read-only — no mutations)
-        let action = {
-            let state = self.state.lock().await;
-            let current_version = state.get(user_id).map(|c| c.config_version);
-
-            match (current_version, actual_config_version) {
-                // DB moved past this command — a newer publisher already
-                // wrote. (config_version is monotonic, so actual != expected
-                // here means actual > expected.)
-                (_, Some(actual)) if actual != expected => NotifyAction::Stale,
-
-                // DB at expected, worker already there — nothing to do.
-                (Some(cv), Some(actual)) if cv == actual => NotifyAction::NoChange,
-
-                // DB at expected, worker missing or at an older version — install.
-                (current_opt, Some(_)) => NotifyAction::Replace {
-                    current_version: current_opt,
-                },
-
-                // Delete command: DB row gone, no worker — no-op.
-                (None, None) => NotifyAction::NoChange,
-
-                // Delete command matching the running worker — stop it.
-                (Some(cv), None) if cv == expected => NotifyAction::Replace {
-                    current_version: Some(cv),
-                },
-
-                // Delete command, but the worker holds a version that
-                // doesn't match the deleted command's `expected` — a newer
-                // write/delete raced ahead of us.
-                (Some(_), None) => NotifyAction::Stale,
+        db_version: Option<i32>,
+        active_version: Option<i32>,
+    ) {
+        match (db_version, active_version) {
+            // DB has row, no worker → spawn
+            (Some(db_ver), None) => {
+                tracing::debug!(user_id, db_ver, "apply: spawn branch");
+                self.replace_worker(user_id, db_ver, None).await;
             }
-        };
-
-        // Step 3: Execute
-        match action {
-            NotifyAction::Stale => {
-                tracing::info!(
-                    user_id,
-                    expected,
-                    actual = ?actual_config_version,
-                    "Stale connection change command"
-                );
-                Ok(NotifyOutcome {
-                    stale: true,
-                    actual_config_version,
-                })
+            // DB has row, worker at same version → no-op
+            (Some(db_ver), Some(active_ver)) if db_ver == active_ver => {
+                tracing::debug!(user_id, db_ver, "apply: in-sync, no-op");
             }
-            NotifyAction::NoChange => {
+            // DB has row, worker at different version → guarded replace
+            (Some(db_ver), Some(active_ver)) => {
                 tracing::debug!(
                     user_id,
-                    version = ?actual_config_version,
-                    "Connection change is a no-op, worker already at correct version"
+                    old_version = active_ver,
+                    new_version = db_ver,
+                    "apply: replace branch"
                 );
-                Ok(NotifyOutcome {
-                    stale: false,
-                    actual_config_version,
-                })
+                self.replace_worker(user_id, db_ver, Some(active_ver)).await;
             }
-            NotifyAction::Replace { current_version } => {
-                let applied = if let Some(new_version) = actual_config_version {
-                    // Install the new DB version. `current_version` is the
-                    // pre-swap worker version (or None when the slot is
-                    // empty), which is exactly what `replace_worker`'s guard
-                    // expects.
-                    let ok = self
-                        .replace_worker(user_id, new_version, current_version)
-                        .await;
-                    if !ok {
-                        tracing::info!(
-                            user_id,
-                            new_version,
-                            ?current_version,
-                            "Replace skipped: worker already updated by another call"
-                        );
-                    }
-                    ok
-                } else {
-                    // Connection deleted — stop with version guard. The
-                    // decision match guarantees `current_version` is
-                    // `Some(expected)` whenever we land here.
-                    let guard = current_version
-                        .expect("Replace with actual=None implies current_version is Some");
-                    let ok = self.guarded_stop(user_id, guard).await;
-                    if !ok {
-                        tracing::info!(
-                            user_id,
-                            guard,
-                            "Stop skipped: worker already updated by another call"
-                        );
-                    }
-                    ok
-                };
-
-                // If the guarded operation did not apply, another call raced
-                // ahead of us — treat as stale.
-                Ok(NotifyOutcome {
-                    stale: !applied,
-                    actual_config_version,
-                })
+            // DB has no spawnable row, worker exists → guarded stop
+            (None, Some(active_ver)) => {
+                tracing::debug!(user_id, active_ver, "apply: stop branch");
+                self.guarded_stop(user_id, active_ver).await;
             }
+            // Neither → no-op
+            (None, None) => {}
         }
     }
 
@@ -269,55 +194,19 @@ impl WorkerManager {
             }
         }
 
-        let db_user_ids: HashSet<String> = db_connections.keys().cloned().collect();
-        let active_user_ids: HashSet<String> = snapshot.keys().cloned().collect();
+        // Union of DB user_ids and active worker user_ids.
+        // Runs once per 60s — cloned() to avoid borrow-lifetime gymnastics.
+        let all_ids: HashSet<String> = db_connections
+            .keys()
+            .chain(snapshot.keys())
+            .cloned()
+            .collect();
 
-        // DB にあって active にない → spawn
-        for user_id in db_user_ids.difference(&active_user_ids) {
-            tracing::info!(user_id = %user_id, "Reconcile: spawning missing worker");
-            if !self
-                .replace_worker(user_id, *db_connections.get(user_id).unwrap(), None)
-                .await
-            {
-                tracing::debug!(
-                    user_id = %user_id,
-                    "Reconcile: spawn skipped, slot no longer vacant"
-                );
-            }
-        }
-
-        // active にあって DB にない → stop
-        for user_id in active_user_ids.difference(&db_user_ids) {
-            tracing::info!(user_id = %user_id, "Reconcile: stopping orphaned worker");
-            if let Some(&active_ver) = snapshot.get(user_id)
-                && !self.guarded_stop(user_id, active_ver).await
-            {
-                tracing::debug!(
-                    user_id = %user_id,
-                    "Reconcile: orphan stop skipped, worker already updated"
-                );
-            }
-        }
-
-        // 両方にあるが config_version が変わった → 再起動
-        for user_id in db_user_ids.intersection(&active_user_ids) {
-            if let (Some(&active_ver), Some(&db_ver)) =
-                (snapshot.get(user_id), db_connections.get(user_id))
-                && db_ver != active_ver
-            {
-                tracing::info!(
-                    user_id = %user_id,
-                    old_version = active_ver,
-                    new_version = db_ver,
-                    "Reconcile: config_version changed, restarting worker"
-                );
-                if !self.replace_worker(user_id, db_ver, Some(active_ver)).await {
-                    tracing::debug!(
-                        user_id = %user_id,
-                        "Reconcile: version-change restart skipped, worker already updated"
-                    );
-                }
-            }
+        for user_id in &all_ids {
+            let db_ver = db_connections.get(user_id).copied();
+            let active_ver = snapshot.get(user_id).copied();
+            self.apply_db_state_for_user(user_id, db_ver, active_ver)
+                .await;
         }
     }
 
@@ -378,6 +267,12 @@ impl WorkerManager {
                 handle,
                 config_version: new_config_version,
             },
+        );
+        tracing::info!(
+            user_id,
+            new_config_version,
+            ?expected_current_version,
+            "Worker spawned"
         );
         true
     }

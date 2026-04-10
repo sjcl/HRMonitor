@@ -638,41 +638,23 @@ async fn handle_token_refresh(state: &AppState, user_id: &str, request_config_ve
         }
     };
 
-    tracing::info!(user_id, "Token refreshed successfully");
+    tracing::info!(user_id, config_version, "Token refreshed successfully");
 
-    // Notify pulsoid-ingest to reconnect with new token via request/reply
+    // Publish connection change hint (fire-and-forget).
+    // DB write is the primary success signal; 60s reconcile is the fallback.
     let cmd = common::messages::ConnectionChangeCommand {
         user_id: user_id.to_string(),
-        config_version: Some(config_version),
     };
     let payload = serde_json::to_vec(&cmd).unwrap().into();
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(3),
-        state.nats.request(subjects::CONNECTION_CHANGED, payload),
-    )
-    .await
+    if let Err(e) = state
+        .nats
+        .publish(subjects::CONNECTION_CHANGED, payload)
+        .await
     {
-        Ok(Ok(reply)) => {
-            match serde_json::from_slice::<common::messages::ConnectionChangeAck>(&reply.payload) {
-                Ok(ack) if ack.applied => {
-                    tracing::info!(user_id, "Ingest acknowledged reconnection after refresh");
-                }
-                Ok(ack) => {
-                    tracing::warn!(user_id, error = ?ack.error, "Ingest did not apply after refresh");
-                }
-                Err(e) => {
-                    tracing::warn!(user_id, "Failed to parse ack after refresh: {e}");
-                }
-            }
-        }
-        Ok(Err(e)) => {
-            tracing::warn!(user_id, "NATS request failed after refresh: {e}");
-        }
-        Err(_) => {
-            tracing::warn!(
-                user_id,
-                "NATS request timed out after refresh (reconcile will catch up)"
-            );
-        }
+        tracing::warn!(
+            user_id,
+            config_version,
+            "Failed to publish connection change hint after refresh: {e}"
+        );
     }
 }

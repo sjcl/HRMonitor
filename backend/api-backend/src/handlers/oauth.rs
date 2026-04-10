@@ -9,7 +9,6 @@ use std::sync::Arc;
 use crate::AppState;
 use crate::auth::AuthenticatedUser;
 use crate::error::AppError;
-use crate::handlers::utils::connection_change_applied;
 
 // --- ReturnTo enum (open redirect prevention) ---
 
@@ -238,32 +237,24 @@ pub async fn callback(
         }
     };
 
-    // 9. Notify pulsoid-ingest via NATS request/reply
+    // 9. Publish connection change hint (fire-and-forget).
+    //    DB write is the primary success signal; 60s reconcile is the fallback.
     let cmd = common::messages::ConnectionChangeCommand {
         user_id: user_id.to_string(),
-        config_version: Some(config_version),
     };
     let payload = serde_json::to_vec(&cmd).unwrap().into();
-    let pulsoid_status = match tokio::time::timeout(
-        std::time::Duration::from_secs(3),
-        state
-            .nats
-            .request(common::messages::subjects::CONNECTION_CHANGED, payload),
-    )
-    .await
+    if let Err(e) = state
+        .nats
+        .publish(common::messages::subjects::CONNECTION_CHANGED, payload)
+        .await
     {
-        Ok(Ok(reply)) => {
-            match serde_json::from_slice::<common::messages::ConnectionChangeAck>(&reply.payload) {
-                Ok(ack) if connection_change_applied(&ack, user_id) => "authorized",
-                _ => "authorized_pending",
-            }
-        }
-        _ => {
-            tracing::warn!(user_id = %user_id, "NATS request failed or timed out");
-            "authorized_pending"
-        }
-    };
+        tracing::warn!(
+            user_id = %user_id,
+            config_version,
+            "Failed to publish connection change hint: {e}"
+        );
+    }
 
-    tracing::info!(user_id = %user_id, "Pulsoid authorized successfully");
-    Redirect::to(&format!("{return_to}?pulsoid={pulsoid_status}")).into_response()
+    tracing::info!(user_id = %user_id, config_version, "Pulsoid authorized successfully");
+    Redirect::to(&format!("{return_to}?pulsoid=authorized")).into_response()
 }

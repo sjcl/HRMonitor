@@ -5,8 +5,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { getPulsoidToken, createPulsoidConnect, setManualPulsoidToken, deletePulsoidToken } from "@/lib/api";
 
 const RESULT_MESSAGES: Record<string, { text: string; color: string }> = {
-  authorized: { text: "Pulsoid authorized. Connecting...", color: "text-blue-400" },
-  authorized_pending: { text: "Pulsoid authorized. Connection may take up to a minute.", color: "text-yellow-400" },
+  authorized: { text: "Pulsoid authorized. Usually connects within a few seconds; may take up to a minute.", color: "text-blue-400" },
   denied: { text: "Pulsoid authorization was denied.", color: "text-yellow-400" },
   exchange_failed: { text: "Connection failed. Please try again.", color: "text-red-400" },
   invalid_state: { text: "Security verification failed. Please try again.", color: "text-red-400" },
@@ -65,12 +64,9 @@ export function PulsoidToken({
 
   const manualMutation = useMutation({
     mutationFn: (accessToken: string) => setManualPulsoidToken(accessToken),
-    onSuccess: (data) => {
-      setPendingWarning(null);
+    onSuccess: () => {
+      setPendingWarning("Saved. Usually connects within a few seconds; may take up to a minute.");
       if (warningTimerRef.current) clearTimeout(warningTimerRef.current);
-      if (data.status === "pending") {
-        setPendingWarning("Saved. Connection may take up to a minute.");
-      }
       setManualToken("");
       queryClient.invalidateQueries({ queryKey: ["pulsoid-token"] });
       queryClient.invalidateQueries({ queryKey: ["users"] });
@@ -79,13 +75,10 @@ export function PulsoidToken({
 
   const disconnectMutation = useMutation({
     mutationFn: () => deletePulsoidToken(),
-    onSuccess: (data) => {
-      setPendingWarning(null);
+    onSuccess: () => {
+      setPendingWarning("Disconnected. Worker usually stops within a few seconds; may take up to a minute.");
       if (warningTimerRef.current) clearTimeout(warningTimerRef.current);
-      if (data.status === "pending") {
-        setPendingWarning("Disconnected. Worker may take up to a minute to stop.");
-        warningTimerRef.current = setTimeout(() => setPendingWarning(null), 90_000);
-      }
+      warningTimerRef.current = setTimeout(() => setPendingWarning(null), 90_000);
       queryClient.invalidateQueries({ queryKey: ["pulsoid-token"] });
       queryClient.invalidateQueries({ queryKey: ["users"] });
     },

@@ -26,7 +26,7 @@ export interface PulsoidTokenStatus {
 }
 
 export interface TokenMutationResult {
-  status: "applied" | "pending";
+  status: "syncing";
 }
 
 export interface HeartRateRecord {

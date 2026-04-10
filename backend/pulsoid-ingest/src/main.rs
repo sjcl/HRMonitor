@@ -6,7 +6,7 @@ use futures_util::StreamExt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::messages::{ConnectionChangeAck, ConnectionChangeCommand, subjects};
+use common::messages::{ConnectionChangeCommand, subjects};
 use common::token_encryption::TokenEncryption;
 use worker_manager::WorkerManager;
 
@@ -56,45 +56,17 @@ async fn main() {
 
     let wm_events = worker_manager.clone();
     let wm_reconcile = worker_manager.clone();
-    let nats_for_reply = nats.clone();
 
-    // Spawn connection.changed subscriber (request/reply handler)
+    // Spawn connection.changed subscriber (fire-and-forget hint → reconcile_user)
     let events_task = tokio::spawn(async move {
         while let Some(msg) = connection_sub.next().await {
             match serde_json::from_slice::<ConnectionChangeCommand>(&msg.payload) {
                 Ok(cmd) => {
                     tracing::info!(
                         user_id = %cmd.user_id,
-                        config_version = ?cmd.config_version,
-                        "Received connection change command"
+                        "Received connection change hint"
                     );
-                    let result = wm_events
-                        .notify_connection_changed(&cmd.user_id, cmd.config_version)
-                        .await;
-
-                    if let Some(reply) = msg.reply {
-                        let ack = match result {
-                            Ok(outcome) => ConnectionChangeAck {
-                                applied: true,
-                                stale: outcome.stale,
-                                config_version: outcome.actual_config_version,
-                                error: None,
-                            },
-                            Err(e) => ConnectionChangeAck {
-                                applied: false,
-                                stale: false,
-                                config_version: None,
-                                error: Some(e),
-                            },
-                        };
-                        let payload = serde_json::to_vec(&ack).unwrap().into();
-                        if let Err(e) = nats_for_reply.publish(reply, payload).await {
-                            tracing::warn!(
-                                user_id = %cmd.user_id,
-                                "Failed to send ack: {e}"
-                            );
-                        }
-                    }
+                    wm_events.reconcile_user(&cmd.user_id).await;
                 }
                 Err(e) => {
                     tracing::warn!("Failed to parse connection change command: {e}");
