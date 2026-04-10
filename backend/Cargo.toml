@@ -3,6 +3,7 @@ members = [
     "api-backend",
     "common",
     "migration",
-    "pulsoid-ingest"
+    "pulsoid-ingest",
+    "pulsoid-refresher"
 ]
 resolver = "3"

@@ -87,6 +87,30 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  # Proactive Pulsoid OAuth token refresher. Run as a single instance;
+  # cross-process safety is guaranteed by a Postgres advisory lock inside
+  # the service (see backend/pulsoid-refresher/src/refresh.rs) so a brief
+  # double-start during redeploys is safe.
+  pulsoid-refresher:
+    build:
+      context: ./backend
+      dockerfile: pulsoid-refresher/Dockerfile
+    environment:
+      - DATABASE_URL=postgres://hrmonitor:hrmonitor@timescaledb:5432/hrmonitor
+      - NATS_URL=nats://nats:4222
+      - RUST_LOG=pulsoid_refresher=info
+      - TOKEN_ENCRYPTION_KEY=${TOKEN_ENCRYPTION_KEY}
+      - PULSOID_CLIENT_ID=${PULSOID_CLIENT_ID}
+      - PULSOID_CLIENT_SECRET=${PULSOID_CLIENT_SECRET}
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      nats:
+        condition: service_started
+      migration:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
   frontend:
     build:
       context: ./frontend

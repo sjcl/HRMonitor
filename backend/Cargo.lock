@@ -399,9 +399,11 @@ dependencies = [
  "aes-gcm",
  "base64",
  "rand 0.10.0",
+ "reqwest",
  "serde",
  "serde_json",
  "sqlx",
+ "urlencoding",
 ]
 
 [[package]]
@@ -1856,6 +1858,20 @@ dependencies = [
  "sqlx",
  "tokio",
  "tokio-tungstenite 0.29.0",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "pulsoid-refresher"
+version = "0.1.0"
+dependencies = [
+ "async-nats",
+ "common",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
  "tracing",
  "tracing-subscriber",
 ]
