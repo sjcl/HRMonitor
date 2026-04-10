@@ -1,5 +1,6 @@
 use futures_util::StreamExt;
 use sqlx::PgPool;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -16,6 +17,7 @@ const REFRESH_SAFETY_MARGIN_SECS: i64 = 60;
 pub async fn run_worker(
     db: PgPool,
     nats: async_nats::Client,
+    encryption: Arc<TokenEncryption>,
     user_id: String,
     config_version: i32,
 ) {
@@ -62,8 +64,6 @@ pub async fn run_worker(
             );
             return;
         }
-
-        let encryption = TokenEncryption::from_env();
 
         // Decrypt access token
         let access_token = match encryption.decrypt(&conn.access_token, conn.key_version as u32) {

@@ -4,6 +4,8 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
+use common::token_encryption::TokenEncryption;
+
 use crate::worker::run_worker;
 
 type ReconcileSnapshot = (HashMap<String, i32>, Vec<(String, JoinHandle<()>)>);
@@ -37,14 +39,20 @@ enum NotifyAction {
 pub struct WorkerManager {
     db: PgPool,
     nats: async_nats::Client,
+    encryption: Arc<TokenEncryption>,
     state: Mutex<HashMap<String, WorkerState>>,
 }
 
 impl WorkerManager {
-    pub fn new(db: PgPool, nats: async_nats::Client) -> Arc<Self> {
+    pub fn new(
+        db: PgPool,
+        nats: async_nats::Client,
+        encryption: Arc<TokenEncryption>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             db,
             nats,
+            encryption,
             state: Mutex::new(HashMap::new()),
         })
     }
@@ -337,8 +345,9 @@ impl WorkerManager {
 
         let db = self.db.clone();
         let nats = self.nats.clone();
+        let encryption = self.encryption.clone();
         let uid = user_id.to_string();
-        let handle = tokio::spawn(run_worker(db, nats, uid, new_config_version));
+        let handle = tokio::spawn(run_worker(db, nats, encryption, uid, new_config_version));
         state.insert(
             user_id.to_string(),
             WorkerState {

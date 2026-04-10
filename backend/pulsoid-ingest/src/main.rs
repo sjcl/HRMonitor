@@ -3,9 +3,11 @@ mod worker;
 mod worker_manager;
 
 use futures_util::StreamExt;
+use std::sync::Arc;
 use std::time::Duration;
 
 use common::messages::{ConnectionChangeAck, ConnectionChangeCommand, subjects};
+use common::token_encryption::TokenEncryption;
 use worker_manager::WorkerManager;
 
 #[tokio::main]
@@ -21,6 +23,10 @@ async fn main() {
         .unwrap_or_else(|_| "postgres://hrmonitor:hrmonitor@localhost:5432/hrmonitor".into());
 
     let nats_url = std::env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".into());
+
+    // Load encryption key BEFORE opening external connections so a missing
+    // or invalid key fails fast without touching the DB or NATS server.
+    let encryption = Arc::new(TokenEncryption::from_env());
 
     // Connect to database
     let pool = sqlx::postgres::PgPoolOptions::new()
@@ -39,7 +45,7 @@ async fn main() {
     tracing::info!("Connected to NATS at {nats_url}");
 
     // Create worker manager and start all active workers
-    let worker_manager = WorkerManager::new(pool, nats.clone());
+    let worker_manager = WorkerManager::new(pool, nats.clone(), encryption);
     worker_manager.start_all_active().await;
 
     // Subscribe to connection.changed events
