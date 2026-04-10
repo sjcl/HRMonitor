@@ -32,7 +32,7 @@ type TokenRefreshRow = (
 
 pub struct AppState {
     pub db: sqlx::PgPool,
-    pub redis: tokio::sync::Mutex<redis::aio::MultiplexedConnection>,
+    pub redis: redis::aio::MultiplexedConnection,
     pub nats: async_nats::Client,
     pub hr_broadcast: tokio_broadcast::Sender<HeartRateReceived>,
     pub auth_config: AuthConfig,
@@ -122,7 +122,7 @@ async fn main() {
 
     let state = Arc::new(AppState {
         db: pool.clone(),
-        redis: tokio::sync::Mutex::new(redis_conn.clone()),
+        redis: redis_conn.clone(),
         nats: nats.clone(),
         hr_broadcast: hr_tx.clone(),
         auth_config,

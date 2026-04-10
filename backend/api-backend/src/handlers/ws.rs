@@ -284,21 +284,19 @@ async fn read_snapshot(
         HashMap::with_capacity(user_ids.len());
     let mut missing_keys = HashMap::new();
 
-    {
-        let mut redis = state.redis.lock().await;
-        for user_id in user_ids {
-            let key = format!("latest_bpm:{user_id}");
-            let value: Option<String> = redis.get(&key).await.unwrap_or(None);
-            let parsed = value.and_then(|v| serde_json::from_str::<HeartRateReceived>(&v).ok());
+    let mut redis = state.redis.clone();
+    for user_id in user_ids {
+        let key = format!("latest_bpm:{user_id}");
+        let value: Option<String> = redis.get(&key).await.unwrap_or(None);
+        let parsed = value.and_then(|v| serde_json::from_str::<HeartRateReceived>(&v).ok());
 
-            match parsed {
-                Some(value) => {
-                    results.insert(user_id.clone(), Some(value));
-                }
-                None => {
-                    missing_keys.insert(user_id.clone(), key);
-                    results.insert(user_id.clone(), None);
-                }
+        match parsed {
+            Some(value) => {
+                results.insert(user_id.clone(), Some(value));
+            }
+            None => {
+                missing_keys.insert(user_id.clone(), key);
+                results.insert(user_id.clone(), None);
             }
         }
     }
