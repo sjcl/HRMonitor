@@ -30,6 +30,7 @@ struct WorkerState {
 pub struct WorkerManager {
     db: PgPool,
     nats: async_nats::Client,
+    redis: redis::aio::MultiplexedConnection,
     encryption: Arc<TokenEncryption>,
     state: Mutex<HashMap<String, WorkerState>>,
 }
@@ -38,11 +39,13 @@ impl WorkerManager {
     pub fn new(
         db: PgPool,
         nats: async_nats::Client,
+        redis: redis::aio::MultiplexedConnection,
         encryption: Arc<TokenEncryption>,
     ) -> Arc<Self> {
         Arc::new(Self {
             db,
             nats,
+            redis,
             encryption,
             state: Mutex::new(HashMap::new()),
         })
@@ -256,9 +259,17 @@ impl WorkerManager {
 
         let db = self.db.clone();
         let nats = self.nats.clone();
+        let redis = self.redis.clone();
         let encryption = self.encryption.clone();
         let uid = user_id.to_string();
-        let handle = tokio::spawn(run_worker(db, nats, encryption, uid, new_config_version));
+        let handle = tokio::spawn(run_worker(
+            db,
+            nats,
+            redis,
+            encryption,
+            uid,
+            new_config_version,
+        ));
         state.insert(
             user_id.to_string(),
             WorkerState {

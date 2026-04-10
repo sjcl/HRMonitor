@@ -7,7 +7,9 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 
 use common::messages::{HeartRateReceived, TokenRefreshRequest, subjects};
+use common::redis_keys::{LATEST_BPM_TTL_SECS, latest_bpm_key, serialize_latest_bpm};
 use common::token_encryption::TokenEncryption;
+use redis::AsyncCommands;
 
 use crate::models::{PulsoidConnectionRow, PulsoidMessage, SOURCE_OAUTH};
 
@@ -17,6 +19,7 @@ const REFRESH_SAFETY_MARGIN_SECS: i64 = 60;
 pub async fn run_worker(
     db: PgPool,
     nats: async_nats::Client,
+    mut redis: redis::aio::MultiplexedConnection,
     encryption: Arc<TokenEncryption>,
     user_id: String,
     config_version: i32,
@@ -244,7 +247,9 @@ pub async fn run_worker(
                 while let Some(msg) = read.next().await {
                     match msg {
                         Ok(tokio_tungstenite::tungstenite::Message::Text(text)) => {
-                            if let Err(e) = handle_message(&db, &nats, &user_id, &text).await {
+                            if let Err(e) =
+                                handle_message(&db, &nats, &mut redis, &user_id, &text).await
+                            {
                                 tracing::warn!(user_id = %user_id, "Failed to handle message: {e}");
                             }
                         }
@@ -325,6 +330,7 @@ async fn update_connection_state(
 async fn handle_message(
     db: &PgPool,
     nats: &async_nats::Client,
+    redis: &mut redis::aio::MultiplexedConnection,
     user_id: &str,
     text: &str,
 ) -> Result<(), String> {
@@ -361,7 +367,19 @@ async fn handle_message(
         received_at: now,
     };
 
-    // Publish to NATS for api-backend to update Redis cache + WS broadcast
+    // Write to Redis latest_bpm cache with TTL. This is the authoritative
+    // write — api-backend reads from here. Failures are logged but not
+    // fatal: the next heartbeat (or a restart warm-up) recovers the state.
+    let key = latest_bpm_key(user_id);
+    let value = serialize_latest_bpm(&update);
+    if let Err(e) = redis
+        .set_ex::<_, _, ()>(&key, &value, LATEST_BPM_TTL_SECS)
+        .await
+    {
+        tracing::warn!(user_id = %user_id, "Failed to write latest_bpm to Redis: {e}");
+    }
+
+    // Publish to NATS for api-backend to broadcast via WebSocket (best-effort).
     let payload = serde_json::to_vec(&update).unwrap();
     let retries = [
         None,

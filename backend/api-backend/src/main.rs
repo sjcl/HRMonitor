@@ -17,6 +17,7 @@ use tower_http::cors::CorsLayer;
 
 use auth::AuthConfig;
 use common::messages::{subjects, HeartRateReceived, TokenRefreshRequest};
+use common::redis_keys::{latest_bpm_key, serialize_latest_bpm, LATEST_BPM_TTL_SECS};
 use common::token_encryption::TokenEncryption;
 use pulsoid_oauth::{OAuthError, PulsoidOAuthConfig};
 
@@ -68,38 +69,46 @@ async fn main() {
 
     tracing::info!("Connected to Redis");
 
-    // Invalidate stale BPM cache from previous run
+    // Warm latest_bpm cache from DB: each user's latest record within 6h.
+    // Redis is now the authoritative latest-state store (no DB fallback on WS
+    // read), so on boot we rehydrate from the hypertable once. Individual TTLs
+    // are set to the record's remaining freshness so older warmed values decay
+    // out naturally, preserving the "≤ 6h old" invariant.
     {
-        let mut cursor: u64 = 0;
-        let mut deleted = 0u64;
-        loop {
-            let (next_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
-                .arg(cursor)
-                .arg("MATCH")
-                .arg("latest_bpm:*")
-                .arg("COUNT")
-                .arg(100)
-                .query_async(&mut redis_conn)
-                .await
-                .expect("Failed to scan Redis keys");
+        let rows: Vec<(String, i32, i64, i64)> = sqlx::query_as(
+            "SELECT DISTINCT ON (user_id) user_id, bpm, \
+             EXTRACT(EPOCH FROM recorded_at)::BIGINT AS recorded_at, \
+             EXTRACT(EPOCH FROM received_at)::BIGINT AS received_at \
+             FROM heart_rate_records \
+             WHERE recorded_at >= NOW() - INTERVAL '6 hours' \
+             ORDER BY user_id, recorded_at DESC, received_at DESC, id DESC",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("Failed to warm latest_bpm cache from DB");
 
-            if !keys.is_empty() {
-                let mut cmd = redis::cmd("DEL");
-                for key in &keys {
-                    cmd.arg(key);
-                }
-                let count: u64 = cmd.query_async(&mut redis_conn).await.unwrap_or(0);
-                deleted += count;
-            }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
 
-            cursor = next_cursor;
-            if cursor == 0 {
-                break;
+        let mut warmed = 0u64;
+        for (user_id, bpm, recorded_at, received_at) in rows {
+            let update = HeartRateReceived {
+                user_id: user_id.clone(),
+                bpm,
+                recorded_at,
+                received_at,
+            };
+            let value = serialize_latest_bpm(&update);
+            let key = latest_bpm_key(&user_id);
+            let age = (now - recorded_at).max(0) as u64;
+            let ttl = LATEST_BPM_TTL_SECS.saturating_sub(age).max(60);
+            if redis_conn.set_ex::<_, _, ()>(&key, &value, ttl).await.is_ok() {
+                warmed += 1;
             }
         }
-        if deleted > 0 {
-            tracing::info!(count = deleted, "Invalidated stale BPM cache entries");
-        }
+        tracing::info!(count = warmed, "Warmed latest_bpm cache from DB");
     }
 
     let nats = async_nats::connect(&nats_url)
@@ -130,9 +139,11 @@ async fn main() {
         token_encryption,
     });
 
-    // Spawn hr.received NATS subscriber
+    // Spawn hr.received NATS subscriber.
+    // pulsoid-ingest writes Redis directly, so api-backend only broadcasts
+    // the event to connected WebSocket clients. NATS delivery is best-effort
+    // — WS self-heal (every 10s) backfills any missed updates from Redis.
     {
-        let mut redis_conn = redis_conn.clone();
         let hr_tx = hr_tx.clone();
         let mut hr_sub = nats
             .subscribe(subjects::HR_RECEIVED)
@@ -143,16 +154,6 @@ async fn main() {
             while let Some(msg) = hr_sub.next().await {
                 match serde_json::from_slice::<HeartRateReceived>(&msg.payload) {
                     Ok(update) => {
-                        // Write to Redis cache
-                        let redis_value = serde_json::to_string(&update).unwrap();
-                        let key = format!("latest_bpm:{}", update.user_id);
-                        if let Err(e) = redis_conn.set::<_, _, ()>(&key, &redis_value).await {
-                            tracing::warn!(
-                                user_id = %update.user_id,
-                                "Failed to write to Redis: {e}"
-                            );
-                        }
-                        // Broadcast to WebSocket subscribers
                         let _ = hr_tx.send(update);
                     }
                     Err(e) => {

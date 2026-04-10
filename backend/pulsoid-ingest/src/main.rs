@@ -24,6 +24,9 @@ async fn main() {
 
     let nats_url = std::env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".into());
 
+    let redis_url =
+        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".into());
+
     // Load encryption key BEFORE opening external connections so a missing
     // or invalid key fails fast without touching the DB or NATS server.
     let encryption = Arc::new(TokenEncryption::from_env());
@@ -44,8 +47,17 @@ async fn main() {
 
     tracing::info!("Connected to NATS at {nats_url}");
 
+    // Connect to Redis for latest_bpm cache writes
+    let redis_client = redis::Client::open(redis_url.clone()).expect("Invalid REDIS_URL");
+    let redis_conn = redis_client
+        .get_multiplexed_async_connection()
+        .await
+        .expect("Failed to connect to Redis");
+
+    tracing::info!("Connected to Redis at {redis_url}");
+
     // Create worker manager and start all active workers
-    let worker_manager = WorkerManager::new(pool, nats.clone(), encryption);
+    let worker_manager = WorkerManager::new(pool, nats.clone(), redis_conn, encryption);
     worker_manager.start_all_active().await;
 
     // Subscribe to connection.changed events

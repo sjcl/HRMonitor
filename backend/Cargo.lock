@@ -1849,6 +1849,7 @@ dependencies = [
  "async-nats",
  "common",
  "futures-util",
+ "redis",
  "serde",
  "serde_json",
  "sqlx",

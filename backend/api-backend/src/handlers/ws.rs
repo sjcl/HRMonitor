@@ -14,6 +14,7 @@ use crate::auth::{AuthenticatedUser, ViewableUserId, ensure_can_view_user};
 use crate::error::AppError;
 use crate::handlers::groups::ensure_active_member;
 use common::messages::HeartRateReceived;
+use common::redis_keys::latest_bpm_key;
 
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -86,6 +87,9 @@ async fn handle_single_user_ws(
 
     // Send initial snapshot
     let snapshot = read_snapshot(&state, std::slice::from_ref(&target_user_id)).await;
+    let mut last_sent_recorded_at: Option<i64> = snapshot
+        .get(&target_user_id)
+        .and_then(|slot| slot.as_ref().map(|hr| hr.recorded_at));
     let msg = WsServerMessage::Snapshot { data: snapshot };
     if let Ok(json) = serde_json::to_string(&msg)
         && sender.send(Message::Text(json.into())).await.is_err()
@@ -95,6 +99,9 @@ async fn handle_single_user_ws(
 
     let mut reauth_interval = interval(Duration::from_secs(30));
     reauth_interval.tick().await; // consume the immediate first tick
+
+    let mut self_heal_interval = interval(Duration::from_secs(10));
+    self_heal_interval.tick().await; // consume the immediate first tick
 
     loop {
         tokio::select! {
@@ -108,6 +115,7 @@ async fn handle_single_user_ws(
                 match result {
                     Ok(update) => {
                         if update.user_id == target_user_id {
+                            last_sent_recorded_at = Some(update.recorded_at);
                             let msg = WsServerMessage::Update { data: update };
                             if let Ok(json) = serde_json::to_string(&msg)
                                 && sender.send(Message::Text(json.into())).await.is_err()
@@ -129,6 +137,40 @@ async fn handle_single_user_ws(
                         .is_err()
                 {
                     break; // permission revoked
+                }
+            }
+            _ = self_heal_interval.tick() => {
+                // Reread Redis directly to recover from NATS publish loss or
+                // TTL expiry. On Some→Some with a new recorded_at, send an
+                // Update. On Some→None (cache expired), send a Snapshot with
+                // null so the client drops the stale value.
+                let snap = read_snapshot(&state, std::slice::from_ref(&target_user_id)).await;
+                match snap.get(&target_user_id) {
+                    Some(Some(hr)) => {
+                        if last_sent_recorded_at != Some(hr.recorded_at) {
+                            last_sent_recorded_at = Some(hr.recorded_at);
+                            let msg = WsServerMessage::Update { data: hr.clone() };
+                            if let Ok(json) = serde_json::to_string(&msg)
+                                && sender.send(Message::Text(json.into())).await.is_err()
+                            {
+                                break;
+                            }
+                        }
+                    }
+                    _ => {
+                        if last_sent_recorded_at.is_some() {
+                            last_sent_recorded_at = None;
+                            let mut data: HashMap<String, Option<HeartRateReceived>> =
+                                HashMap::with_capacity(1);
+                            data.insert(target_user_id.clone(), None);
+                            let msg = WsServerMessage::Snapshot { data };
+                            if let Ok(json) = serde_json::to_string(&msg)
+                                && sender.send(Message::Text(json.into())).await.is_err()
+                            {
+                                break;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -155,9 +197,18 @@ async fn handle_group_ws(
             Err(_) => return,
         };
 
+    // Track the recorded_at of the last value we sent per user so self-heal
+    // can detect both Some→Some updates and Some→None expiries.
+    let mut last_sent: HashMap<String, i64> = HashMap::new();
+
     // Send initial snapshot
     let user_ids: Vec<String> = members.iter().cloned().collect();
     let snapshot = read_snapshot(&state, &user_ids).await;
+    for (uid, slot) in &snapshot {
+        if let Some(hr) = slot {
+            last_sent.insert(uid.clone(), hr.recorded_at);
+        }
+    }
     let msg = WsServerMessage::Snapshot { data: snapshot };
     if let Ok(json) = serde_json::to_string(&msg)
         && sender.send(Message::Text(json.into())).await.is_err()
@@ -167,6 +218,9 @@ async fn handle_group_ws(
 
     let mut reauth_interval = interval(Duration::from_secs(30));
     reauth_interval.tick().await; // consume the immediate first tick
+
+    let mut self_heal_interval = interval(Duration::from_secs(10));
+    self_heal_interval.tick().await; // consume the immediate first tick
 
     loop {
         tokio::select! {
@@ -180,6 +234,7 @@ async fn handle_group_ws(
                 match result {
                     Ok(update) => {
                         if members.contains(&update.user_id) {
+                            last_sent.insert(update.user_id.clone(), update.recorded_at);
                             let msg = WsServerMessage::Update { data: update };
                             if let Ok(json) = serde_json::to_string(&msg)
                                 && sender.send(Message::Text(json.into())).await.is_err()
@@ -214,6 +269,7 @@ async fn handle_group_ws(
                     let mut removal_data: HashMap<String, Option<HeartRateReceived>> =
                         HashMap::with_capacity(removed.len());
                     for uid in &removed {
+                        last_sent.remove(uid);
                         removal_data.insert(uid.clone(), None::<HeartRateReceived>);
                     }
                     let msg = WsServerMessage::Snapshot { data: removal_data };
@@ -228,6 +284,11 @@ async fn handle_group_ws(
                 let added: Vec<String> = new_members.difference(&members).cloned().collect();
                 if !added.is_empty() {
                     let snapshot = read_snapshot(&state, &added).await;
+                    for (uid, slot) in &snapshot {
+                        if let Some(hr) = slot {
+                            last_sent.insert(uid.clone(), hr.recorded_at);
+                        }
+                    }
                     let msg = WsServerMessage::Snapshot { data: snapshot };
                     if let Ok(json) = serde_json::to_string(&msg)
                         && sender.send(Message::Text(json.into())).await.is_err()
@@ -237,6 +298,37 @@ async fn handle_group_ws(
                 }
 
                 members = new_members;
+            }
+            _ = self_heal_interval.tick() => {
+                // Reread Redis for all current members and emit a Snapshot
+                // with only the diffs: new values (different recorded_at)
+                // and Some→None transitions (TTL expiry).
+                let user_ids: Vec<String> = members.iter().cloned().collect();
+                let snap = read_snapshot(&state, &user_ids).await;
+                let mut diffs: HashMap<String, Option<HeartRateReceived>> = HashMap::new();
+                for (uid, slot) in snap {
+                    match slot {
+                        Some(hr) => {
+                            if last_sent.get(&uid) != Some(&hr.recorded_at) {
+                                last_sent.insert(uid.clone(), hr.recorded_at);
+                                diffs.insert(uid, Some(hr));
+                            }
+                        }
+                        None => {
+                            if last_sent.remove(&uid).is_some() {
+                                diffs.insert(uid, None);
+                            }
+                        }
+                    }
+                }
+                if !diffs.is_empty() {
+                    let msg = WsServerMessage::Snapshot { data: diffs };
+                    if let Ok(json) = serde_json::to_string(&msg)
+                        && sender.send(Message::Text(json.into())).await.is_err()
+                    {
+                        break;
+                    }
+                }
             }
         }
     }
@@ -276,56 +368,25 @@ async fn fetch_sharing_members(
     Ok(set)
 }
 
+/// Read the latest heart rate for each user from Redis.
+///
+/// Redis is the authoritative latest-state store (populated on boot via
+/// warm-up and on every heartbeat by pulsoid-ingest). There is deliberately
+/// no DB fallback: if a user's key is missing or expired, they are reported
+/// as `None` ("no recent data") rather than surfacing stale hypertable rows.
 async fn read_snapshot(
     state: &AppState,
     user_ids: &[String],
 ) -> HashMap<String, Option<HeartRateReceived>> {
     let mut results: HashMap<String, Option<HeartRateReceived>> =
         HashMap::with_capacity(user_ids.len());
-    let mut missing_keys = HashMap::new();
 
     let mut redis = state.redis.clone();
     for user_id in user_ids {
-        let key = format!("latest_bpm:{user_id}");
+        let key = latest_bpm_key(user_id);
         let value: Option<String> = redis.get(&key).await.unwrap_or(None);
         let parsed = value.and_then(|v| serde_json::from_str::<HeartRateReceived>(&v).ok());
-
-        match parsed {
-            Some(value) => {
-                results.insert(user_id.clone(), Some(value));
-            }
-            None => {
-                missing_keys.insert(user_id.clone(), key);
-                results.insert(user_id.clone(), None);
-            }
-        }
-    }
-
-    if !missing_keys.is_empty() {
-        let rows = sqlx::query_as::<_, (String, i32, i64)>(
-            "SELECT DISTINCT ON (user_id) user_id, bpm, \
-             EXTRACT(EPOCH FROM recorded_at)::BIGINT AS recorded_at \
-             FROM heart_rate_records \
-             WHERE user_id = ANY($1) \
-             ORDER BY user_id, recorded_at DESC",
-        )
-        .bind(missing_keys.keys().cloned().collect::<Vec<_>>())
-        .fetch_all(&state.db)
-        .await
-        .inspect_err(|e| tracing::warn!("batch latest HR query failed: {e}"))
-        .unwrap_or_default();
-
-        for (user_id, bpm, recorded_at) in rows {
-            if missing_keys.remove(&user_id).is_some() {
-                let update = HeartRateReceived {
-                    user_id: user_id.clone(),
-                    bpm,
-                    recorded_at,
-                    received_at: recorded_at,
-                };
-                results.insert(user_id, Some(update.clone()));
-            }
-        }
+        results.insert(user_id.clone(), parsed);
     }
 
     results
