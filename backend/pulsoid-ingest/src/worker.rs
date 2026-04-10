@@ -2,6 +2,8 @@ use futures_util::StreamExt;
 use sqlx::PgPool;
 use std::time::Duration;
 use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 
 use common::messages::{HeartRateReceived, TokenRefreshRequest, subjects};
 use common::token_encryption::TokenEncryption;
@@ -181,10 +183,29 @@ pub async fn run_worker(
             }
         }
 
-        let url = format!("{PULSOID_WS_URL}?access_token={access_token}");
         tracing::info!(user_id = %user_id, "Connecting to Pulsoid WebSocket");
 
-        match connect_async(&url).await {
+        // Build WS request with Authorization: Bearer header so the token is
+        // NEVER embedded in the URL (tungstenite errors may include the URL).
+        let request_result = PULSOID_WS_URL
+            .into_client_request()
+            .map_err(|e| sanitize_error(&format!("Invalid WS request: {e}")))
+            .and_then(|mut req| {
+                let value = format!("Bearer {access_token}")
+                    .parse()
+                    .map_err(|e| sanitize_error(&format!("Invalid Authorization header: {e}")))?;
+                req.headers_mut().insert(AUTHORIZATION, value);
+                Ok(req)
+            });
+
+        let connect_result = match request_result {
+            Ok(req) => connect_async(req)
+                .await
+                .map_err(|e| sanitize_error(&format!("{e}"))),
+            Err(msg) => Err(msg),
+        };
+
+        match connect_result {
             Ok((ws_stream, _)) => {
                 backoff = Duration::from_secs(1);
 
@@ -232,7 +253,8 @@ pub async fn run_worker(
                             break;
                         }
                         Err(e) => {
-                            tracing::warn!(user_id = %user_id, "WebSocket error: {e}");
+                            let error_msg = sanitize_error(&format!("{e}"));
+                            tracing::warn!(user_id = %user_id, "WebSocket error: {error_msg}");
                             break;
                         }
                         _ => {}
@@ -266,34 +288,10 @@ pub async fn run_worker(
                     }
                 }
             }
-            Err(e) => {
-                let error_msg = format!("{e}");
+            Err(error_msg) => {
                 tracing::warn!(user_id = %user_id, "Failed to connect: {error_msg}");
-                match update_connection_state(
-                    &db,
-                    &user_id,
-                    config_version,
-                    "pending",
-                    Some(&error_msg),
-                )
-                .await
-                {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        tracing::info!(
-                            user_id = %user_id,
-                            config_version,
-                            "Stale worker detected (config_version mismatch), exiting"
-                        );
-                        return;
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            user_id = %user_id,
-                            config_version,
-                            "Failed to set pending state after connection error: {e}"
-                        );
-                    }
+                if persist_pending_or_stale(&db, &user_id, config_version, &error_msg).await {
+                    return;
                 }
             }
         }
@@ -397,4 +395,131 @@ fn system_now() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64
+}
+
+/// Update the connection to `pending` with a pre-sanitized error message.
+/// Returns `true` if the worker should exit (stale config_version), `false`
+/// otherwise. DB errors are logged and treated as "continue" to match the
+/// existing behavior. Callers remain responsible for sleeping/backing off
+/// — this helper intentionally does not touch backoff.
+async fn persist_pending_or_stale(
+    db: &PgPool,
+    user_id: &str,
+    config_version: i32,
+    error_msg: &str,
+) -> bool {
+    match update_connection_state(db, user_id, config_version, "pending", Some(error_msg)).await {
+        Ok(true) => false,
+        Ok(false) => {
+            tracing::info!(
+                user_id = %user_id,
+                config_version,
+                "Stale worker detected (config_version mismatch), exiting"
+            );
+            true
+        }
+        Err(e) => {
+            tracing::warn!(
+                user_id = %user_id,
+                config_version,
+                "Failed to set pending state after connection error: {e}"
+            );
+            false
+        }
+    }
+}
+
+/// Redact any Pulsoid access tokens that may have leaked into an error
+/// string before it is logged or persisted to `last_error`. Defense in depth:
+/// the primary protection is that we no longer embed the token in the URL.
+fn sanitize_error(error: &str) -> String {
+    let mut s = error.to_string();
+    redact_all(&mut s, "access_token=");
+    redact_all(&mut s, "Bearer ");
+    s
+}
+
+fn redact_all(s: &mut String, prefix: &str) {
+    const PLACEHOLDER: &str = "[REDACTED]";
+    let mut search_from = 0;
+    while let Some(rel) = s[search_from..].find(prefix) {
+        let value_start = search_from + rel + prefix.len();
+        let value_end = s[value_start..]
+            .find(|c: char| matches!(c, '&' | '"' | '\'' | ']' | ')') || c.is_whitespace())
+            .map(|i| value_start + i)
+            .unwrap_or(s.len());
+        if value_end == value_start {
+            // No value to redact; advance past the prefix to avoid looping.
+            search_from = value_start;
+            continue;
+        }
+        s.replace_range(value_start..value_end, PLACEHOLDER);
+        search_from = value_start + PLACEHOLDER.len();
+        if search_from >= s.len() {
+            break;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_error;
+
+    #[test]
+    fn redacts_access_token_query_param() {
+        let input =
+            "WS error: wss://dev.pulsoid.net/api/v1/data/real_time?access_token=abc123&other=1";
+        let out = sanitize_error(input);
+        assert!(!out.contains("abc123"), "token leaked: {out}");
+        assert!(out.contains("access_token=[REDACTED]"));
+        assert!(out.contains("&other=1"));
+    }
+
+    #[test]
+    fn redacts_bearer_token_at_end_of_string() {
+        let input = "Invalid Authorization header: Bearer abc123";
+        let out = sanitize_error(input);
+        assert_eq!(out, "Invalid Authorization header: Bearer [REDACTED]");
+    }
+
+    #[test]
+    fn redacts_multiple_access_token_occurrences() {
+        let input = "access_token=aaa something access_token=bbb end";
+        let out = sanitize_error(input);
+        assert!(!out.contains("aaa"));
+        assert!(!out.contains("bbb"));
+        assert_eq!(
+            out,
+            "access_token=[REDACTED] something access_token=[REDACTED] end"
+        );
+    }
+
+    #[test]
+    fn redacts_mixed_bearer_and_query_string() {
+        let input = "url=wss://x?access_token=aaa. Bearer bbb";
+        let out = sanitize_error(input);
+        assert!(!out.contains("aaa"));
+        assert!(!out.contains("bbb"));
+        assert!(out.contains("access_token=[REDACTED]"));
+        assert!(out.contains("Bearer [REDACTED]"));
+    }
+
+    #[test]
+    fn no_match_returns_unchanged() {
+        let input = "generic IO error: connection refused";
+        assert_eq!(sanitize_error(input), input);
+    }
+
+    #[test]
+    fn empty_string_is_unchanged() {
+        assert_eq!(sanitize_error(""), "");
+    }
+
+    #[test]
+    fn handles_prefix_with_no_value() {
+        // "Bearer " followed immediately by a delimiter / end — nothing to redact
+        let input = "Bearer ";
+        let out = sanitize_error(input);
+        assert_eq!(out, "Bearer ");
+    }
 }
