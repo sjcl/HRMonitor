@@ -9,7 +9,7 @@ use axum::middleware;
 use axum::routing::get;
 use axum::Router;
 use futures_util::StreamExt;
-use redis::AsyncCommands;
+use redis::{AsyncCommands, ExistenceCheck, SetExpiry, SetOptions};
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::broadcast as tokio_broadcast;
@@ -74,6 +74,14 @@ async fn main() {
     // read), so on boot we rehydrate from the hypertable once. Individual TTLs
     // are set to the record's remaining freshness so older warmed values decay
     // out naturally, preserving the "≤ 6h old" invariant.
+    //
+    // The write is `SET NX EX`: pulsoid-ingest keeps running while api-backend
+    // restarts, and its Redis value is strictly fresher than anything we can
+    // read back from the hypertable (pulsoid-ingest commits to DB first, then
+    // to Redis, and may publish more frames before this warm-up even runs).
+    // An unconditional SET would clobber that live value with a stale DB row,
+    // so we only populate keys that are missing (true cold start, or keys
+    // whose TTL lapsed while api-backend was down).
     {
         let rows: Vec<(String, i32, i64, i64)> = sqlx::query_as(
             "SELECT DISTINCT ON (user_id) user_id, bpm, \
@@ -93,6 +101,7 @@ async fn main() {
             .as_secs() as i64;
 
         let mut warmed = 0u64;
+        let mut skipped = 0u64;
         for (user_id, bpm, recorded_at, received_at) in rows {
             let update = HeartRateReceived {
                 user_id: user_id.clone(),
@@ -104,11 +113,31 @@ async fn main() {
             let key = latest_bpm_key(&user_id);
             let age = (now - recorded_at).max(0) as u64;
             let ttl = LATEST_BPM_TTL_SECS.saturating_sub(age).max(60);
-            if redis_conn.set_ex::<_, _, ()>(&key, &value, ttl).await.is_ok() {
-                warmed += 1;
+            let opts = SetOptions::default()
+                .conditional_set(ExistenceCheck::NX)
+                .with_expiration(SetExpiry::EX(ttl));
+            match redis_conn
+                .set_options::<_, _, Option<String>>(&key, &value, opts)
+                .await
+            {
+                Ok(None) => {
+                    // Key already existed — pulsoid-ingest has a fresher
+                    // value, leave it alone.
+                    skipped += 1;
+                }
+                Ok(Some(_)) => {
+                    warmed += 1;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        user_id = %user_id,
+                        error = %e,
+                        "warm-up SET NX failed"
+                    );
+                }
             }
         }
-        tracing::info!(count = warmed, "Warmed latest_bpm cache from DB");
+        tracing::info!(warmed, skipped, "Warmed latest_bpm cache from DB");
     }
 
     let nats = async_nats::connect(&nats_url)
