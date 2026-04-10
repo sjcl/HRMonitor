@@ -31,6 +31,15 @@ type TokenRefreshRow = (
     i32,
 );
 
+// NATS subscriber auto-resubscribe backoff.
+const INITIAL_BACKOFF: std::time::Duration = std::time::Duration::from_millis(500);
+const MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(30);
+const STABILITY_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(60);
+
+fn advance_backoff(backoff: std::time::Duration) -> std::time::Duration {
+    (backoff * 2).min(MAX_BACKOFF)
+}
+
 pub struct AppState {
     pub db: sqlx::PgPool,
     pub redis: redis::aio::MultiplexedConnection,
@@ -172,70 +181,133 @@ async fn main() {
     // pulsoid-ingest writes Redis directly, so api-backend only broadcasts
     // the event to connected WebSocket clients. NATS delivery is best-effort
     // — WS self-heal (every 10s) backfills any missed updates from Redis.
+    //
+    // Wrapped in an outer reconnect loop so the task does not silently die
+    // if the Subscriber stream ends. Backoff is only reset after a
+    // subscription has stayed up for STABILITY_THRESHOLD — a flapping
+    // "subscribe → immediate end" cycle still backs off exponentially.
     {
         let hr_tx = hr_tx.clone();
-        let mut hr_sub = nats
-            .subscribe(subjects::HR_RECEIVED)
-            .await
-            .expect("Failed to subscribe to hr.received");
-
-        tokio::spawn(async move {
-            while let Some(msg) = hr_sub.next().await {
-                match serde_json::from_slice::<HeartRateReceived>(&msg.payload) {
-                    Ok(update) => {
-                        let _ = hr_tx.send(update);
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to parse hr.received event: {e}");
-                    }
-                }
-            }
-        });
-    }
-
-    // Spawn pulsoid.token.refresh_needed NATS subscriber
-    {
-        let state = state.clone();
         let nats = nats.clone();
-        let mut refresh_sub = nats
-            .subscribe(subjects::TOKEN_REFRESH_NEEDED)
-            .await
-            .expect("Failed to subscribe to token.refresh_needed");
-
         tokio::spawn(async move {
-            let in_flight: Arc<std::sync::Mutex<HashSet<String>>> =
-                Arc::new(std::sync::Mutex::new(HashSet::new()));
-
-            while let Some(msg) = refresh_sub.next().await {
-                let req = match serde_json::from_slice::<TokenRefreshRequest>(&msg.payload) {
-                    Ok(r) => r,
+            let mut backoff = INITIAL_BACKOFF;
+            loop {
+                let mut hr_sub = match nats.subscribe(subjects::HR_RECEIVED).await {
+                    Ok(s) => {
+                        tracing::info!("Subscribed to {}", subjects::HR_RECEIVED);
+                        s
+                    }
                     Err(e) => {
-                        tracing::warn!("Failed to parse refresh_needed event: {e}");
+                        tracing::warn!(
+                            "Failed to subscribe to {}: {e}; retrying in {:?}",
+                            subjects::HR_RECEIVED,
+                            backoff
+                        );
+                        tokio::time::sleep(backoff).await;
+                        backoff = advance_backoff(backoff);
                         continue;
                     }
                 };
 
-                // Skip if a refresh is already in-flight for this user
-                {
-                    let mut set = in_flight.lock().unwrap();
-                    if !set.insert(req.user_id.clone()) {
-                        tracing::debug!(user_id = %req.user_id, "Refresh already in-flight, skipping");
-                        continue;
+                let subscribed_at = std::time::Instant::now();
+                while let Some(msg) = hr_sub.next().await {
+                    match serde_json::from_slice::<HeartRateReceived>(&msg.payload) {
+                        Ok(update) => {
+                            let _ = hr_tx.send(update);
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to parse hr.received event: {e}");
+                        }
                     }
                 }
 
-                tracing::info!(user_id = %req.user_id, "Received token refresh request");
-                let state = state.clone();
-                let in_flight = in_flight.clone();
-                let user_id = req.user_id.clone();
-                let request_config_version = req.config_version;
-                tokio::spawn(async move {
-                    let _guard = InFlightGuard {
-                        user_id: user_id.clone(),
-                        set: in_flight,
+                if subscribed_at.elapsed() >= STABILITY_THRESHOLD {
+                    backoff = INITIAL_BACKOFF;
+                } else {
+                    backoff = advance_backoff(backoff);
+                }
+                tracing::warn!(
+                    "{} subscription ended; resubscribing in {:?}",
+                    subjects::HR_RECEIVED,
+                    backoff
+                );
+                tokio::time::sleep(backoff).await;
+            }
+        });
+    }
+
+    // Spawn pulsoid.token.refresh_needed NATS subscriber with auto-resubscribe.
+    // The in_flight guard set lives outside the outer loop so concurrent
+    // refresh guards survive resubscribes.
+    {
+        let state = state.clone();
+        let nats = nats.clone();
+        tokio::spawn(async move {
+            let in_flight: Arc<std::sync::Mutex<HashSet<String>>> =
+                Arc::new(std::sync::Mutex::new(HashSet::new()));
+            let mut backoff = INITIAL_BACKOFF;
+            loop {
+                let mut refresh_sub = match nats.subscribe(subjects::TOKEN_REFRESH_NEEDED).await {
+                    Ok(s) => {
+                        tracing::info!("Subscribed to {}", subjects::TOKEN_REFRESH_NEEDED);
+                        s
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to subscribe to {}: {e}; retrying in {:?}",
+                            subjects::TOKEN_REFRESH_NEEDED,
+                            backoff
+                        );
+                        tokio::time::sleep(backoff).await;
+                        backoff = advance_backoff(backoff);
+                        continue;
+                    }
+                };
+
+                let subscribed_at = std::time::Instant::now();
+                while let Some(msg) = refresh_sub.next().await {
+                    let req = match serde_json::from_slice::<TokenRefreshRequest>(&msg.payload) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            tracing::warn!("Failed to parse refresh_needed event: {e}");
+                            continue;
+                        }
                     };
-                    handle_token_refresh(&state, &user_id, request_config_version).await;
-                });
+
+                    // Skip if a refresh is already in-flight for this user
+                    {
+                        let mut set = in_flight.lock().unwrap();
+                        if !set.insert(req.user_id.clone()) {
+                            tracing::debug!(user_id = %req.user_id, "Refresh already in-flight, skipping");
+                            continue;
+                        }
+                    }
+
+                    tracing::info!(user_id = %req.user_id, "Received token refresh request");
+                    let state = state.clone();
+                    let in_flight = in_flight.clone();
+                    let user_id = req.user_id.clone();
+                    let request_config_version = req.config_version;
+                    tokio::spawn(async move {
+                        let _guard = InFlightGuard {
+                            user_id: user_id.clone(),
+                            set: in_flight,
+                        };
+                        handle_token_refresh(&state, &user_id, request_config_version).await;
+                    });
+                }
+
+                if subscribed_at.elapsed() >= STABILITY_THRESHOLD {
+                    backoff = INITIAL_BACKOFF;
+                } else {
+                    backoff = advance_backoff(backoff);
+                }
+                tracing::warn!(
+                    "{} subscription ended; resubscribing in {:?}",
+                    subjects::TOKEN_REFRESH_NEEDED,
+                    backoff
+                );
+                tokio::time::sleep(backoff).await;
             }
         });
     }
