@@ -368,15 +368,21 @@ async fn handle_message(
     };
 
     // Write to Redis latest_bpm cache with TTL. This is the authoritative
-    // write — api-backend reads from here. Failures are logged but not
-    // fatal: the next heartbeat (or a restart warm-up) recovers the state.
+    // write — api-backend's read_snapshot and WS self-heal read only from
+    // here. If this fails we must skip the NATS publish below: otherwise
+    // connected clients receive the live Update and then get rolled back
+    // to the stale Redis value (or null) on the next self-heal, and new
+    // subscribers never see this reading at all. The DB insert above has
+    // already committed the historical record, so this is a partial
+    // success — the next Pulsoid frame re-establishes live state once
+    // Redis recovers.
     let key = latest_bpm_key(user_id);
     let value = serialize_latest_bpm(&update);
     if let Err(e) = redis
         .set_ex::<_, _, ()>(&key, &value, LATEST_BPM_TTL_SECS)
         .await
     {
-        tracing::warn!(user_id = %user_id, "Failed to write latest_bpm to Redis: {e}");
+        return Err(format!("latest_bpm Redis write failed after DB insert: {e}"));
     }
 
     // Publish to NATS for api-backend to broadcast via WebSocket (best-effort).
