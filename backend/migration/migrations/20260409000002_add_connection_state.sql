@@ -2,15 +2,12 @@
 ALTER TABLE pulsoid_connections ADD COLUMN connection_state TEXT;
 ALTER TABLE pulsoid_connections ADD COLUMN state_updated_at TIMESTAMPTZ;
 
--- Backfill existing rows.
--- Use refresh_blocked (added in 20260409000001) as the terminal signal —
--- last_error is NOT terminal in the old schema (the worker overwrites it
--- on every transient disconnect/reconnect), so mapping last_error IS NOT
--- NULL → 'error' would promote recoverable rows to the terminal state and
--- the ingest would never spawn a worker for them again.
+-- Backfill existing rows. last_error is NOT terminal in practice (the worker
+-- overwrites it on every transient disconnect), so we can't use it to detect
+-- past terminal failures. Any row that was in a "blocked" state in a dev DB
+-- will re-surface naturally the next time the worker attempts a refresh.
 UPDATE pulsoid_connections SET
   connection_state = CASE
-    WHEN refresh_blocked THEN 'error'
     WHEN last_connected_at IS NOT NULL THEN 'connected'
     ELSE 'pending'
   END,

@@ -10,7 +10,7 @@ pub struct PulsoidConnectionRow {
     pub key_version: i32,
     pub token_expires_at: Option<i64>,
     pub last_error: Option<String>,
-    pub refresh_blocked: bool,
+    pub connection_state: String,
     pub config_version: i32,
 }
 

@@ -17,6 +17,7 @@ use tower_http::cors::CorsLayer;
 
 use auth::AuthConfig;
 use common::messages::{subjects, HeartRateReceived, TokenRefreshRequest};
+use common::pulsoid_state::{classify_no_op, WriteOutcome};
 use common::redis_keys::{latest_bpm_key, serialize_latest_bpm, LATEST_BPM_TTL_SECS};
 use common::token_encryption::TokenEncryption;
 use pulsoid_oauth::{OAuthError, PulsoidOAuthConfig};
@@ -27,7 +28,7 @@ type TokenRefreshRow = (
     Option<Vec<u8>>,
     i32,
     Option<i64>,
-    bool,
+    String,
     i32,
 );
 
@@ -247,7 +248,23 @@ async fn main() {
                 Arc::new(std::sync::Mutex::new(HashSet::new()));
             let mut backoff = INITIAL_BACKOFF;
             loop {
-                let mut refresh_sub = match nats.subscribe(subjects::TOKEN_REFRESH_NEEDED).await {
+                // Queue-subscribe so multi-instance deployments dedupe refresh
+                // requests at the delivery layer: NATS hands each message to
+                // exactly one instance in the group. This complements the
+                // process-local `in_flight` guard (which can't see peers) and
+                // cuts down on duplicate OAuth refresh calls to Pulsoid.
+                //
+                // This is dedup, NOT durability: Core NATS `queue_subscribe`
+                // has no ack/retry, so a message is lost if the chosen instance
+                // crashes before handling it. Recovery relies on the worker's
+                // own republish-on-expiry loop (`worker.rs` cooldown path).
+                let mut refresh_sub = match nats
+                    .queue_subscribe(
+                        subjects::TOKEN_REFRESH_NEEDED,
+                        "api-backend-token-refresh".to_string(),
+                    )
+                    .await
+                {
                     Ok(s) => {
                         tracing::info!("Subscribed to {}", subjects::TOKEN_REFRESH_NEEDED);
                         s
@@ -485,7 +502,7 @@ async fn handle_token_refresh(state: &AppState, user_id: &str, request_config_ve
     let row: Option<TokenRefreshRow> = match sqlx::query_as(
         "SELECT source, access_token, refresh_token, key_version,
                     EXTRACT(EPOCH FROM token_expires_at)::BIGINT as token_expires_at,
-                    refresh_blocked, config_version
+                    connection_state, config_version
              FROM pulsoid_connections WHERE user_id = $1",
     )
     .bind(user_id)
@@ -505,7 +522,7 @@ async fn handle_token_refresh(state: &AppState, user_id: &str, request_config_ve
         refresh_token_enc,
         key_version,
         token_expires_at,
-        refresh_blocked,
+        connection_state,
         db_config_version,
     ) = match row {
         Some(r) => r,
@@ -532,9 +549,11 @@ async fn handle_token_refresh(state: &AppState, user_id: &str, request_config_ve
         return;
     }
 
-    // Circuit breaker: skip if already blocked due to terminal failure
-    if refresh_blocked {
-        tracing::debug!(user_id, "Refresh already blocked, ignoring request");
+    // Circuit breaker: skip if the row is already in the terminal `'error'`
+    // state. Resurrect requires fresh re-auth (OAuth callback / manual token
+    // upload), so there is nothing useful for us to do here.
+    if connection_state == "error" {
+        tracing::debug!(user_id, "Connection in terminal 'error' state, ignoring refresh request");
         return;
     }
 
@@ -550,10 +569,12 @@ async fn handle_token_refresh(state: &AppState, user_id: &str, request_config_ve
         }
     }
 
-    // Set connection_state to pending at refresh start
+    // Set connection_state to pending at refresh start. Sticky-error guard
+    // blocks resurrect of a row that a concurrent instance flipped to
+    // `'error'` between our SELECT above and this UPDATE.
     match sqlx::query(
         "UPDATE pulsoid_connections SET connection_state = 'pending', state_updated_at = now() \
-         WHERE user_id = $1 AND config_version = $2",
+         WHERE user_id = $1 AND config_version = $2 AND connection_state != 'error'",
     )
     .bind(user_id)
     .bind(request_config_version)
@@ -561,11 +582,29 @@ async fn handle_token_refresh(state: &AppState, user_id: &str, request_config_ve
     .await
     {
         Ok(r) if r.rows_affected() == 0 => {
-            tracing::info!(
-                user_id,
-                request_config_version,
-                "Token refresh abandoned: connection superseded"
-            );
+            match classify_no_op(&state.db, user_id, request_config_version).await {
+                Ok(WriteOutcome::StickyError) => {
+                    tracing::warn!(
+                        user_id,
+                        request_config_version,
+                        "Refresh abandoned: row is in sticky error state"
+                    );
+                }
+                Ok(WriteOutcome::StaleOrMissing) | Ok(WriteOutcome::Applied) => {
+                    tracing::info!(
+                        user_id,
+                        request_config_version,
+                        "Token refresh abandoned: connection superseded"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        user_id,
+                        request_config_version,
+                        "Failed to classify zero-row update: {e}"
+                    );
+                }
+            }
             return;
         }
         Err(e) => {
@@ -580,7 +619,7 @@ async fn handle_token_refresh(state: &AppState, user_id: &str, request_config_ve
         None => {
             tracing::error!(user_id, "OAuth connection has no refresh_token");
             match sqlx::query(
-                "UPDATE pulsoid_connections SET last_error = $1, refresh_blocked = true, \
+                "UPDATE pulsoid_connections SET last_error = $1, \
                  connection_state = 'error', state_updated_at = now() \
                  WHERE user_id = $2 AND config_version = $3",
             )
@@ -614,7 +653,7 @@ async fn handle_token_refresh(state: &AppState, user_id: &str, request_config_ve
         Err(e) => {
             tracing::error!(user_id, "Failed to decrypt refresh token: {e}");
             match sqlx::query(
-                "UPDATE pulsoid_connections SET last_error = $1, refresh_blocked = true, \
+                "UPDATE pulsoid_connections SET last_error = $1, \
                  connection_state = 'error', state_updated_at = now() \
                  WHERE user_id = $2 AND config_version = $3",
             )
@@ -660,11 +699,16 @@ async fn handle_token_refresh(state: &AppState, user_id: &str, request_config_ve
                 }
                 OAuthError::Request(_) => false,
             };
+            // Sticky-error guard: only active when `is_terminal` is false
+            // (i.e., we'd be writing `'pending'` over an existing `'error'`
+            // row). Terminal writes never resurrect a live row, so the guard
+            // is a no-op for them.
             match sqlx::query(
-                "UPDATE pulsoid_connections SET last_error = $1, refresh_blocked = $3,
+                "UPDATE pulsoid_connections SET last_error = $1,
                  connection_state = CASE WHEN $3 THEN 'error' ELSE 'pending' END,
                  state_updated_at = now()
-                 WHERE user_id = $2 AND config_version = $4",
+                 WHERE user_id = $2 AND config_version = $4
+                   AND ($3 OR connection_state != 'error')",
             )
             .bind(format!("Token refresh failed: {e}"))
             .bind(user_id)
@@ -674,11 +718,29 @@ async fn handle_token_refresh(state: &AppState, user_id: &str, request_config_ve
             .await
             {
                 Ok(r) if r.rows_affected() == 0 => {
-                    tracing::info!(
-                        user_id,
-                        request_config_version,
-                        "Error state not written: connection superseded"
-                    );
+                    match classify_no_op(&state.db, user_id, request_config_version).await {
+                        Ok(WriteOutcome::StickyError) => {
+                            tracing::warn!(
+                                user_id,
+                                request_config_version,
+                                "Non-terminal refresh error not written: row is in sticky error state"
+                            );
+                        }
+                        Ok(WriteOutcome::StaleOrMissing) | Ok(WriteOutcome::Applied) => {
+                            tracing::info!(
+                                user_id,
+                                request_config_version,
+                                "Error state not written: connection superseded"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                user_id,
+                                request_config_version,
+                                "Failed to classify zero-row update: {e}"
+                            );
+                        }
+                    }
                 }
                 Err(e) => {
                     tracing::error!(user_id, "Failed to update connection error state: {e}");
@@ -704,15 +766,21 @@ async fn handle_token_refresh(state: &AppState, user_id: &str, request_config_ve
         Some(refresh_token_bytes) // Keep old refresh token
     };
 
-    // Save to DB with config_version increment and last_error = NULL
+    // Save to DB with config_version increment and last_error = NULL.
+    // Sticky-error guard refuses to resurrect a terminal row: with OAuth's
+    // one-shot refresh tokens, "another instance flipped to terminal" and
+    // "this instance succeeded" can't both be true in practice, but we
+    // enforce the invariant declaratively here so accidental resurrects are
+    // structurally impossible.
     let result: Result<Option<(i32,)>, _> = sqlx::query_as(
         "UPDATE pulsoid_connections
          SET access_token = $1, refresh_token = $2, key_version = $3,
              token_expires_at = now() + make_interval(secs => $4),
-             last_error = NULL, refresh_blocked = false,
+             last_error = NULL,
              connection_state = 'pending', state_updated_at = now(),
              config_version = nextval('pulsoid_config_version_seq')
          WHERE user_id = $5 AND source = 'oauth' AND config_version = $6
+           AND connection_state != 'error'
          RETURNING config_version",
     )
     .bind(&enc_access)
@@ -727,11 +795,29 @@ async fn handle_token_refresh(state: &AppState, user_id: &str, request_config_ve
     let config_version = match result {
         Ok(Some((cv,))) => cv,
         Ok(None) => {
-            tracing::warn!(
-                user_id,
-                request_config_version,
-                "Refreshed tokens discarded: connection superseded"
-            );
+            match classify_no_op(&state.db, user_id, request_config_version).await {
+                Ok(WriteOutcome::StickyError) => {
+                    tracing::warn!(
+                        user_id,
+                        request_config_version,
+                        "Refreshed tokens discarded: row is in sticky error state (resurrect only via fresh re-auth)"
+                    );
+                }
+                Ok(WriteOutcome::StaleOrMissing) | Ok(WriteOutcome::Applied) => {
+                    tracing::warn!(
+                        user_id,
+                        request_config_version,
+                        "Refreshed tokens discarded: connection superseded"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        user_id,
+                        request_config_version,
+                        "Failed to classify zero-row update: {e}"
+                    );
+                }
+            }
             return;
         }
         Err(e) => {

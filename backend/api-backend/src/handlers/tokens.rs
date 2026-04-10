@@ -106,8 +106,8 @@ pub async fn set_manual_pulsoid_token(
     let (enc_access, key_version) = state.token_encryption.encrypt(token);
 
     let (config_version,): (i32,) = sqlx::query_as(
-        "INSERT INTO pulsoid_connections (user_id, source, access_token, key_version, refresh_token, token_expires_at, last_connected_at, last_error, refresh_blocked, connection_state, state_updated_at)
-         VALUES ($1, 'manual', $2, $3, NULL, NULL, NULL, NULL, false, 'pending', now())
+        "INSERT INTO pulsoid_connections (user_id, source, access_token, key_version, refresh_token, token_expires_at, last_connected_at, last_error, connection_state, state_updated_at)
+         VALUES ($1, 'manual', $2, $3, NULL, NULL, NULL, NULL, 'pending', now())
          ON CONFLICT (user_id) DO UPDATE SET
             source = 'manual',
             access_token = EXCLUDED.access_token,
@@ -116,7 +116,6 @@ pub async fn set_manual_pulsoid_token(
             token_expires_at = NULL,
             last_connected_at = NULL,
             last_error = NULL,
-            refresh_blocked = false,
             connection_state = 'pending',
             state_updated_at = now(),
             config_version = nextval('pulsoid_config_version_seq')
