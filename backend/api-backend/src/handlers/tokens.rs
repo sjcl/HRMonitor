@@ -86,19 +86,22 @@ pub async fn delete_pulsoid_token(
 ) -> Result<Response, AppError> {
     let user_id = &auth_user.id;
 
-    let result = sqlx::query("DELETE FROM pulsoid_connections WHERE user_id = $1")
-        .bind(user_id)
-        .execute(&state.db)
-        .await?;
+    let deleted: Option<(i32,)> = sqlx::query_as(
+        "DELETE FROM pulsoid_connections WHERE user_id = $1 RETURNING config_version",
+    )
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await?;
 
-    if result.rows_affected() == 0 {
-        return Err(AppError::NotFound("Pulsoid token not configured".into()));
-    }
+    let config_version = match deleted {
+        Some((cv,)) => cv,
+        None => return Err(AppError::NotFound("Pulsoid token not configured".into())),
+    };
 
     // Notify pulsoid-ingest via NATS request/reply
     let cmd = ConnectionChangeCommand {
         user_id: user_id.to_string(),
-        config_version: None,
+        config_version: Some(config_version),
     };
     let status = nats_request_status(&state.nats, &cmd, user_id).await;
 
