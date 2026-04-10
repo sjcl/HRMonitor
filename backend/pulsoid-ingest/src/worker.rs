@@ -15,6 +15,11 @@ use crate::models::{PulsoidConnectionRow, PulsoidMessage, SOURCE_OAUTH};
 
 const PULSOID_WS_URL: &str = "wss://dev.pulsoid.net/api/v1/data/real_time";
 const REFRESH_SAFETY_MARGIN_SECS: i64 = 60;
+/// Minimum interval between `TOKEN_REFRESH_NEEDED` publishes for a single
+/// worker. Must be strictly greater than `max_backoff` (60s) so the cooldown
+/// stays effective after backoff saturates; otherwise the worker would
+/// re-publish every 60s indefinitely on non-terminal refresh failures.
+const REFRESH_REQUEST_MIN_INTERVAL: Duration = Duration::from_secs(300);
 
 pub async fn run_worker(
     db: PgPool,
@@ -26,6 +31,12 @@ pub async fn run_worker(
 ) {
     let mut backoff = Duration::from_secs(1);
     let max_backoff = Duration::from_secs(60);
+    // Cooldown state for `TOKEN_REFRESH_NEEDED` publishes. Monotonic clock so
+    // wall-clock jumps can't bypass the cooldown. Local to this worker: a
+    // successful refresh bumps `config_version` and tears down the worker,
+    // and a terminal failure exits via `refresh_blocked`, so a fresh worker
+    // always starts from `None` and may publish immediately.
+    let mut last_refresh_request_at: Option<tokio::time::Instant> = None;
 
     loop {
         // Fetch connection from DB
@@ -117,46 +128,95 @@ pub async fn run_worker(
             if let Some(expires_at) = conn.token_expires_at {
                 let now = system_now();
                 if now >= expires_at - REFRESH_SAFETY_MARGIN_SECS {
-                    // Token expired or about to expire — request refresh from api-backend
-                    let req = TokenRefreshRequest {
-                        user_id: user_id.to_string(),
-                        config_version,
+                    // Token expired or about to expire — request refresh from api-backend.
+                    // Throttle re-publishes: on non-terminal refresh failures api-backend
+                    // does not bump `config_version`, so without a cooldown the worker
+                    // would re-publish every backoff cycle (pinned at 60s) forever.
+                    let should_publish = match last_refresh_request_at {
+                        None => true,
+                        Some(at) => at.elapsed() >= REFRESH_REQUEST_MIN_INTERVAL,
                     };
-                    if let Err(e) = nats
-                        .publish(
-                            subjects::TOKEN_REFRESH_NEEDED,
-                            serde_json::to_vec(&req).unwrap().into(),
-                        )
-                        .await
-                    {
-                        tracing::warn!(user_id = %user_id, "Failed to publish refresh_needed: {e}");
-                    }
-                    match update_connection_state(
-                        &db,
-                        &user_id,
-                        config_version,
-                        "pending",
-                        Some("Token expired, refresh requested"),
-                    )
-                    .await
-                    {
-                        Ok(true) => {}
-                        Ok(false) => {
-                            tracing::info!(
-                                user_id = %user_id,
+
+                    if should_publish {
+                        let req = TokenRefreshRequest {
+                            user_id: user_id.to_string(),
+                            config_version,
+                        };
+                        // Arm cooldown on entering the enqueue path — before we even try
+                        // to serialize. Covers the serialize-failure case (publish never
+                        // happened) and the publish-failure case with a single assignment,
+                        // independent of which sub-step failed. Trade-off: if NATS recovers
+                        // a few seconds after a publish failure, we still wait up to the
+                        // full interval before retrying. This is intentional — we favor
+                        // spam suppression over fast recovery from broker outages.
+                        last_refresh_request_at = Some(tokio::time::Instant::now());
+
+                        // Serialize fallibly: in practice `TokenRefreshRequest`
+                        // (String + i32) can't fail to encode, but the fix's theme is
+                        // "make the worker robust against transient failures", so a
+                        // `.unwrap()` here would be out of place.
+                        let published: bool = match serde_json::to_vec(&req) {
+                            Ok(payload) => match nats
+                                .publish(subjects::TOKEN_REFRESH_NEEDED, payload.into())
+                                .await
+                            {
+                                Ok(()) => true,
+                                Err(e) => {
+                                    tracing::warn!(user_id = %user_id, "Failed to publish refresh_needed: {e}");
+                                    false
+                                }
+                            },
+                            Err(e) => {
+                                tracing::warn!(user_id = %user_id, "Failed to serialize refresh request: {e}");
+                                false
+                            }
+                        };
+
+                        if published {
+                            // Only on publish success do we claim "refresh requested" in
+                            // the DB. This overwrites api-backend's prior last_error, but
+                            // that's fine — we're starting a fresh refresh attempt.
+                            match update_connection_state(
+                                &db,
+                                &user_id,
                                 config_version,
-                                "Stale worker detected (config_version mismatch), exiting"
-                            );
-                            return;
+                                "pending",
+                                Some("Token expired, refresh requested"),
+                            )
+                            .await
+                            {
+                                Ok(true) => {}
+                                Ok(false) => {
+                                    tracing::info!(
+                                        user_id = %user_id,
+                                        config_version,
+                                        "Stale worker detected (config_version mismatch), exiting"
+                                    );
+                                    return;
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        user_id = %user_id,
+                                        config_version,
+                                        "Failed to set pending state after refresh request: {e}"
+                                    );
+                                }
+                            }
                         }
-                        Err(e) => {
-                            tracing::warn!(
-                                user_id = %user_id,
-                                config_version,
-                                "Failed to set pending state after refresh request: {e}"
-                            );
-                        }
+                        // else: neither serialize nor publish succeeded. Deliberately do
+                        // NOT touch the DB — we never sent the request, and writing
+                        // "Token expired, refresh requested" would clobber api-backend's
+                        // diagnostic last_error from a prior failed refresh.
+                    } else {
+                        // Cooldown active: don't re-publish and don't touch the DB. The
+                        // worker still loops and re-fetches so it notices a successful
+                        // refresh (config_version bump → stale-worker exit above).
+                        tracing::debug!(
+                            user_id = %user_id,
+                            "Refresh request in cooldown, not re-publishing"
+                        );
                     }
+
                     tracing::info!(user_id = %user_id, backoff_secs = backoff.as_secs(), "Token expired, waiting for refresh");
                     tokio::time::sleep(backoff).await;
                     backoff = (backoff * 2).min(max_backoff);
