@@ -25,8 +25,8 @@ impl std::fmt::Display for OAuthError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             OAuthError::Request(e) => write!(f, "HTTP request failed: {e}"),
-            OAuthError::TokenEndpoint { status, body } => {
-                write!(f, "token endpoint returned {status}: {body}")
+            OAuthError::TokenEndpoint { status, .. } => {
+                write!(f, "token endpoint returned HTTP {status}")
             }
         }
     }
