@@ -1,6 +1,7 @@
 use axum::Extension;
 use axum::Json;
 use axum::extract::State;
+use common::time::unix_now_secs;
 use std::sync::Arc;
 
 use crate::AppState;
@@ -65,7 +66,7 @@ pub async fn update_user(
         ));
     }
 
-    let now = now_unix();
+    let now = unix_now_secs();
 
     let result = sqlx::query(
         "UPDATE users SET display_name = COALESCE($1, display_name), timezone = COALESCE($2, timezone), heart_rate_visibility = COALESCE($3, heart_rate_visibility), updated_at = to_timestamp($4) WHERE id = $5"
@@ -89,11 +90,4 @@ pub async fn update_user(
         .await?;
 
     Ok(Json(SelfUser::from(row)))
-}
-
-fn now_unix() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64
 }

@@ -1,5 +1,6 @@
 use axum::extract::{Path, State};
 use axum::{Extension, Json};
+use common::time::unix_now_secs;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -650,10 +651,7 @@ pub async fn get_invite_info(
     .await?
     .ok_or_else(|| AppError::NotFound("Invite not found".into()))?;
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
+    let now = unix_now_secs();
 
     let (valid, reason) = if row.revoked {
         (false, Some("revoked".to_string()))

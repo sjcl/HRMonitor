@@ -2,6 +2,7 @@ use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use chrono::NaiveDate;
+use common::time::unix_now_secs;
 use std::sync::Arc;
 
 use crate::AppState;
@@ -39,7 +40,7 @@ pub async fn list_heart_rates(
     Query(params): Query<HeartRateQuery>,
 ) -> Result<Json<Vec<HeartRateResponse>>, AppError> {
     let seconds = parse_period(&params.period)?;
-    let now = chrono::Utc::now().timestamp();
+    let now = unix_now_secs();
     let from = now - seconds;
 
     let records: Vec<HeartRateResponse> = sqlx::query_as(
@@ -118,7 +119,7 @@ pub async fn minute_stats(
     Query(params): Query<HeartRateQuery>,
 ) -> Result<Json<Vec<MinuteStatsResponse>>, AppError> {
     let seconds = parse_period(&params.period)?;
-    let now = chrono::Utc::now().timestamp();
+    let now = unix_now_secs();
     let from = now - seconds;
 
     let records: Vec<MinuteStatsResponse> = sqlx::query_as(
@@ -177,7 +178,7 @@ pub async fn group_heart_rates(
     Query(params): Query<HeartRateQuery>,
 ) -> Result<Json<Vec<GroupHeartRateResponse>>, AppError> {
     let seconds = parse_period(&params.period)?;
-    let now = chrono::Utc::now().timestamp();
+    let now = unix_now_secs();
     let from = now - seconds;
 
     ensure_active_member(&state.db, &group_id, &auth_user.id).await?;
@@ -212,7 +213,7 @@ pub async fn group_minute_stats(
     Query(params): Query<HeartRateQuery>,
 ) -> Result<Json<Vec<GroupMinuteStatsResponse>>, AppError> {
     let seconds = parse_period(&params.period)?;
-    let now = chrono::Utc::now().timestamp();
+    let now = unix_now_secs();
     let from = now - seconds;
 
     ensure_active_member(&state.db, &group_id, &auth_user.id).await?;

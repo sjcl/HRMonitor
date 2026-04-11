@@ -18,6 +18,7 @@ use common::messages::{subjects, HeartRateReceived};
 use common::nats_backoff::{advance_backoff, INITIAL_BACKOFF, STABILITY_THRESHOLD};
 use common::pulsoid_oauth::PulsoidOAuthConfig;
 use common::redis_keys::{latest_bpm_key, serialize_latest_bpm, LATEST_BPM_TTL_SECS};
+use common::time::unix_now_secs;
 use common::token_encryption::TokenEncryption;
 
 pub struct AppState {
@@ -84,10 +85,7 @@ async fn main() {
         .await
         .expect("Failed to warm latest_bpm cache from DB");
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
+        let now = unix_now_secs();
 
         let mut warmed = 0u64;
         let mut skipped = 0u64;

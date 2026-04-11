@@ -9,6 +9,7 @@ use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 use common::messages::{HeartRateReceived, subjects};
 use common::pulsoid_state::{WriteOutcome, classify_no_op};
 use common::redis_keys::{LATEST_BPM_TTL_SECS, latest_bpm_key, serialize_latest_bpm};
+use common::time::unix_now_secs;
 use common::token_encryption::TokenEncryption;
 use redis::AsyncCommands;
 
@@ -222,7 +223,7 @@ pub async fn run_worker(
             }
 
             if let Some(expires_at) = conn.token_expires_at {
-                let now = system_now();
+                let now = unix_now_secs();
                 if now >= expires_at - REFRESH_SAFETY_MARGIN_SECS {
                     tracing::info!(
                         user_id = %user_id,
@@ -282,7 +283,7 @@ pub async fn run_worker(
             Ok((ws_stream, _)) => {
                 backoff = Duration::from_secs(1);
 
-                let now = system_now();
+                let now = unix_now_secs();
                 match sqlx::query(
                     "UPDATE pulsoid_connections
                      SET last_connected_at = to_timestamp($1), last_error = NULL,
@@ -465,7 +466,7 @@ async fn handle_message(
         return Err(format!("BPM {bpm} out of range (20-250)"));
     }
 
-    let now = system_now();
+    let now = unix_now_secs();
     let recorded_at = msg
         .measured_at
         .filter(|&t| t > 0)
@@ -521,13 +522,6 @@ async fn handle_message(
     }
 
     Ok(())
-}
-
-fn system_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64
 }
 
 /// Update the connection to `pending` with a pre-sanitized error message.

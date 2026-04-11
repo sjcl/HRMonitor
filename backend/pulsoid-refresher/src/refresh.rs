@@ -28,6 +28,7 @@
 
 use common::pulsoid_oauth::{OAuthError, PulsoidOAuthConfig};
 use common::pulsoid_state::{WriteOutcome, classify_no_op};
+use common::time::unix_now_secs;
 use common::token_encryption::TokenEncryption;
 use sqlx::PgPool;
 
@@ -218,7 +219,7 @@ async fn refresh_inner(
     // got refreshed by an OAuth callback between scan and now would still
     // go through a full refresh cycle unnecessarily.
     if let Some(expires_at) = token_expires_at {
-        let now = system_now();
+        let now = unix_now_secs();
         if now < expires_at - REFRESH_SAFETY_MARGIN_SECS {
             tracing::debug!(user_id, "Token still valid, skipping refresh");
             let _ = tx_b.rollback().await;
@@ -556,11 +557,4 @@ async fn write_error_state(
     if let Err(e) = tx.commit().await {
         tracing::warn!(user_id, "Error-write tx commit failed: {e}");
     }
-}
-
-fn system_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64
 }
