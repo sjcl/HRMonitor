@@ -15,18 +15,10 @@ use tower_http::cors::CorsLayer;
 
 use auth::AuthConfig;
 use common::messages::{subjects, HeartRateReceived};
+use common::nats_backoff::{advance_backoff, INITIAL_BACKOFF, STABILITY_THRESHOLD};
 use common::pulsoid_oauth::PulsoidOAuthConfig;
 use common::redis_keys::{latest_bpm_key, serialize_latest_bpm, LATEST_BPM_TTL_SECS};
 use common::token_encryption::TokenEncryption;
-
-// NATS subscriber auto-resubscribe backoff.
-const INITIAL_BACKOFF: std::time::Duration = std::time::Duration::from_millis(500);
-const MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(30);
-const STABILITY_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(60);
-
-fn advance_backoff(backoff: std::time::Duration) -> std::time::Duration {
-    (backoff * 2).min(MAX_BACKOFF)
-}
 
 pub struct AppState {
     pub db: sqlx::PgPool,
