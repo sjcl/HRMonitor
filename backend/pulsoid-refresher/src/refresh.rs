@@ -358,9 +358,15 @@ async fn refresh_inner(
     let (enc_access, new_key_version) = encryption.encrypt(&token_resp.access_token);
     let enc_refresh: Vec<u8> = match refresh_token_for_upd {
         Some(new_rt) => encryption.encrypt(new_rt).0,
-        // Pulsoid returned no new refresh token: keep the old one. Old
-        // semantics matched this.
-        None => refresh_token_bytes,
+        // Pulsoid returned no new refresh token: re-encrypt the existing
+        // plaintext under the current key. The schema stores a single
+        // `key_version` column shared by `access_token` and `refresh_token`,
+        // and the UPDATE below overwrites it with `new_key_version`. Reusing
+        // the stale ciphertext (which may have been encrypted under an
+        // older key version) would leave the refresh_token associated with
+        // the wrong key_version the moment a rotation introduces a second
+        // key, breaking decrypt on the next refresh tick.
+        None => encryption.encrypt(&refresh_token_plain).0,
     };
 
     let mut tx_c = match db.begin().await {
