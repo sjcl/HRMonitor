@@ -252,6 +252,7 @@ async fn refresh_inner(
             let _ = tx_b.rollback().await;
             write_error_state(
                 db,
+                nats,
                 user_id,
                 expected_revision,
                 "No refresh token available",
@@ -269,6 +270,7 @@ async fn refresh_inner(
             let _ = tx_b.rollback().await;
             write_error_state(
                 db,
+                nats,
                 user_id,
                 expected_revision,
                 &format!("Failed to decrypt refresh token: {e}"),
@@ -355,6 +357,7 @@ async fn refresh_inner(
             };
             write_error_state(
                 db,
+                nats,
                 user_id,
                 expected_revision,
                 &format!("Token refresh failed: {e}"),
@@ -462,32 +465,7 @@ async fn refresh_inner(
         "Token refreshed successfully"
     );
 
-    // Publish the CONNECTION_CHANGED hint AFTER Tx C commit. Publishing
-    // before commit would risk pulsoid-ingest chasing a new revision
-    // that never lands (if commit fails).
-    let cmd = common::messages::ConnectionChangeCommand {
-        user_id: user_id.to_string(),
-    };
-    match serde_json::to_vec(&cmd) {
-        Ok(payload) => {
-            if let Err(e) = nats
-                .publish(common::messages::subjects::CONNECTION_CHANGED, payload.into())
-                .await
-            {
-                tracing::warn!(
-                    user_id,
-                    revision = new_revision,
-                    "Failed to publish connection change hint after refresh: {e}"
-                );
-            }
-        }
-        Err(e) => {
-            tracing::warn!(
-                user_id,
-                "Failed to serialize connection change hint: {e}"
-            );
-        }
-    }
+    publish_connection_changed(nats, user_id).await;
 
     RefreshOutcome::Refreshed { new_revision }
 }
@@ -503,6 +481,7 @@ async fn refresh_inner(
 /// `'pending'`.
 async fn write_error_state(
     db: &PgPool,
+    nats: &async_nats::Client,
     user_id: &str,
     expected_revision: i32,
     last_error: &str,
@@ -530,7 +509,7 @@ async fn write_error_state(
     .execute(&mut *tx)
     .await;
 
-    match res {
+    let did_write = match res {
         Ok(r) if r.rows_affected() == 0 => {
             match classify_no_op(db, user_id, expected_revision).await {
                 Ok(WriteOutcome::StickyError) => {
@@ -555,6 +534,7 @@ async fn write_error_state(
                     );
                 }
             }
+            false
         }
         Ok(_) => {
             if is_terminal {
@@ -563,13 +543,51 @@ async fn write_error_state(
                     "Terminal refresh failure, blocking further attempts"
                 );
             }
+            true
         }
         Err(e) => {
             tracing::error!(user_id, "Failed to update connection error state: {e}");
+            false
         }
-    }
+    };
 
     if let Err(e) = tx.commit().await {
         tracing::warn!(user_id, "Error-write tx commit failed: {e}");
+        return;
+    }
+
+    // Publish the hint only after a successful commit of a terminal error
+    // state, so pulsoid-ingest can immediately stop the worker instead of
+    // waiting for the next 60-second reconcile pass.
+    if did_write && is_terminal {
+        publish_connection_changed(nats, user_id).await;
+    }
+}
+
+/// Publish a `CONNECTION_CHANGED` hint via NATS so pulsoid-ingest can
+/// reconcile immediately. Best-effort: failures are logged but do not
+/// affect the caller's outcome.
+async fn publish_connection_changed(nats: &async_nats::Client, user_id: &str) {
+    let cmd = common::messages::ConnectionChangeCommand {
+        user_id: user_id.to_string(),
+    };
+    match serde_json::to_vec(&cmd) {
+        Ok(payload) => {
+            if let Err(e) = nats
+                .publish(common::messages::subjects::CONNECTION_CHANGED, payload.into())
+                .await
+            {
+                tracing::warn!(
+                    user_id,
+                    "Failed to publish connection change hint: {e}"
+                );
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                user_id,
+                "Failed to serialize connection change hint: {e}"
+            );
+        }
     }
 }
