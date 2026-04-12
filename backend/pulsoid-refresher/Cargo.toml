@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-common = { path = "../common" }
+common = { path = "../common", features = ["oauth"] }
 sqlx = { version = "0.8.6", features = ["runtime-tokio", "postgres"] }
 tokio = { version = "1.51.1", features = ["full"] }
 async-nats = "0.47.0"
