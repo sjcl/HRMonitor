@@ -423,25 +423,38 @@ async fn read_snapshot(
 ) -> HashMap<String, SnapshotEntry> {
     let mut results: HashMap<String, SnapshotEntry> = HashMap::with_capacity(user_ids.len());
 
+    if user_ids.is_empty() {
+        return results;
+    }
+
+    let keys: Vec<String> = user_ids.iter().map(|id| latest_bpm_key(id)).collect();
     let mut redis = state.redis.clone();
-    for user_id in user_ids {
-        let key = latest_bpm_key(user_id);
-        let entry = match redis.get::<_, Option<String>>(&key).await {
-            Ok(Some(s)) => match serde_json::from_str::<HeartRateReceived>(&s) {
-                Ok(hr) => SnapshotEntry::Hit(hr),
-                Err(e) => {
-                    tracing::warn!(
-                        user_id = %user_id,
-                        error = %e,
-                        "failed to parse latest_bpm payload; treating as miss"
-                    );
-                    SnapshotEntry::Miss
-                }
-            },
-            Ok(None) => SnapshotEntry::Miss,
-            Err(_) => SnapshotEntry::Error,
-        };
-        results.insert(user_id.clone(), entry);
+
+    match redis.mget::<_, Vec<Option<String>>>(&keys).await {
+        Ok(values) => {
+            for (user_id, value) in user_ids.iter().zip(values) {
+                let entry = match value {
+                    Some(s) => match serde_json::from_str::<HeartRateReceived>(&s) {
+                        Ok(hr) => SnapshotEntry::Hit(hr),
+                        Err(e) => {
+                            tracing::warn!(
+                                user_id = %user_id,
+                                error = %e,
+                                "failed to parse latest_bpm payload; treating as miss"
+                            );
+                            SnapshotEntry::Miss
+                        }
+                    },
+                    None => SnapshotEntry::Miss,
+                };
+                results.insert(user_id.clone(), entry);
+            }
+        }
+        Err(_) => {
+            for user_id in user_ids {
+                results.insert(user_id.clone(), SnapshotEntry::Error);
+            }
+        }
     }
 
     results
