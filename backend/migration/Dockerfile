@@ -8,8 +8,8 @@ COPY common/Cargo.toml common/Cargo.toml
 COPY common/src common/src
 COPY migration/Cargo.toml migration/Cargo.toml
 COPY migration/src migration/src
+RUN mkdir -p api-backend/src && echo 'fn main() {}' > api-backend/src/main.rs
 COPY api-backend/Cargo.toml api-backend/Cargo.toml
-COPY api-backend/src api-backend/src
 COPY migration/migrations migration/migrations
 
 # Stub out other workspace members
