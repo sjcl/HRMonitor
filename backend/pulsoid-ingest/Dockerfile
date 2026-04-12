@@ -14,6 +14,8 @@ RUN mkdir -p api-backend/src && echo 'fn main() {}' > api-backend/src/main.rs
 COPY api-backend/Cargo.toml api-backend/Cargo.toml
 RUN mkdir -p migration/src && echo 'fn main() {}' > migration/src/main.rs
 COPY migration/Cargo.toml migration/Cargo.toml
+RUN mkdir -p pulsoid-refresher/src && echo 'fn main() {}' > pulsoid-refresher/src/main.rs
+COPY pulsoid-refresher/Cargo.toml pulsoid-refresher/Cargo.toml
 
 RUN cargo build --release -p pulsoid-ingest
 
