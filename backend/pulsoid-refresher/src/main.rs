@@ -34,15 +34,23 @@ async fn main() {
         .unwrap_or_else(|_| "postgres://hrmonitor:hrmonitor@localhost:5432/hrmonitor".into());
     let nats_url = std::env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".into());
 
-    // Pool sizing: `refresh_if_expiring` holds Tx A (advisory lock only) open
-    // for the full duration of the refresh while using a *separate*
-    // connection for Tx B (pending UPDATE) and Tx C (final UPDATE). That is
-    // at least 2 concurrent connections in flight during a single refresh.
-    // A third is reserved for the scanner SELECT and for any error-path
-    // UPDATE that may run while Tx A is still held. Dropping below 3 risks
-    // pool starvation / self-deadlock.
+    // Pool sizing: `refresh_if_expiring` holds Tx A (advisory lock only) on
+    // one connection for the full refresh lifetime while acquiring Tx B or
+    // Tx C on a *separate* connection — at most 2 concurrent connections per
+    // refresh. The scanner's `fetch_all` SELECT completes and releases its
+    // connection before the for-loop calls `refresh_if_expiring`, so scanner
+    // and refresh never hold connections simultaneously. The 4th slot is
+    // headroom for the error-path `write_error_state` tx (which acquires a
+    // fresh connection while Tx A is still held) and for future refactors.
+    //
+    // `acquire_timeout(5s)`: the serial scan loop (`scanner.rs` for-loop +
+    // `main.rs` await-then-sleep) guarantees at most one refresh in flight
+    // per process, so pool contention should never occur. If that invariant
+    // ever regresses, the 5 s timeout surfaces the bug promptly instead of
+    // hanging on sqlx's default 30 s.
     let db = PgPoolOptions::new()
         .max_connections(4)
+        .acquire_timeout(Duration::from_secs(5))
         .connect(&database_url)
         .await
         .expect("Failed to connect to Postgres");
