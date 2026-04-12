@@ -137,6 +137,16 @@ pub async fn refresh_if_expiring(
     outcome
 }
 
+#[derive(sqlx::FromRow)]
+struct ConnectionRow {
+    source: String,
+    refresh_token: Option<Vec<u8>>,
+    key_version: i32,
+    token_expires_at: Option<i64>,
+    connection_state: String,
+    revision: i32,
+}
+
 /// Body of the refresh. Split out so the caller can keep `lock_tx` alive
 /// over its entire lifetime via RAII without having to thread the
 /// transaction handle through every branch.
@@ -159,8 +169,7 @@ async fn refresh_inner(
         }
     };
 
-    type Row = (String, Option<Vec<u8>>, i32, Option<i64>, String, i32);
-    let row: Option<Row> = match sqlx::query_as(
+    let row: Option<ConnectionRow> = match sqlx::query_as(
         "SELECT source, refresh_token, key_version,
                 EXTRACT(EPOCH FROM token_expires_at)::BIGINT as token_expires_at,
                 connection_state, revision
@@ -178,15 +187,21 @@ async fn refresh_inner(
         }
     };
 
-    let (source, refresh_token_enc, key_version, token_expires_at, connection_state, db_revision) =
-        match row {
-            Some(r) => r,
-            None => {
-                tracing::info!(user_id, "No pulsoid connection found, skipping refresh");
-                let _ = tx_b.rollback().await;
-                return RefreshOutcome::SkippedSuperseded;
-            }
-        };
+    let ConnectionRow {
+        source,
+        refresh_token: refresh_token_enc,
+        key_version,
+        token_expires_at,
+        connection_state,
+        revision: db_revision,
+    } = match row {
+        Some(r) => r,
+        None => {
+            tracing::info!(user_id, "No pulsoid connection found, skipping refresh");
+            let _ = tx_b.rollback().await;
+            return RefreshOutcome::SkippedSuperseded;
+        }
+    };
 
     if db_revision != expected_revision {
         tracing::info!(
