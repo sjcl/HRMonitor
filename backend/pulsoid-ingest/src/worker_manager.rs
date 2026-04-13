@@ -286,6 +286,28 @@ impl WorkerManager {
         true
     }
 
+    /// Abort and await all active workers. Called once during graceful shutdown.
+    pub async fn shutdown_all(&self) {
+        let workers: Vec<(String, JoinHandle<()>)> = {
+            self.state
+                .lock()
+                .await
+                .drain()
+                .map(|(uid, ws)| (uid, ws.handle))
+                .collect()
+        };
+
+        tracing::info!("Stopping {} worker(s)", workers.len());
+        for (user_id, handle) in workers {
+            handle.abort();
+            match handle.await {
+                Ok(()) => tracing::info!(user_id, "Worker exited"),
+                Err(e) if e.is_cancelled() => tracing::debug!(user_id, "Worker cancelled"),
+                Err(e) => tracing::warn!(user_id, "Worker join error: {e}"),
+            }
+        }
+    }
+
     /// Stop a worker only if it holds exactly `expected_version`.
     /// Two-phase to avoid awaiting under the lock.
     /// Returns true if the worker was stopped.

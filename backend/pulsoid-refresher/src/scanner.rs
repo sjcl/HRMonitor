@@ -12,15 +12,18 @@ use std::time::Instant;
 use common::pulsoid_oauth::PulsoidOAuthConfig;
 use common::token_encryption::TokenEncryption;
 use sqlx::PgPool;
+use tokio::sync::watch;
 
 use crate::refresh::{self, RefreshOutcome};
 
+/// Run one scan pass. Returns `true` if interrupted by a shutdown signal.
 pub async fn scan_and_refresh_once(
     db: &PgPool,
     nats: &async_nats::Client,
     encryption: &TokenEncryption,
     oauth: &PulsoidOAuthConfig,
-) {
+    shutdown: &watch::Receiver<bool>,
+) -> bool {
     let started = Instant::now();
 
     // ORDER BY token_expires_at ASC: under load (many tokens expiring in
@@ -44,13 +47,13 @@ pub async fn scan_and_refresh_once(
         Ok(rows) => rows,
         Err(e) => {
             tracing::warn!("Scanner SELECT failed: {e}");
-            return;
+            return false;
         }
     };
 
     if candidates.is_empty() {
         tracing::debug!(elapsed_ms = started.elapsed().as_millis() as u64, "Scan: no candidates");
-        return;
+        return false;
     }
 
     let total = candidates.len();
@@ -60,7 +63,11 @@ pub async fn scan_and_refresh_once(
     let mut skipped = 0u32;
     let mut failed = 0u32;
 
-    for (user_id, expected_revision) in candidates {
+    for (i, (user_id, expected_revision)) in candidates.into_iter().enumerate() {
+        if *shutdown.borrow() {
+            tracing::info!(processed = i, total, "Shutdown requested, aborting scan early");
+            return true;
+        }
         let outcome = refresh::refresh_if_expiring(
             db,
             nats,
@@ -89,4 +96,5 @@ pub async fn scan_and_refresh_once(
         elapsed_ms = started.elapsed().as_millis() as u64,
         "Scan complete"
     );
+    false
 }

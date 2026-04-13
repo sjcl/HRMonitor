@@ -110,6 +110,7 @@ services:
       migration:
         condition: service_completed_successfully
     restart: unless-stopped
+    stop_grace_period: 45s
 
   frontend:
     build:

@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use common::pulsoid_oauth::PulsoidOAuthConfig;
 use common::token_encryption::TokenEncryption;
 use sqlx::postgres::PgPoolOptions;
+use tokio::sync::watch;
 
 /// Scan cadence. Must stay well below `REFRESH_SAFETY_MARGIN_SECS` so that a
 /// row that barely missed one scan cycle still gets picked up with plenty of
@@ -66,6 +67,15 @@ async fn main() {
     // `authorization_url` or `exchange_code`.
     let oauth = PulsoidOAuthConfig::from_env_for_refresh();
 
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    // Detached task: sets the shutdown flag when SIGTERM/SIGINT arrives.
+    // Cleaned up automatically when the tokio runtime drops at end of main.
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        tracing::info!("Received shutdown signal");
+        let _ = shutdown_tx.send(true);
+    });
+
     tracing::info!(
         scan_interval_secs = SCAN_INTERVAL_SECS,
         safety_margin_secs = refresh::REFRESH_SAFETY_MARGIN_SECS,
@@ -89,10 +99,46 @@ async fn main() {
         // `<= now() + 300s` cutoff unrefreshed until after they had
         // already expired.
         let loop_start = Instant::now();
-        scanner::scan_and_refresh_once(&db, &nats, &encryption, &oauth).await;
-        let remaining = scan_interval.saturating_sub(loop_start.elapsed());
-        if !remaining.is_zero() {
-            tokio::time::sleep(remaining).await;
+        let interrupted =
+            scanner::scan_and_refresh_once(&db, &nats, &encryption, &oauth, &shutdown_rx).await;
+        if interrupted {
+            break;
         }
+        let remaining = scan_interval.saturating_sub(loop_start.elapsed());
+        let mut shutdown_wait = shutdown_rx.clone();
+        tokio::select! {
+            biased;
+            res = shutdown_wait.wait_for(|&v| v) => {
+                if res.is_err() {
+                    // sender dropped = watcher task died (panic or unexpected exit).
+                    // Treat as internal fault, not graceful shutdown.
+                    tracing::error!("Shutdown watcher task failed (sender dropped); forcing exit");
+                    std::process::exit(1);
+                }
+                break;
+            }
+            _ = tokio::time::sleep(remaining) => {}
+        }
+    }
+
+    nats.flush().await.ok();
+    tracing::info!("pulsoid-refresher shut down gracefully");
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm =
+            signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");
+        tokio::select! {
+            biased;
+            _ = sigterm.recv() => {}
+            _ = tokio::signal::ctrl_c() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await.ok();
     }
 }

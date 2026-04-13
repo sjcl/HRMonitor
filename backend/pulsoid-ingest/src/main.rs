@@ -74,7 +74,7 @@ async fn main() {
     // "subscribe → immediate end" cycle still backs off exponentially. Mirrors
     // the api-backend `hr.received` subscriber.
     let nats_events = nats.clone();
-    let events_task = tokio::spawn(async move {
+    let mut events_task = tokio::spawn(async move {
         let mut backoff = INITIAL_BACKOFF;
         loop {
             let mut connection_sub = match nats_events
@@ -137,23 +137,79 @@ async fn main() {
     });
 
     // Spawn periodic DB reconciliation (every 60 seconds)
-    let reconcile_task = tokio::spawn(async move {
+    let mut reconcile_task = tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(60)).await;
             wm_reconcile.reconcile().await;
         }
     });
 
-    // Wait for either task to complete (shouldn't happen in normal operation)
+    // Wait for shutdown signal or unexpected task exit.
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
+
+    let mut task_failed = false;
+
     tokio::select! {
-        _ = events_task => {
-            tracing::error!("Connection events subscriber exited unexpectedly");
+        res = &mut events_task => {
+            log_task_exit("Connection events subscriber", res);
+            task_failed = true;
+            reconcile_task.abort();
+            log_task_exit("Reconciliation task (sibling)", reconcile_task.await);
         }
-        _ = reconcile_task => {
-            tracing::error!("Reconciliation task exited unexpectedly");
+        res = &mut reconcile_task => {
+            log_task_exit("Reconciliation task", res);
+            task_failed = true;
+            events_task.abort();
+            log_task_exit("Connection events subscriber (sibling)", events_task.await);
         }
-        _ = tokio::signal::ctrl_c() => {
+        _ = &mut shutdown => {
             tracing::info!("Received shutdown signal");
+            events_task.abort();
+            reconcile_task.abort();
+            // Normal shutdown — cancelled is expected, no need to log
+            let _ = events_task.await;
+            let _ = reconcile_task.await;
         }
+    }
+
+    // Stop all workers (abort + join each)
+    worker_manager.shutdown_all().await;
+
+    // Flush outbound NATS messages
+    nats.flush().await.ok();
+
+    if task_failed {
+        tracing::error!("pulsoid-ingest exiting due to task failure");
+        // non-zero exit → Docker restart: unless-stopped will restart
+        std::process::exit(1);
+    }
+    tracing::info!("pulsoid-ingest shut down gracefully");
+}
+
+fn log_task_exit(name: &str, result: Result<(), tokio::task::JoinError>) {
+    match result {
+        Ok(()) => tracing::error!("{name} returned unexpectedly"),
+        Err(e) if e.is_panic() => tracing::error!("{name} panicked: {e}"),
+        Err(e) if e.is_cancelled() => tracing::debug!("{name} cancelled"),
+        Err(e) => tracing::error!("{name} failed: {e}"),
+    }
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm =
+            signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");
+        tokio::select! {
+            biased;
+            _ = sigterm.recv() => {}
+            _ = tokio::signal::ctrl_c() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await.ok();
     }
 }
