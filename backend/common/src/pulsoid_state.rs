@@ -10,6 +10,34 @@
 //! causes (row gone, stale `revision`, sticky error refused). This module
 //! provides the disambiguation SELECT so both binaries log the cases identically.
 
+/// Type-safe representation of the `connection_state` TEXT column in
+/// `pulsoid_connections`. Maps to/from the lowercase string literals
+/// enforced by the DB CHECK constraint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, sqlx::Type)]
+#[sqlx(type_name = "TEXT", rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
+pub enum ConnectionState {
+    Pending,
+    Connected,
+    Error,
+}
+
+impl ConnectionState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Connected => "connected",
+            Self::Error => "error",
+        }
+    }
+}
+
+impl std::fmt::Display for ConnectionState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Outcome of a guarded UPDATE against `pulsoid_connections`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteOutcome {
@@ -36,7 +64,7 @@ pub async fn classify_no_op<'e, E>(
 where
     E: sqlx::PgExecutor<'e>,
 {
-    let row: Option<(String, i32)> = sqlx::query_as(
+    let row: Option<(ConnectionState, i32)> = sqlx::query_as(
         "SELECT connection_state, revision FROM pulsoid_connections WHERE user_id = $1",
     )
     .bind(user_id)
@@ -45,7 +73,7 @@ where
     Ok(match row {
         None => WriteOutcome::StaleOrMissing,
         Some((_, rev)) if rev != expected_revision => WriteOutcome::StaleOrMissing,
-        Some((cs, _)) if cs == "error" => WriteOutcome::StickyError,
+        Some((cs, _)) if cs == ConnectionState::Error => WriteOutcome::StickyError,
         // Defensive fallback: the row exists, revision matches, and it
         // is not in error — some concurrent recovery write must have landed
         // between our guarded UPDATE and this SELECT. Treat as stale so the

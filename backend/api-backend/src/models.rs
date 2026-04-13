@@ -1,3 +1,4 @@
+use common::pulsoid_state::ConnectionState;
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
@@ -93,7 +94,7 @@ pub struct DailyStatsQuery {
 #[derive(Debug, Serialize)]
 pub struct PulsoidTokenResponse {
     pub source: String,
-    pub connection_state: String,
+    pub connection_state: ConnectionState,
     pub state_updated_at: i64,
     pub last_connected_at: Option<i64>,
     pub last_error: Option<String>,

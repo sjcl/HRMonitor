@@ -28,7 +28,7 @@
 
 use common::messages::{subjects, ConnectionChangeCommand};
 use common::pulsoid_oauth::{OAuthError, PulsoidOAuthConfig};
-use common::pulsoid_state::{WriteOutcome, classify_no_op};
+use common::pulsoid_state::{ConnectionState, WriteOutcome, classify_no_op};
 use common::time::unix_now_secs;
 use common::token_encryption::TokenEncryption;
 use sqlx::PgPool;
@@ -144,7 +144,7 @@ struct ConnectionRow {
     refresh_token: Option<Vec<u8>>,
     key_version: i32,
     token_expires_at: Option<i64>,
-    connection_state: String,
+    connection_state: ConnectionState,
     revision: i32,
 }
 
@@ -221,7 +221,7 @@ async fn refresh_inner(
         return RefreshOutcome::SkippedSuperseded;
     }
 
-    if connection_state == "error" {
+    if connection_state == ConnectionState::Error {
         tracing::debug!(
             user_id,
             "Connection in terminal 'error' state, skipping refresh"

@@ -7,7 +7,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 
 use common::messages::{HeartRateReceived, subjects};
-use common::pulsoid_state::{WriteOutcome, classify_no_op};
+use common::pulsoid_state::{ConnectionState, WriteOutcome, classify_no_op};
 use common::redis_keys::{LATEST_BPM_TTL_SECS, latest_bpm_key, serialize_latest_bpm};
 use common::time::unix_now_secs;
 use common::token_encryption::TokenEncryption;
@@ -172,7 +172,7 @@ pub async fn run_worker(
                     &db,
                     &user_id,
                     revision,
-                    "error",
+                    ConnectionState::Error,
                     Some("Failed to decrypt access token"),
                 )
                 .await
@@ -196,7 +196,7 @@ pub async fn run_worker(
         // point the stale-version guard above tears this worker down and
         // WorkerManager spawns a new one.
         if conn.source == SOURCE_OAUTH {
-            if conn.connection_state == "error" {
+            if conn.connection_state == ConnectionState::Error {
                 tracing::warn!(user_id = %user_id, last_error = ?conn.last_error,
                     "Row in terminal 'error' state, worker exiting. User must re-authorize.");
                 // Best-effort refresh of `last_error`/`state_updated_at`. The
@@ -208,7 +208,7 @@ pub async fn run_worker(
                     &db,
                     &user_id,
                     revision,
-                    "error",
+                    ConnectionState::Error,
                     conn.last_error.as_deref(),
                 )
                 .await
@@ -240,7 +240,7 @@ pub async fn run_worker(
                     &db,
                     &user_id,
                     revision,
-                    "error",
+                    ConnectionState::Error,
                     Some("OAuth connection missing expiry (data inconsistency)"),
                 )
                 .await
@@ -365,7 +365,7 @@ pub async fn run_worker(
                     &db,
                     &user_id,
                     revision,
-                    "pending",
+                    ConnectionState::Pending,
                     Some("WebSocket disconnected, reconnecting"),
                 )
                 .await
@@ -428,7 +428,7 @@ async fn update_connection_state(
     db: &PgPool,
     user_id: &str,
     revision: i32,
-    state: &str,
+    state: ConnectionState,
     error: Option<&str>,
 ) -> Result<WriteOutcome, sqlx::Error> {
     let result = sqlx::query(
@@ -536,7 +536,7 @@ async fn persist_pending_or_stale(
     revision: i32,
     error_msg: &str,
 ) -> bool {
-    match update_connection_state(db, user_id, revision, "pending", Some(error_msg)).await {
+    match update_connection_state(db, user_id, revision, ConnectionState::Pending, Some(error_msg)).await {
         Ok(WriteOutcome::Applied) => false,
         Ok(WriteOutcome::StaleOrMissing) => {
             tracing::info!(

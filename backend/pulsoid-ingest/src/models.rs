@@ -1,3 +1,4 @@
+use common::pulsoid_state::ConnectionState;
 use serde::Deserialize;
 use sqlx::FromRow;
 
@@ -10,7 +11,7 @@ pub struct PulsoidConnectionRow {
     pub key_version: i32,
     pub token_expires_at: Option<i64>,
     pub last_error: Option<String>,
-    pub connection_state: String,
+    pub connection_state: ConnectionState,
     pub revision: i32,
 }
 

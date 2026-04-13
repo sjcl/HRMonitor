@@ -6,13 +6,14 @@ use serde_json::json;
 use std::sync::Arc;
 
 use common::messages::{subjects, ConnectionChangeCommand};
+use common::pulsoid_state::ConnectionState;
 
 use crate::auth::AuthenticatedUser;
 use crate::error::AppError;
 use crate::models::{PulsoidTokenResponse, SetManualTokenRequest};
 use crate::AppState;
 
-type PulsoidConnectionRow = (String, String, i64, Option<i64>, Option<String>);
+type PulsoidConnectionRow = (String, ConnectionState, i64, Option<i64>, Option<String>);
 
 pub async fn get_pulsoid_token(
     State(state): State<Arc<AppState>>,
