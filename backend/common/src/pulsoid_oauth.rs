@@ -19,10 +19,22 @@ pub struct TokenResponse {
     pub expires_in: i64,
 }
 
-#[derive(Debug)]
 pub enum OAuthError {
     Request(reqwest::Error),
     TokenEndpoint { status: u16, body: String },
+}
+
+impl std::fmt::Debug for OAuthError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OAuthError::Request(e) => f.debug_tuple("Request").field(e).finish(),
+            OAuthError::TokenEndpoint { status, .. } => f
+                .debug_struct("TokenEndpoint")
+                .field("status", status)
+                .field("body", &"<redacted>")
+                .finish(),
+        }
+    }
 }
 
 impl std::fmt::Display for OAuthError {
