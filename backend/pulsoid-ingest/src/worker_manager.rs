@@ -103,21 +103,62 @@ impl WorkerManager {
     /// Logs the branch taken at debug level only — info-level "state actually
     /// changed" logs live in `replace_worker` / `guarded_stop` so that skipped
     /// and no-op invocations do not get double-logged.
+    ///
+    /// If the inner CAS loses a slot race (e.g. a stale reconcile inserted
+    /// first), re-snapshots DB + in-memory state and retries once so the
+    /// fresh caller can overtake the stale worker.
     async fn apply_db_state_for_user(
         &self,
         user_id: &str,
         db_version: Option<i32>,
         active_version: Option<i32>,
     ) {
+        if self.try_apply(user_id, db_version, active_version).await {
+            return;
+        }
+
+        // replace_worker or guarded_stop lost a CAS race.
+        // Re-snapshot both sides and retry once so the fresh caller
+        // can overtake a stale insert.
+        tracing::debug!(user_id, ?db_version, ?active_version, "apply: CAS failed, re-snapshotting for retry");
+
+        let db_version = match sqlx::query_as::<_, (i32,)>(SPAWNABLE_USER_SQL)
+            .bind(user_id)
+            .fetch_optional(&self.db)
+            .await
+        {
+            Ok(row) => row.map(|(rev,)| rev),
+            Err(e) => {
+                tracing::warn!(user_id, "apply retry: DB error: {e}");
+                return;
+            }
+        };
+        let active_version = {
+            let state = self.state.lock().await;
+            state.get(user_id).map(|ws| ws.revision)
+        };
+
+        self.try_apply(user_id, db_version, active_version).await;
+    }
+
+    /// Core decision logic. Returns true if the action succeeded or state is
+    /// already converged; false means a CAS/slot race — caller may retry.
+    async fn try_apply(
+        &self,
+        user_id: &str,
+        db_version: Option<i32>,
+        active_version: Option<i32>,
+    ) -> bool {
         match (db_version, active_version) {
             // DB has row, no worker → spawn
             (Some(db_ver), None) => {
                 tracing::debug!(user_id, db_ver, "apply: spawn branch");
-                self.replace_worker(user_id, db_ver, None).await;
+                self.replace_worker(user_id, db_ver, None).await
             }
             // DB has row, worker at same version → no-op
             (Some(db_ver), Some(active_ver)) if db_ver == active_ver => {
                 tracing::debug!(user_id, db_ver, "apply: in-sync, no-op");
+                true
             }
             // DB has row, worker at different version → guarded replace
             (Some(db_ver), Some(active_ver)) => {
@@ -127,15 +168,15 @@ impl WorkerManager {
                     new_version = db_ver,
                     "apply: replace branch"
                 );
-                self.replace_worker(user_id, db_ver, Some(active_ver)).await;
+                self.replace_worker(user_id, db_ver, Some(active_ver)).await
             }
             // DB has no spawnable row, worker exists → guarded stop
             (None, Some(active_ver)) => {
                 tracing::debug!(user_id, active_ver, "apply: stop branch");
-                self.guarded_stop(user_id, active_ver).await;
+                self.guarded_stop(user_id, active_ver).await
             }
             // Neither → no-op
-            (None, None) => {}
+            (None, None) => true,
         }
     }
 
