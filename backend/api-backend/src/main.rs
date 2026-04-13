@@ -164,7 +164,7 @@ async fn main() {
     // if the Subscriber stream ends. Backoff is only reset after a
     // subscription has stayed up for STABILITY_THRESHOLD — a flapping
     // "subscribe → immediate end" cycle still backs off exponentially.
-    {
+    let mut hr_sub_task = {
         let hr_tx = hr_tx.clone();
         let nats = nats.clone();
         tokio::spawn(async move {
@@ -211,12 +211,12 @@ async fn main() {
                 );
                 tokio::time::sleep(backoff).await;
             }
-        });
-    }
+        })
+    };
 
     // Spawn session cleanup task (runs every hour)
     let cleanup_pool = pool;
-    tokio::spawn(async move {
+    let mut cleanup_task = tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
             match sqlx::query("DELETE FROM sessions WHERE expires < now()")
@@ -365,6 +365,91 @@ async fn main() {
         .expect("Failed to bind to port 3001");
 
     tracing::info!("Server listening on 0.0.0.0:3001");
-    axum::serve(listener, app).await.expect("Server error");
+
+    // Wait for shutdown signal, server exit, or unexpected background task exit.
+    let server = axum::serve(listener, app);
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
+
+    let mut task_failed = false;
+
+    tokio::select! {
+        res = server => {
+            // axum::serve returns only on error or if all listeners close.
+            // Without with_graceful_shutdown(), Ok(()) is also unexpected.
+            match res {
+                Ok(()) => tracing::error!("Server returned unexpectedly"),
+                Err(e) => tracing::error!("Server error: {e}"),
+            }
+            task_failed = true;
+            hr_sub_task.abort();
+            cleanup_task.abort();
+            log_task_exit("NATS hr.received subscriber (sibling)", hr_sub_task.await);
+            log_task_exit("Session cleanup (sibling)", cleanup_task.await);
+        }
+        res = &mut hr_sub_task => {
+            log_task_exit("NATS hr.received subscriber", res);
+            task_failed = true;
+            // server future is cancelled (dropped) when select! exits
+            tracing::info!("HTTP server will be cancelled as select! exits");
+            cleanup_task.abort();
+            log_task_exit("Session cleanup (sibling)", cleanup_task.await);
+        }
+        res = &mut cleanup_task => {
+            log_task_exit("Session cleanup", res);
+            task_failed = true;
+            // server future is cancelled (dropped) when select! exits
+            tracing::info!("HTTP server will be cancelled as select! exits");
+            hr_sub_task.abort();
+            log_task_exit("NATS hr.received subscriber (sibling)", hr_sub_task.await);
+        }
+        _ = &mut shutdown => {
+            tracing::info!("Received shutdown signal");
+            // server future is not spawned — it is cancelled (dropped) when
+            // select! picks this branch, stopping the HTTP listener immediately.
+            // Unbounded graceful drain is avoided because long-lived WebSocket
+            // connections could block shutdown indefinitely. If bounded graceful
+            // drain is needed later, use with_graceful_shutdown() + a timeout.
+            hr_sub_task.abort();
+            cleanup_task.abort();
+            let _ = hr_sub_task.await;
+            let _ = cleanup_task.await;
+        }
+    }
+
+    nats.flush().await.ok();
+
+    if task_failed {
+        tracing::error!("api-backend exiting due to task failure");
+        std::process::exit(1);
+    }
+    tracing::info!("api-backend shut down gracefully");
+}
+
+fn log_task_exit(name: &str, result: Result<(), tokio::task::JoinError>) {
+    match result {
+        Ok(()) => tracing::error!("{name} returned unexpectedly"),
+        Err(e) if e.is_panic() => tracing::error!("{name} panicked: {e}"),
+        Err(e) if e.is_cancelled() => tracing::debug!("{name} cancelled"),
+        Err(e) => tracing::error!("{name} failed: {e}"),
+    }
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm =
+            signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");
+        tokio::select! {
+            biased;
+            _ = sigterm.recv() => {}
+            _ = tokio::signal::ctrl_c() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await.ok();
+    }
 }
 
