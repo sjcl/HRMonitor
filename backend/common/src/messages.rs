@@ -17,3 +17,12 @@ pub struct HeartRateReceived {
 pub struct ConnectionChangeCommand {
     pub user_id: String,
 }
+
+impl ConnectionChangeCommand {
+    pub fn payload_for(user_id: &str) -> Vec<u8> {
+        serde_json::to_vec(&Self {
+            user_id: user_id.to_owned(),
+        })
+        .expect("ConnectionChangeCommand JSON serialization should be infallible")
+    }
+}

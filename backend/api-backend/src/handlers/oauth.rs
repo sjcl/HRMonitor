@@ -6,6 +6,8 @@ use axum::response::{IntoResponse, Redirect, Response};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use common::messages::{subjects, ConnectionChangeCommand};
+
 use crate::AppState;
 use crate::auth::AuthenticatedUser;
 use crate::error::AppError;
@@ -238,13 +240,10 @@ pub async fn callback(
 
     // 9. Publish connection change hint (fire-and-forget).
     //    DB write is the primary success signal; 60s reconcile is the fallback.
-    let cmd = common::messages::ConnectionChangeCommand {
-        user_id: user_id.to_string(),
-    };
-    let payload = serde_json::to_vec(&cmd).unwrap().into();
+    let payload = ConnectionChangeCommand::payload_for(user_id).into();
     if let Err(e) = state
         .nats
-        .publish(common::messages::subjects::CONNECTION_CHANGED, payload)
+        .publish(subjects::CONNECTION_CHANGED, payload)
         .await
     {
         tracing::warn!(

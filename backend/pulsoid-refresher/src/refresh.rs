@@ -26,6 +26,7 @@
 //!    zero-row updates is delegated to [`classify_no_op`] for identical
 //!    logging shape with the other services.
 
+use common::messages::{subjects, ConnectionChangeCommand};
 use common::pulsoid_oauth::{OAuthError, PulsoidOAuthConfig};
 use common::pulsoid_state::{WriteOutcome, classify_no_op};
 use common::time::unix_now_secs;
@@ -568,26 +569,8 @@ async fn write_error_state(
 /// reconcile immediately. Best-effort: failures are logged but do not
 /// affect the caller's outcome.
 async fn publish_connection_changed(nats: &async_nats::Client, user_id: &str) {
-    let cmd = common::messages::ConnectionChangeCommand {
-        user_id: user_id.to_string(),
-    };
-    match serde_json::to_vec(&cmd) {
-        Ok(payload) => {
-            if let Err(e) = nats
-                .publish(common::messages::subjects::CONNECTION_CHANGED, payload.into())
-                .await
-            {
-                tracing::warn!(
-                    user_id,
-                    "Failed to publish connection change hint: {e}"
-                );
-            }
-        }
-        Err(e) => {
-            tracing::warn!(
-                user_id,
-                "Failed to serialize connection change hint: {e}"
-            );
-        }
+    let payload = ConnectionChangeCommand::payload_for(user_id).into();
+    if let Err(e) = nats.publish(subjects::CONNECTION_CHANGED, payload).await {
+        tracing::warn!(user_id, "Failed to publish connection change hint: {e}");
     }
 }

@@ -14,28 +14,6 @@ use crate::AppState;
 
 type PulsoidConnectionRow = (String, String, i64, Option<i64>, Option<String>);
 
-/// Publish a connection change hint to pulsoid-ingest (fire-and-forget).
-///
-/// DB write is the primary success signal — if NATS publish fails, the
-/// 60-second periodic reconcile in pulsoid-ingest will catch up.
-async fn publish_connection_change_hint(
-    nats: &async_nats::Client,
-    user_id: &str,
-    revision: i32,
-) {
-    let cmd = ConnectionChangeCommand {
-        user_id: user_id.to_string(),
-    };
-    let payload = serde_json::to_vec(&cmd).unwrap().into();
-    if let Err(e) = nats.publish(subjects::CONNECTION_CHANGED, payload).await {
-        tracing::warn!(
-            user_id,
-            revision,
-            "Failed to publish connection change hint: {e}"
-        );
-    }
-}
-
 pub async fn get_pulsoid_token(
     State(state): State<Arc<AppState>>,
     Extension(auth_user): Extension<AuthenticatedUser>,
@@ -86,7 +64,10 @@ pub async fn delete_pulsoid_token(
     };
 
     tracing::info!(user_id, revision, "Pulsoid connection deleted");
-    publish_connection_change_hint(&state.nats, user_id, revision).await;
+    let payload = ConnectionChangeCommand::payload_for(user_id).into();
+    if let Err(e) = state.nats.publish(subjects::CONNECTION_CHANGED, payload).await {
+        tracing::warn!(user_id, revision, "Failed to publish connection change hint: {e}");
+    }
 
     Ok(Json(json!({"status": "syncing"})).into_response())
 }
@@ -128,7 +109,10 @@ pub async fn set_manual_pulsoid_token(
     .await?;
 
     tracing::info!(user_id, revision, "Manual Pulsoid token saved");
-    publish_connection_change_hint(&state.nats, user_id, revision).await;
+    let payload = ConnectionChangeCommand::payload_for(user_id).into();
+    if let Err(e) = state.nats.publish(subjects::CONNECTION_CHANGED, payload).await {
+        tracing::warn!(user_id, revision, "Failed to publish connection change hint: {e}");
+    }
 
     Ok(Json(json!({"status": "syncing"})).into_response())
 }
