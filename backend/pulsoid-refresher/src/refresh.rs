@@ -274,7 +274,7 @@ async fn refresh_inner(
                 nats,
                 user_id,
                 expected_revision,
-                &format!("Failed to decrypt refresh token: {e}"),
+                "Token encryption error. Please reconnect.",
                 true,
             )
             .await;
