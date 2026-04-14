@@ -577,8 +577,9 @@ fn sanitize_error(error: &str) -> String {
 
 fn redact_all(s: &mut String, prefix: &str) {
     const PLACEHOLDER: &str = "[REDACTED]";
+    let prefix_lower = prefix.to_ascii_lowercase();
     let mut search_from = 0;
-    while let Some(rel) = s[search_from..].find(prefix) {
+    while let Some(rel) = s[search_from..].to_ascii_lowercase().find(&prefix_lower) {
         let value_start = search_from + rel + prefix.len();
         let value_end = s[value_start..]
             .find(|c: char| matches!(c, '&' | '"' | '\'' | ']' | ')') || c.is_whitespace())
@@ -649,6 +650,14 @@ mod tests {
     #[test]
     fn empty_string_is_unchanged() {
         assert_eq!(sanitize_error(""), "");
+    }
+
+    #[test]
+    fn redacts_bearer_case_insensitive() {
+        let input = "header: bearer abc123 and BEARER def456";
+        let out = sanitize_error(input);
+        assert!(!out.contains("abc123"), "lowercase bearer leaked: {out}");
+        assert!(!out.contains("def456"), "uppercase BEARER leaked: {out}");
     }
 
     #[test]
