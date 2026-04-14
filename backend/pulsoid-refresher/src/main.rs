@@ -2,10 +2,16 @@
 //!
 //! Scans `pulsoid_connections` every `SCAN_INTERVAL_SECS` seconds and refreshes
 //! any row whose `token_expires_at` is within `REFRESH_SAFETY_MARGIN_SECS` of
-//! expiring. The scan loop is serial (await-then-sleep, no `tokio::spawn`) so
-//! a single process can never process the same user twice concurrently.
-//! Cross-process dedup is handled by a Postgres advisory lock taken inside
-//! each `refresh_if_expiring` call.
+//! expiring. Within each scan pass, up to `REFRESH_CONCURRENCY` refreshes run
+//! in parallel via `FuturesUnordered`. Per-user exclusivity is guaranteed by
+//! a Postgres advisory lock inside each `refresh_if_expiring` call.
+//!
+//! **Scan-level serialization is still required.** The main loop awaits each
+//! scan pass to completion before sleeping and starting the next one. Never
+//! wrap `scan_and_refresh_once` in `tokio::spawn` or `tokio::interval` — if
+//! a tick fires before the previous scan finishes, two passes could feed the
+//! same user into `FuturesUnordered` concurrently, wasting an advisory lock
+//! round-trip and a DB connection for the contended duplicate.
 
 mod refresh;
 mod scanner;
@@ -36,23 +42,35 @@ async fn main() {
         .unwrap_or_else(|_| "postgres://hrmonitor:hrmonitor@localhost:5432/hrmonitor".into());
     let nats_url = std::env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".into());
 
-    // Pool sizing: `refresh_if_expiring` holds Tx A (advisory lock only) on
-    // one connection for the full refresh lifetime while acquiring Tx B or
-    // Tx C on a *separate* connection — at most 2 concurrent connections per
-    // refresh. The scanner's `fetch_all` SELECT completes and releases its
-    // connection before the for-loop calls `refresh_if_expiring`, so scanner
-    // and refresh never hold connections simultaneously. The 4th slot is
-    // headroom for the error-path `write_error_state` tx (which acquires a
-    // fresh connection while Tx A is still held) and for future refactors.
+    let refresh_concurrency: usize = match std::env::var("REFRESH_CONCURRENCY") {
+        Ok(v) => v
+            .parse()
+            .expect("REFRESH_CONCURRENCY must be a positive integer"),
+        Err(_) => 10,
+    };
+    assert!(
+        refresh_concurrency >= 1,
+        "REFRESH_CONCURRENCY must be >= 1, got {refresh_concurrency}"
+    );
+
+    // Pool sizing: each in-flight refresh holds Tx A (advisory lock) on one
+    // connection + Tx B or Tx C on a separate connection = 2 connections per
+    // refresh at peak. The +4 covers the scanner's `fetch_all` SELECT,
+    // `write_error_state` (which acquires a fresh connection while Tx A is
+    // still held), and headroom.
     //
-    // `acquire_timeout(5s)`: the serial scan loop (`scanner.rs` for-loop +
-    // `main.rs` await-then-sleep) guarantees at most one refresh in flight
-    // per process, so pool contention should never occur. If that invariant
-    // ever regresses, the 5 s timeout surfaces the bug promptly instead of
-    // hanging on sqlx's default 30 s.
+    // This is a per-process limit. When running multiple refresher instances,
+    // operators must ensure that the sum of all pool sizes stays within the
+    // DB's `max_connections`.
+    //
+    // `acquire_timeout(15s)`: with concurrent refreshes, transient pool
+    // contention is expected under load (e.g. all slots doing HTTP calls
+    // simultaneously). 15s is generous enough to ride out bursts without
+    // false-alarming on a healthy system.
+    let pool_size = (2 * refresh_concurrency + 4) as u32;
     let db = PgPoolOptions::new()
-        .max_connections(4)
-        .acquire_timeout(Duration::from_secs(5))
+        .max_connections(pool_size)
+        .acquire_timeout(Duration::from_secs(15))
         .connect(&database_url)
         .await
         .expect("Failed to connect to Postgres");
@@ -80,6 +98,8 @@ async fn main() {
     tracing::info!(
         scan_interval_secs = SCAN_INTERVAL_SECS,
         safety_margin_secs = refresh::REFRESH_SAFETY_MARGIN_SECS,
+        refresh_concurrency,
+        pool_size,
         "pulsoid-refresher starting scan loop"
     );
 
@@ -88,8 +108,10 @@ async fn main() {
         // IMPORTANT: await the full scan before deciding how long to wait.
         // Never wrap `scan_and_refresh_once` in `tokio::spawn` /
         // `tokio::interval` — if a tick fires before the previous scan
-        // finishes we could double-refresh the same user. Serial
-        // await-then-(maybe-)sleep makes overlap structurally impossible.
+        // finishes, two passes could feed the same user into the concurrent
+        // work queue simultaneously. Serial await-then-(maybe-)sleep makes
+        // scan-level overlap structurally impossible. (Intra-scan parallelism
+        // is intentional and handled by `FuturesUnordered` inside the scanner.)
         //
         // `SCAN_INTERVAL_SECS` is a *target cadence*, not an added delay.
         // After a fast pass we sleep the remainder of the window; after a
@@ -100,8 +122,15 @@ async fn main() {
         // `<= now() + 300s` cutoff unrefreshed until after they had
         // already expired.
         let loop_start = Instant::now();
-        let interrupted =
-            scanner::scan_and_refresh_once(&db, &nats, &encryption, &oauth, &shutdown_rx).await;
+        let interrupted = scanner::scan_and_refresh_once(
+            &db,
+            &nats,
+            &encryption,
+            &oauth,
+            &shutdown_rx,
+            refresh_concurrency,
+        )
+        .await;
         if interrupted {
             break;
         }
