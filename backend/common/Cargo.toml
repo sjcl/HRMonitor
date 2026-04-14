@@ -10,8 +10,10 @@ aes-gcm = "0.10.3"
 base64 = "0.22.1"
 rand = "0.10.0"
 sqlx = { version = "0.8.6", features = ["runtime-tokio", "postgres"] }
+tokio = { version = "1.51.1", features = ["signal", "macros"], optional = true }
 reqwest = { version = "0.13.2", features = ["json", "form"], optional = true }
 urlencoding = { version = "2.1.3", optional = true }
 
 [features]
 oauth = ["dep:reqwest", "dep:urlencoding"]
+signal = ["dep:tokio"]

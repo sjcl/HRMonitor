@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::messages::{ConnectionChangeCommand, subjects};
+use common::signal::shutdown_signal;
 use common::nats_backoff::{advance_backoff, INITIAL_BACKOFF, STABILITY_THRESHOLD};
 use common::token_encryption::TokenEncryption;
 use worker_manager::WorkerManager;
@@ -196,20 +197,3 @@ fn log_task_exit(name: &str, result: Result<(), tokio::task::JoinError>) {
     }
 }
 
-async fn shutdown_signal() {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{signal, SignalKind};
-        let mut sigterm =
-            signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");
-        tokio::select! {
-            biased;
-            _ = sigterm.recv() => {}
-            _ = tokio::signal::ctrl_c() => {}
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        tokio::signal::ctrl_c().await.ok();
-    }
-}

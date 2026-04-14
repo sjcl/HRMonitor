@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-common = { path = "../common", features = ["oauth"] }
+common = { path = "../common", features = ["oauth", "signal"] }
 axum = { version = "0.8.8", features = ["ws"] }
 tokio = { version = "1.51.1", features = ["full"] }
 sqlx = { version = "0.8.6", features = ["runtime-tokio", "postgres"] }

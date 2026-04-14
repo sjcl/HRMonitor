@@ -13,6 +13,7 @@ mod scanner;
 use std::time::{Duration, Instant};
 
 use common::pulsoid_oauth::PulsoidOAuthConfig;
+use common::signal::shutdown_signal;
 use common::token_encryption::TokenEncryption;
 use sqlx::postgres::PgPoolOptions;
 use tokio::sync::watch;
@@ -125,20 +126,3 @@ async fn main() {
     tracing::info!("pulsoid-refresher shut down gracefully");
 }
 
-async fn shutdown_signal() {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{signal, SignalKind};
-        let mut sigterm =
-            signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");
-        tokio::select! {
-            biased;
-            _ = sigterm.recv() => {}
-            _ = tokio::signal::ctrl_c() => {}
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        tokio::signal::ctrl_c().await.ok();
-    }
-}

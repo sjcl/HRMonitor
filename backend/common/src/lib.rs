@@ -1,4 +1,6 @@
 pub mod messages;
+#[cfg(feature = "signal")]
+pub mod signal;
 pub mod nats_backoff;
 #[cfg(feature = "oauth")]
 pub mod pulsoid_oauth;
