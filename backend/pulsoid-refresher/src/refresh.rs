@@ -345,14 +345,8 @@ async fn refresh_inner(
         Err(e) => {
             tracing::warn!(user_id, "Token refresh failed: {e}");
             let is_terminal = match &e {
-                OAuthError::TokenEndpoint { status, body } => {
-                    *status == 401
-                        || serde_json::from_str::<serde_json::Value>(body)
-                            .ok()
-                            .and_then(|v| {
-                                v.get("error")?.as_str().map(|s| s == "invalid_grant")
-                            })
-                            .unwrap_or(false)
+                OAuthError::TokenEndpoint(err) => {
+                    err.status() == 401 || err.has_oauth_error("invalid_grant")
                 }
                 OAuthError::Request(_) => false,
             };
