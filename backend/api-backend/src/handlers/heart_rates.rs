@@ -2,12 +2,11 @@ use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use chrono::NaiveDate;
-use redis::AsyncCommands;
+use common::time::unix_now_secs;
 use std::sync::Arc;
 
 use crate::AppState;
 use crate::auth::{AuthenticatedUser, ViewableUserId};
-use crate::broadcast::LatestHeartRateUpdate;
 use crate::error::AppError;
 use crate::handlers::groups::ensure_active_member;
 use crate::models::{
@@ -20,15 +19,15 @@ fn parse_date(s: &str) -> Result<NaiveDate, AppError> {
         .map_err(|_| AppError::BadRequest(format!("Invalid date: {s}, expected YYYY-MM-DD")))
 }
 
-fn parse_period(s: &str) -> Result<(i64, i64), AppError> {
+fn parse_period(s: &str) -> Result<i64, AppError> {
     match s {
-        "10m" => Ok((600, 600)),
-        "30m" => Ok((1800, 1800)),
-        "1h" => Ok((3600, 3600)),
-        "3h" => Ok((10800, 10800)),
-        "6h" => Ok((21600, 21600)),
-        "12h" => Ok((43200, 43200)),
-        "24h" => Ok((86400, 86400)),
+        "10m" => Ok(600),
+        "30m" => Ok(1800),
+        "1h" => Ok(3600),
+        "3h" => Ok(10800),
+        "6h" => Ok(21600),
+        "12h" => Ok(43200),
+        "24h" => Ok(86400),
         _ => Err(AppError::BadRequest(format!(
             "Invalid period: {s}. Allowed: 10m, 30m, 1h, 3h, 6h, 12h, 24h"
         ))),
@@ -40,8 +39,8 @@ pub async fn list_heart_rates(
     ViewableUserId(user_id): ViewableUserId,
     Query(params): Query<HeartRateQuery>,
 ) -> Result<Json<Vec<HeartRateResponse>>, AppError> {
-    let (seconds, limit) = parse_period(&params.period)?;
-    let now = chrono::Utc::now().timestamp();
+    let seconds = parse_period(&params.period)?;
+    let now = unix_now_secs();
     let from = now - seconds;
 
     let records: Vec<HeartRateResponse> = sqlx::query_as(
@@ -53,7 +52,7 @@ pub async fn list_heart_rates(
     )
     .bind(&user_id)
     .bind(from)
-    .bind(limit)
+    .bind(seconds)
     .fetch_all(&state.db)
     .await?;
 
@@ -119,8 +118,8 @@ pub async fn minute_stats(
     ViewableUserId(user_id): ViewableUserId,
     Query(params): Query<HeartRateQuery>,
 ) -> Result<Json<Vec<MinuteStatsResponse>>, AppError> {
-    let (seconds, _) = parse_period(&params.period)?;
-    let now = chrono::Utc::now().timestamp();
+    let seconds = parse_period(&params.period)?;
+    let now = unix_now_secs();
     let from = now - seconds;
 
     let records: Vec<MinuteStatsResponse> = sqlx::query_as(
@@ -172,64 +171,14 @@ pub async fn minute_stats_by_date(
     Ok(Json(records))
 }
 
-pub async fn latest_heart_rate(
-    State(state): State<Arc<AppState>>,
-    ViewableUserId(user_id): ViewableUserId,
-) -> Result<Json<HeartRateResponse>, AppError> {
-    // Try Redis first
-    {
-        let mut redis = state.redis.lock().await;
-        let key = format!("latest_bpm:{user_id}");
-        if let Ok(Some(value)) = redis.get::<_, Option<String>>(&key).await
-            && let Ok(cached) = serde_json::from_str::<LatestHeartRateUpdate>(&value)
-        {
-            return Ok(Json(HeartRateResponse {
-                bpm: cached.bpm,
-                timestamp: cached.recorded_at,
-            }));
-        }
-    }
-
-    // Fall back to DB
-    let record: HeartRateResponse = sqlx::query_as(
-        "SELECT bpm, EXTRACT(EPOCH FROM recorded_at)::BIGINT as timestamp FROM heart_rate_records WHERE user_id = $1 ORDER BY recorded_at DESC LIMIT 1"
-    )
-    .bind(&user_id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| AppError::NotFound("No heart rate data found".into()))?;
-
-    // Write back to Redis
-    {
-        let update = LatestHeartRateUpdate {
-            user_id: user_id.clone(),
-            bpm: record.bpm,
-            recorded_at: record.timestamp,
-            received_at: record.timestamp,
-        };
-        if let Ok(json) = serde_json::to_string(&update) {
-            let mut redis = state.redis.lock().await;
-            let key = format!("latest_bpm:{user_id}");
-            let _: Result<Option<String>, _> = redis::cmd("SET")
-                .arg(&key)
-                .arg(&json)
-                .arg("NX")
-                .query_async(&mut *redis)
-                .await;
-        }
-    }
-
-    Ok(Json(record))
-}
-
 pub async fn group_heart_rates(
     State(state): State<Arc<AppState>>,
     Path(group_id): Path<String>,
     Extension(auth_user): Extension<AuthenticatedUser>,
     Query(params): Query<HeartRateQuery>,
 ) -> Result<Json<Vec<GroupHeartRateResponse>>, AppError> {
-    let (seconds, _) = parse_period(&params.period)?;
-    let now = chrono::Utc::now().timestamp();
+    let seconds = parse_period(&params.period)?;
+    let now = unix_now_secs();
     let from = now - seconds;
 
     ensure_active_member(&state.db, &group_id, &auth_user.id).await?;
@@ -263,8 +212,8 @@ pub async fn group_minute_stats(
     Extension(auth_user): Extension<AuthenticatedUser>,
     Query(params): Query<HeartRateQuery>,
 ) -> Result<Json<Vec<GroupMinuteStatsResponse>>, AppError> {
-    let (seconds, _) = parse_period(&params.period)?;
-    let now = chrono::Utc::now().timestamp();
+    let seconds = parse_period(&params.period)?;
+    let now = unix_now_secs();
     let from = now - seconds;
 
     ensure_active_member(&state.db, &group_id, &auth_user.id).await?;

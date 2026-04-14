@@ -6,6 +6,8 @@ use axum::response::{IntoResponse, Redirect, Response};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use common::messages::{subjects, ConnectionChangeCommand};
+
 use crate::AppState;
 use crate::auth::AuthenticatedUser;
 use crate::error::AppError;
@@ -204,9 +206,9 @@ pub async fn callback(
     let (enc_refresh, _) = state.token_encryption.encrypt(&refresh_token_plain);
 
     // 8. UPSERT into pulsoid_connections
-    let upsert_result = sqlx::query(
-        "INSERT INTO pulsoid_connections (user_id, source, access_token, refresh_token, key_version, token_expires_at, last_error)
-         VALUES ($1, 'oauth', $2, $3, $4, now() + make_interval(secs => $5), NULL)
+    let upsert_result: Result<(i32,), _> = sqlx::query_as(
+        "INSERT INTO pulsoid_connections (user_id, source, access_token, refresh_token, key_version, token_expires_at, last_error, connection_state, state_updated_at)
+         VALUES ($1, 'oauth', $2, $3, $4, now() + make_interval(secs => $5), NULL, 'pending', now())
          ON CONFLICT (user_id) DO UPDATE SET
             source = 'oauth',
             access_token = EXCLUDED.access_token,
@@ -214,27 +216,43 @@ pub async fn callback(
             key_version = EXCLUDED.key_version,
             token_expires_at = EXCLUDED.token_expires_at,
             last_connected_at = NULL,
-            last_error = NULL",
+            last_error = NULL,
+            connection_state = 'pending',
+            state_updated_at = now(),
+            revision = nextval('pulsoid_revision_seq')
+         RETURNING revision",
     )
     .bind(user_id)
     .bind(&enc_access)
     .bind(&enc_refresh)
     .bind(key_version as i32)
     .bind(token_response.expires_in as f64)
-    .execute(&state.db)
+    .fetch_one(&state.db)
     .await;
 
-    if let Err(e) = upsert_result {
-        tracing::error!(user_id = %user_id, "Failed to save tokens: {e}");
-        return Redirect::to(&format!("{return_to}?pulsoid=exchange_failed")).into_response();
+    let revision = match upsert_result {
+        Ok((rev,)) => rev,
+        Err(e) => {
+            tracing::error!(user_id = %user_id, "Failed to save tokens: {e}");
+            return Redirect::to(&format!("{return_to}?pulsoid=exchange_failed")).into_response();
+        }
+    };
+
+    // 9. Publish connection change hint (fire-and-forget).
+    //    DB write is the primary success signal; 60s reconcile is the fallback.
+    let payload = ConnectionChangeCommand::payload_for(user_id).into();
+    if let Err(e) = state
+        .nats
+        .publish(subjects::CONNECTION_CHANGED, payload)
+        .await
+    {
+        tracing::warn!(
+            user_id = %user_id,
+            revision,
+            "Failed to publish connection change hint: {e}"
+        );
     }
 
-    // 9. Notify worker manager
-    state
-        .worker_manager
-        .notify_connection_changed(user_id)
-        .await;
-
-    tracing::info!(user_id = %user_id, "Pulsoid authorized successfully");
+    tracing::info!(user_id = %user_id, revision, "Pulsoid authorized successfully");
     Redirect::to(&format!("{return_to}?pulsoid=authorized")).into_response()
 }

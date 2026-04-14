@@ -103,7 +103,6 @@ SQLite file at `/data/app.db`
 
 #### Heart rate
 - GET /api/users/:id/heart-rates
-- GET /api/users/:id/latest-heart-rate
 
 ---
 

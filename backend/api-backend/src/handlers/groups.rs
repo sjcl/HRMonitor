@@ -1,5 +1,6 @@
 use axum::extract::{Path, State};
 use axum::{Extension, Json};
+use common::time::unix_now_secs;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -515,7 +516,7 @@ pub async fn create_invite(
     .await;
 
     // Auto-generated constraint name from: group_invites.target_user_id REFERENCES users(id)
-    // See migrations/20260407000000_share_groups.sql:52
+    // See migration/migrations/20260407000000_share_groups.sql:52
     let (invite_id, expires_at): (String, i64) = match result {
         Ok(row) => row,
         Err(sqlx::Error::Database(ref db_err))
@@ -650,10 +651,7 @@ pub async fn get_invite_info(
     .await?
     .ok_or_else(|| AppError::NotFound("Invite not found".into()))?;
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
+    let now = unix_now_secs();
 
     let (valid, reason) = if row.revoked {
         (false, Some("revoked".to_string()))

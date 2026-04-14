@@ -1,17 +1,15 @@
+use std::time::Duration;
+
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 
 pub async fn init_pool(database_url: &str) -> sqlx::Result<PgPool> {
     let pool = PgPoolOptions::new()
         .max_connections(5)
+        .acquire_timeout(Duration::from_secs(5))
         .connect(database_url)
         .await?;
 
-    sqlx::migrate!()
-        .run(&pool)
-        .await
-        .expect("Failed to run migrations");
-
-    tracing::info!("Database initialized (migrations applied)");
+    tracing::info!("Database connected");
     Ok(pool)
 }

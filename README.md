@@ -159,7 +159,6 @@ npm run dev
 | `GET` | `/api/users/{id}/heart-rates?period=` | 心拍データ取得 (期間指定) |
 | `GET` | `/api/users/{id}/heart-rates/by-date?date=` | 日付指定の心拍データ |
 | `GET` | `/api/users/{id}/heart-rates/daily-stats?from=&to=` | 日別統計 |
-| `GET` | `/api/users/{id}/latest-heart-rate` | 最新心拍数 (Redis 優先) |
 
 ### Pulsoid OAuth
 

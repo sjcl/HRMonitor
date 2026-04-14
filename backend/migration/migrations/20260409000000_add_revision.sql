@@ -1,0 +1,1 @@
+ALTER TABLE pulsoid_connections ADD COLUMN revision INTEGER NOT NULL DEFAULT 1;

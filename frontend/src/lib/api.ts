@@ -19,8 +19,14 @@ export interface HeartRateProfile {
 
 export interface PulsoidTokenStatus {
   source: "oauth" | "manual";
+  connection_state: "pending" | "connected" | "error";
+  state_updated_at: number;
   last_connected_at: number | null;
   last_error: string | null;
+}
+
+export interface TokenMutationResult {
+  status: "syncing";
 }
 
 export interface HeartRateRecord {
@@ -90,7 +96,7 @@ export function createPulsoidConnect(returnTo?: string) {
 }
 
 export function setManualPulsoidToken(accessToken: string) {
-  return fetchJson<void>(`/api/users/me/pulsoid-token`, {
+  return fetchJson<TokenMutationResult>(`/api/users/me/pulsoid-token`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ access_token: accessToken }),
@@ -98,7 +104,7 @@ export function setManualPulsoidToken(accessToken: string) {
 }
 
 export function deletePulsoidToken() {
-  return fetchJson<void>(`/api/users/me/pulsoid-token`, {
+  return fetchJson<TokenMutationResult>(`/api/users/me/pulsoid-token`, {
     method: "DELETE",
   });
 }
@@ -149,6 +155,3 @@ export function getHeartRatesByDate(userId: string, date: string) {
   );
 }
 
-export function getLatestHeartRate(userId: string) {
-  return fetchJson<HeartRateRecord>(`/api/users/${userId}/latest-heart-rate`);
-}

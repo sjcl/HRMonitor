@@ -40,10 +40,3 @@ DELETE /api/pulsoid-tokens/:id
 
 GET /api/users/:id/heart-rates?from=&to=&limit=
 
-GET /api/users/:id/latest-heart-rate
-
-Response:
-{
-"bpm": 78,
-"timestamp": 1710000000
-}

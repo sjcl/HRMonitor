@@ -1,11 +1,11 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { getPulsoidToken, createPulsoidConnect, setManualPulsoidToken, deletePulsoidToken } from "@/lib/api";
 
 const RESULT_MESSAGES: Record<string, { text: string; color: string }> = {
-  authorized: { text: "Pulsoid authorized. Connecting...", color: "text-blue-400" },
+  authorized: { text: "Pulsoid authorized. Usually connects within a few seconds; may take up to a minute.", color: "text-blue-400" },
   denied: { text: "Pulsoid authorization was denied.", color: "text-yellow-400" },
   exchange_failed: { text: "Connection failed. Please try again.", color: "text-red-400" },
   invalid_state: { text: "Security verification failed. Please try again.", color: "text-red-400" },
@@ -18,6 +18,8 @@ export function PulsoidToken({
 }) {
   const queryClient = useQueryClient();
   const [manualToken, setManualToken] = useState("");
+  const [pendingWarning, setPendingWarning] = useState<string | null>(null);
+  const warningTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Clear the query param from URL after displaying
   useEffect(() => {
@@ -32,12 +34,26 @@ export function PulsoidToken({
     refetchOnWindowFocus: false,
     refetchInterval: (query) => {
       const data = query.state.data;
-      if (data && !data.last_connected_at && !data.last_error) {
+      if (data && data.connection_state === "pending") {
         return 2000;
       }
       return false;
     },
   });
+
+  // Clear warning when token reaches a terminal state (connected or errored)
+  useEffect(() => {
+    if (token && token.connection_state !== "pending") {
+      setPendingWarning(null);
+    }
+  }, [token]);
+
+  // Cleanup timer on unmount
+  useEffect(() => {
+    return () => {
+      if (warningTimerRef.current) clearTimeout(warningTimerRef.current);
+    };
+  }, []);
 
   const connectMutation = useMutation({
     mutationFn: () => createPulsoidConnect("/settings"),
@@ -49,6 +65,8 @@ export function PulsoidToken({
   const manualMutation = useMutation({
     mutationFn: (accessToken: string) => setManualPulsoidToken(accessToken),
     onSuccess: () => {
+      setPendingWarning("Saved. Usually connects within a few seconds; may take up to a minute.");
+      if (warningTimerRef.current) clearTimeout(warningTimerRef.current);
       setManualToken("");
       queryClient.invalidateQueries({ queryKey: ["pulsoid-token"] });
       queryClient.invalidateQueries({ queryKey: ["users"] });
@@ -58,6 +76,9 @@ export function PulsoidToken({
   const disconnectMutation = useMutation({
     mutationFn: () => deletePulsoidToken(),
     onSuccess: () => {
+      setPendingWarning("Disconnected. Worker usually stops within a few seconds; may take up to a minute.");
+      if (warningTimerRef.current) clearTimeout(warningTimerRef.current);
+      warningTimerRef.current = setTimeout(() => setPendingWarning(null), 90_000);
       queryClient.invalidateQueries({ queryKey: ["pulsoid-token"] });
       queryClient.invalidateQueries({ queryKey: ["users"] });
     },
@@ -75,6 +96,9 @@ export function PulsoidToken({
       <div className="border border-gray-800 rounded-lg p-4 space-y-4">
         {resultMessage && (
           <p className={`text-sm ${resultMessage.color}`}>{resultMessage.text}</p>
+        )}
+        {pendingWarning && (
+          <p className="text-sm text-yellow-400">{pendingWarning}</p>
         )}
         <p className="text-gray-500 text-sm">No Pulsoid connection configured</p>
 
@@ -133,24 +157,33 @@ export function PulsoidToken({
       {resultMessage && (
         <p className={`text-sm ${resultMessage.color}`}>{resultMessage.text}</p>
       )}
+      {pendingWarning && (
+        <p className="text-sm text-yellow-400">{pendingWarning}</p>
+      )}
       <div className="flex items-center justify-between">
         <div>
           <span className="text-xs text-gray-500 bg-gray-800 px-2 py-0.5 rounded mr-2">
             {sourceLabel}
           </span>
           <span className="text-sm text-gray-400">
-            {token.last_error ? (
-              <span className="text-red-400">Error: {token.last_error}</span>
-            ) : token.last_connected_at ? (
+            {token.connection_state === "error" ? (
+              <span className="text-red-400">Error: {token.last_error ?? "Unknown error"}</span>
+            ) : token.connection_state === "connected" ? (
               <>
                 <span className="text-green-400">Connected</span>
-                <span className="ml-3">
-                  Last connected:{" "}
-                  {new Date(token.last_connected_at * 1000).toLocaleString()}
-                </span>
+                {token.last_connected_at && (
+                  <span className="ml-3">
+                    Last connected:{" "}
+                    {new Date(token.last_connected_at * 1000).toLocaleString()}
+                  </span>
+                )}
               </>
             ) : (
-              <span className="text-yellow-400">Connecting...</span>
+              <span className="text-yellow-400">
+                {token.last_error
+                  ? `Reconnecting: ${token.last_error}`
+                  : "Connecting..."}
+              </span>
             )}
           </span>
         </div>
