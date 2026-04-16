@@ -244,6 +244,7 @@ export function GroupsListView() {
                       type="text"
                       value={newName}
                       onChange={(e) => setNewName(e.target.value)}
+                      maxLength={50}
                       placeholder="未設定の場合、メンバー名が表示されます"
                       className="bg-gray-800 border border-gray-700 rounded px-3 py-2 w-full text-sm"
                     />
@@ -264,7 +265,10 @@ export function GroupsListView() {
                   <div className="flex gap-2 mt-1">
                     <button
                       onClick={() => createGroupMutation.mutate()}
-                      disabled={createGroupMutation.isPending}
+                      disabled={
+                        createGroupMutation.isPending ||
+                        [...newName.trim()].length > 50
+                      }
                       className="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded text-sm disabled:opacity-50 flex-1"
                     >
                       {createGroupMutation.isPending ? "作成中..." : "作成"}

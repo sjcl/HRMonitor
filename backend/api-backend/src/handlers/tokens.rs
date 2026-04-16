@@ -80,13 +80,7 @@ pub async fn set_manual_pulsoid_token(
 ) -> Result<Response, AppError> {
     let user_id = &auth_user.id;
 
-    let token = body.access_token.trim();
-    if token.is_empty() {
-        return Err(AppError::BadRequest("Access token cannot be empty".into()));
-    }
-    if token.len() > 4096 {
-        return Err(AppError::BadRequest("Access token too long".into()));
-    }
+    let token = crate::validation::validate_secret(&body.access_token, 4096, "access_token")?;
 
     let (enc_access, key_version) = state.token_encryption.encrypt(token);
 

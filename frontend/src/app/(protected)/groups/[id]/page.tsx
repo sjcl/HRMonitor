@@ -55,7 +55,7 @@ export default function GroupDetailPage() {
   const updateMutation = useMutation({
     mutationFn: () =>
       updateGroup(id, {
-        name: editName,
+        name: editName.trim(),
         invite_policy: editPolicy,
       }),
     onSuccess: () => {
@@ -153,6 +153,7 @@ export default function GroupDetailPage() {
                 type="text"
                 value={editName}
                 onChange={(e) => setEditName(e.target.value)}
+                maxLength={50}
                 className="bg-gray-800 border border-gray-700 rounded px-3 py-2 w-full text-sm"
               />
             </div>
@@ -172,7 +173,10 @@ export default function GroupDetailPage() {
             <div className="flex gap-2">
               <button
                 onClick={() => updateMutation.mutate()}
-                disabled={updateMutation.isPending}
+                disabled={
+                  updateMutation.isPending ||
+                  [...editName.trim()].length > 50
+                }
                 className="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded text-sm disabled:opacity-50"
               >
                 保存

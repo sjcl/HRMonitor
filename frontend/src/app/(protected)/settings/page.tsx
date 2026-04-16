@@ -76,6 +76,7 @@ function SettingsContent() {
               type="text"
               value={editName}
               onChange={(e) => setEditName(e.target.value)}
+              maxLength={50}
               className="bg-gray-800 border border-gray-700 rounded px-3 py-2 w-full"
             />
           </div>
@@ -114,7 +115,11 @@ function SettingsContent() {
                   heart_rate_visibility: editVisibility,
                 })
               }
-              disabled={updateMutation.isPending || !editName.trim()}
+              disabled={
+                updateMutation.isPending ||
+                !editName.trim() ||
+                [...editName.trim()].length > 50
+              }
               className="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded text-sm disabled:opacity-50 self-start"
             >
               {updateMutation.isPending ? "Saving..." : "Save"}

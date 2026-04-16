@@ -129,6 +129,12 @@ pub async fn create_group(
         ));
     }
 
+    let name = body
+        .name
+        .as_deref()
+        .map(|s| crate::validation::validate_optional_name(s, "name"))
+        .transpose()?;
+
     let policy = body.invite_policy.as_deref().unwrap_or("group");
 
     let mut tx = state.db.begin().await?;
@@ -138,7 +144,7 @@ pub async fn create_group(
          VALUES ($1, $2)
          RETURNING id, EXTRACT(EPOCH FROM created_at)::BIGINT as created_at",
     )
-    .bind(&body.name)
+    .bind(&name)
     .bind(policy)
     .fetch_one(&mut *tx)
     .await?;
@@ -156,7 +162,7 @@ pub async fn create_group(
 
     let members = fetch_active_members(&state.db, &group_id).await?;
     let display_name = compute_display_name(
-        &body.name,
+        &name,
         &members,
         &auth_user.id,
         |m| &m.user_id,
@@ -165,7 +171,7 @@ pub async fn create_group(
 
     Ok(Json(GroupDetail {
         id: group_id,
-        name: body.name,
+        name,
         display_name,
         invite_policy: policy.to_string(),
         my_sharing: true,
@@ -344,13 +350,19 @@ pub async fn update_group(
         ));
     }
 
+    let name = body
+        .name
+        .as_deref()
+        .map(|s| crate::validation::validate_optional_name(s, "name"))
+        .transpose()?;
+
     let result = sqlx::query(
         "UPDATE groups SET
             name = COALESCE($1, name),
             invite_policy = COALESCE($2, invite_policy)
          WHERE id = $3",
     )
-    .bind(&body.name)
+    .bind(&name)
     .bind(&body.invite_policy)
     .bind(&id)
     .execute(&state.db)
@@ -482,16 +494,10 @@ pub async fn create_invite(
     }
 
     let expires_in_hours = body.expires_in_hours.unwrap_or(24 * 7); // 7 days default
-    if expires_in_hours <= 0 {
-        return Err(AppError::BadRequest(
-            "expires_in_hours must be positive".into(),
-        ));
-    }
+    crate::validation::validate_range(expires_in_hours, 1i64, 8760, "expires_in_hours")?;
 
-    if let Some(max_uses) = body.max_uses
-        && max_uses <= 0
-    {
-        return Err(AppError::BadRequest("max_uses must be positive".into()));
+    if let Some(max_uses) = body.max_uses {
+        crate::validation::validate_range(max_uses, 1i32, 1000, "max_uses")?;
     }
 
     if let Some(ref target_user_id) = body.target_user_id {

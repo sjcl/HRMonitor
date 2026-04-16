@@ -52,11 +52,17 @@ pub async fn update_user(
 ) -> Result<Json<SelfUser>, AppError> {
     let id = auth_user.id.clone();
 
-    if let Some(ref display_name) = body.display_name
-        && display_name.trim().is_empty()
-    {
-        return Err(AppError::BadRequest("Display name cannot be empty".into()));
-    }
+    let display_name = body
+        .display_name
+        .as_deref()
+        .map(|s| crate::validation::validate_required_name(s, "display_name"))
+        .transpose()?;
+
+    let timezone = body
+        .timezone
+        .as_deref()
+        .map(|s| crate::validation::validate_timezone(s).map(str::to_string))
+        .transpose()?;
 
     if let Some(ref vis) = body.heart_rate_visibility
         && !VALID_VISIBILITIES.contains(&vis.as_str())
@@ -71,8 +77,8 @@ pub async fn update_user(
     let result = sqlx::query(
         "UPDATE users SET display_name = COALESCE($1, display_name), timezone = COALESCE($2, timezone), heart_rate_visibility = COALESCE($3, heart_rate_visibility), updated_at = to_timestamp($4) WHERE id = $5"
     )
-        .bind(&body.display_name)
-        .bind(&body.timezone)
+        .bind(&display_name)
+        .bind(&timezone)
         .bind(&body.heart_rate_visibility)
         .bind(now)
         .bind(&id)

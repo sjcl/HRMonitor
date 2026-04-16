@@ -3,6 +3,7 @@ mod db;
 mod error;
 mod handlers;
 mod models;
+mod validation;
 
 use common::signal::shutdown_signal;
 
