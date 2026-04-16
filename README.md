@@ -123,16 +123,20 @@ docker compose -f docker-compose.yml --profile prod up --build
 ### 4. ローカル開発
 
 ```bash
-# Backend
+# Backend (api-backend)
 cd backend
 DATABASE_URL=postgres://hrmonitor:hrmonitor@localhost:5432/hrmonitor \
 REDIS_URL=redis://localhost:6379 \
-cargo run
+NATS_URL=nats://localhost:4222 \
+AUTH_URL=http://localhost:3000 \
+cargo run -p api-backend
 
 # Frontend
 cd frontend
 npm run dev
 ```
+
+> `AUTH_URL` は `/api/ws/*` の Origin ヘッダ検証に使用されます。release ビルドでは未設定だと起動時に panic します (fail-closed)。debug ビルドでは `http://localhost:3000` にフォールバックしますが、フロントエンドを別オリジンで動かす場合は必ず一致させてください。
 
 ## Docker サービス一覧
 

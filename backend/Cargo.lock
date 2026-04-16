@@ -87,9 +87,9 @@ dependencies = [
  "sha2 0.11.0",
  "sqlx",
  "tokio",
- "tower-http",
  "tracing",
  "tracing-subscriber",
+ "url",
  "urlencoding",
  "uuid",
 ]

@@ -53,6 +53,7 @@ services:
       - PULSOID_CLIENT_SECRET=${PULSOID_CLIENT_SECRET}
       - PULSOID_REDIRECT_URI=${PULSOID_REDIRECT_URI}
       - TOKEN_ENCRYPTION_KEY=${TOKEN_ENCRYPTION_KEY}
+      - AUTH_URL=${AUTH_URL:?AUTH_URL must be set}
     expose:
       - "3001"
     depends_on:

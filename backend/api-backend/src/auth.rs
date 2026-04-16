@@ -176,3 +176,30 @@ fn parse_cookie<'a>(header: &'a str, name: &str) -> Option<&'a str> {
     }
     None
 }
+
+/// Rejects WebSocket upgrade requests whose `Origin` header is not the
+/// configured public origin. Browsers always send `Origin` on WS handshakes
+/// (RFC 6455 §10.2), and `Origin` cannot be forged from JavaScript, so an
+/// exact-match allowlist is the standard defense against cross-site WS
+/// connection attempts. Non-browser clients (curl, tests, server-to-server)
+/// legitimately omit `Origin`; we allow that case because the session cookie
+/// still gates the endpoint and an attacker without the victim's browser
+/// cannot replay the victim's cookie.
+pub async fn require_ws_origin(
+    State(state): State<Arc<AppState>>,
+    req: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let origin = req
+        .headers()
+        .get(axum::http::header::ORIGIN)
+        .and_then(|v| v.to_str().ok());
+    match origin {
+        None => Ok(next.run(req).await),
+        Some(o) if o == state.allowed_ws_origin => Ok(next.run(req).await),
+        Some(o) => {
+            tracing::warn!(origin = %o, "Rejecting WS upgrade from disallowed origin");
+            Err(StatusCode::FORBIDDEN)
+        }
+    }
+}

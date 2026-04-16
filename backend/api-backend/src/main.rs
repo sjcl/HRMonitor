@@ -13,7 +13,6 @@ use futures_util::StreamExt;
 use redis::{AsyncCommands, ExistenceCheck, SetExpiry, SetOptions};
 use std::sync::Arc;
 use tokio::sync::broadcast as tokio_broadcast;
-use tower_http::cors::CorsLayer;
 
 use auth::AuthConfig;
 use common::messages::{subjects, HeartRateReceived};
@@ -31,6 +30,53 @@ pub struct AppState {
     pub auth_config: AuthConfig,
     pub pulsoid_oauth: PulsoidOAuthConfig,
     pub token_encryption: TokenEncryption,
+    /// Canonical browser origin (`scheme://host[:port]`) allowed to open
+    /// WebSocket connections. Derived from `AUTH_URL` at startup.
+    pub allowed_ws_origin: String,
+}
+
+/// Parses `AUTH_URL` into a canonical browser origin (`scheme://host[:port]`).
+/// Fails closed: in release builds a missing `AUTH_URL` panics at startup so
+/// misconfiguration cannot silently reopen cross-site WS access. In debug
+/// builds we fall back to `http://localhost:3000` with a loud warning for
+/// local `cargo run` workflows. A present-but-unparseable value always panics.
+fn load_allowed_ws_origin() -> String {
+    let raw = std::env::var("AUTH_URL").ok();
+    let raw = match raw.as_deref() {
+        Some(s) if !s.is_empty() => s,
+        _ => {
+            if cfg!(debug_assertions) {
+                tracing::warn!(
+                    "AUTH_URL is not set; defaulting allowed WS origin to \
+                     http://localhost:3000 (debug build only — release builds panic)"
+                );
+                return canonical_ws_origin("http://localhost:3000");
+            } else {
+                panic!(
+                    "AUTH_URL must be set in release builds. It is used to \
+                     validate the Origin header on /api/ws/* handshakes."
+                );
+            }
+        }
+    };
+
+    canonical_ws_origin(raw)
+}
+
+/// Serializes `raw` into the canonical browser-form origin
+/// (`scheme://host[:port]`, default ports stripped). Browsers follow the HTML
+/// spec and omit `:443` / `:80` from the `Origin` header, so the allowlist
+/// must match that form for a strict string compare to work. `url::Origin`'s
+/// `ascii_serialization()` implements the same spec and is the authoritative
+/// normalization step.
+fn canonical_ws_origin(raw: &str) -> String {
+    let parsed = url::Url::parse(raw)
+        .unwrap_or_else(|e| panic!("AUTH_URL is not a valid URL ({raw:?}): {e}"));
+    let origin = parsed.origin();
+    if !origin.is_tuple() {
+        panic!("AUTH_URL has no host or has an opaque origin ({raw:?})");
+    }
+    origin.ascii_serialization()
 }
 
 #[tokio::main]
@@ -147,6 +193,9 @@ async fn main() {
         "Auth config loaded"
     );
 
+    let allowed_ws_origin = load_allowed_ws_origin();
+    tracing::info!(allowed_ws_origin = %allowed_ws_origin, "WS origin allowlist loaded");
+
     let state = Arc::new(AppState {
         db: pool.clone(),
         redis: redis_conn.clone(),
@@ -155,6 +204,7 @@ async fn main() {
         auth_config,
         pulsoid_oauth,
         token_encryption,
+        allowed_ws_origin,
     });
 
     // Spawn hr.received NATS subscriber.
@@ -341,12 +391,6 @@ async fn main() {
             "/api/invites/{token}/accept",
             axum::routing::post(handlers::groups::accept_invite),
         )
-        .route("/api/ws/me", get(handlers::ws::my_heart_rate_ws))
-        .route("/api/ws/users/{id}", get(handlers::ws::user_heart_rate_ws))
-        .route(
-            "/api/ws/groups/{id}",
-            get(handlers::ws::group_heart_rate_ws),
-        )
         .route(
             "/api/oauth/pulsoid/callback",
             get(handlers::oauth::callback),
@@ -356,10 +400,32 @@ async fn main() {
             auth::require_auth,
         ));
 
+    // WebSocket routes live in their own sub-router so that `require_ws_origin`
+    // runs *before* `require_auth`. Attack traffic from a foreign origin is
+    // rejected with 403 before any DB-backed authorization work runs. Axum
+    // applies layers outer-first, so the last `.layer(...)` call below is the
+    // outermost — request flow is `require_ws_origin` → `require_auth` →
+    // handler.
+    let ws_routes = Router::new()
+        .route("/api/ws/me", get(handlers::ws::my_heart_rate_ws))
+        .route("/api/ws/users/{id}", get(handlers::ws::user_heart_rate_ws))
+        .route(
+            "/api/ws/groups/{id}",
+            get(handlers::ws::group_heart_rate_ws),
+        )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_auth,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_ws_origin,
+        ));
+
     let app = Router::new()
         .merge(public_routes)
         .merge(protected_routes)
-        .layer(CorsLayer::permissive())
+        .merge(ws_routes)
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3001")
@@ -437,4 +503,63 @@ fn log_task_exit(name: &str, result: Result<(), tokio::task::JoinError>) {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::canonical_ws_origin;
 
+    #[test]
+    fn preserves_non_default_port() {
+        assert_eq!(
+            canonical_ws_origin("http://localhost:3000"),
+            "http://localhost:3000"
+        );
+        assert_eq!(
+            canonical_ws_origin("https://example.com:8443"),
+            "https://example.com:8443"
+        );
+    }
+
+    #[test]
+    fn strips_default_http_port() {
+        assert_eq!(
+            canonical_ws_origin("http://example.com:80"),
+            "http://example.com"
+        );
+    }
+
+    #[test]
+    fn strips_default_https_port() {
+        assert_eq!(
+            canonical_ws_origin("https://example.com:443"),
+            "https://example.com"
+        );
+    }
+
+    #[test]
+    fn no_port_unchanged() {
+        assert_eq!(
+            canonical_ws_origin("https://example.com"),
+            "https://example.com"
+        );
+    }
+
+    #[test]
+    fn drops_path_and_query() {
+        assert_eq!(
+            canonical_ws_origin("https://example.com/path?x=1"),
+            "https://example.com"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "has no host or has an opaque origin")]
+    fn rejects_opaque_origin() {
+        canonical_ws_origin("file:///etc/passwd");
+    }
+
+    #[test]
+    #[should_panic(expected = "is not a valid URL")]
+    fn rejects_parse_error() {
+        canonical_ws_origin("not a url");
+    }
+}
