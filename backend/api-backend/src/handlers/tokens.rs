@@ -8,8 +8,7 @@ use std::sync::Arc;
 use common::messages::{subjects, ConnectionChangeCommand};
 use common::pulsoid_state::ConnectionState;
 
-use crate::auth::AuthenticatedUser;
-use crate::error::AppError;
+use crate::auth::{AppError, AuthenticatedUser};
 use crate::models::{PulsoidTokenResponse, SetManualTokenRequest};
 use crate::AppState;
 

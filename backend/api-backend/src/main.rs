@@ -1,6 +1,5 @@
 mod auth;
 mod db;
-mod error;
 mod handlers;
 mod models;
 mod validation;
@@ -10,74 +9,29 @@ use common::signal::shutdown_signal;
 use axum::middleware;
 use axum::routing::get;
 use axum::Router;
-use futures_util::StreamExt;
-use redis::{AsyncCommands, ExistenceCheck, SetExpiry, SetOptions};
 use std::sync::Arc;
-use tokio::sync::broadcast as tokio_broadcast;
 
 use auth::AuthConfig;
-use common::messages::{subjects, HeartRateReceived};
-use common::nats_backoff::{advance_backoff, INITIAL_BACKOFF, STABILITY_THRESHOLD};
+use common::auth::AuthContext;
 use common::pulsoid_oauth::PulsoidOAuthConfig;
-use common::redis_keys::{latest_bpm_key, serialize_latest_bpm, LATEST_BPM_TTL_SECS};
-use common::time::unix_now_secs;
 use common::token_encryption::TokenEncryption;
 
 pub struct AppState {
     pub db: sqlx::PgPool,
     pub redis: redis::aio::MultiplexedConnection,
     pub nats: async_nats::Client,
-    pub hr_broadcast: tokio_broadcast::Sender<HeartRateReceived>,
     pub auth_config: AuthConfig,
     pub pulsoid_oauth: PulsoidOAuthConfig,
     pub token_encryption: TokenEncryption,
-    /// Canonical browser origin (`scheme://host[:port]`) allowed to open
-    /// WebSocket connections. Derived from `AUTH_URL` at startup.
-    pub allowed_ws_origin: String,
 }
 
-/// Parses `AUTH_URL` into a canonical browser origin (`scheme://host[:port]`).
-/// Fails closed: in release builds a missing `AUTH_URL` panics at startup so
-/// misconfiguration cannot silently reopen cross-site WS access. In debug
-/// builds we fall back to `http://localhost:3000` with a loud warning for
-/// local `cargo run` workflows. A present-but-unparseable value always panics.
-fn load_allowed_ws_origin() -> String {
-    let raw = std::env::var("AUTH_URL").ok();
-    let raw = match raw.as_deref() {
-        Some(s) if !s.is_empty() => s,
-        _ => {
-            if cfg!(debug_assertions) {
-                tracing::warn!(
-                    "AUTH_URL is not set; defaulting allowed WS origin to \
-                     http://localhost:3000 (debug build only — release builds panic)"
-                );
-                return canonical_ws_origin("http://localhost:3000");
-            } else {
-                panic!(
-                    "AUTH_URL must be set in release builds. It is used to \
-                     validate the Origin header on /api/ws/* handshakes."
-                );
-            }
-        }
-    };
-
-    canonical_ws_origin(raw)
-}
-
-/// Serializes `raw` into the canonical browser-form origin
-/// (`scheme://host[:port]`, default ports stripped). Browsers follow the HTML
-/// spec and omit `:443` / `:80` from the `Origin` header, so the allowlist
-/// must match that form for a strict string compare to work. `url::Origin`'s
-/// `ascii_serialization()` implements the same spec and is the authoritative
-/// normalization step.
-fn canonical_ws_origin(raw: &str) -> String {
-    let parsed = url::Url::parse(raw)
-        .unwrap_or_else(|e| panic!("AUTH_URL is not a valid URL ({raw:?}): {e}"));
-    let origin = parsed.origin();
-    if !origin.is_tuple() {
-        panic!("AUTH_URL has no host or has an opaque origin ({raw:?})");
+impl AuthContext for AppState {
+    fn db(&self) -> &sqlx::PgPool {
+        &self.db
     }
-    origin.ascii_serialization()
+    fn auth_config(&self) -> &AuthConfig {
+        &self.auth_config
+    }
 }
 
 #[tokio::main]
@@ -101,88 +55,18 @@ async fn main() {
         .expect("Failed to initialize database");
 
     let redis_client = redis::Client::open(redis_url).expect("Invalid REDIS_URL");
-    let mut redis_conn = redis_client
+    let redis_conn = redis_client
         .get_multiplexed_async_connection()
         .await
         .expect("Failed to connect to Redis");
 
     tracing::info!("Connected to Redis");
 
-    // Warm latest_bpm cache from DB: each user's latest record within 6h.
-    // Redis is now the authoritative latest-state store (no DB fallback on WS
-    // read), so on boot we rehydrate from the hypertable once. Individual TTLs
-    // are set to the record's remaining freshness so older warmed values decay
-    // out naturally, preserving the "≤ 6h old" invariant.
-    //
-    // The write is `SET NX EX`: pulsoid-ingest keeps running while api-backend
-    // restarts, and its Redis value is strictly fresher than anything we can
-    // read back from the hypertable (pulsoid-ingest commits to DB first, then
-    // to Redis, and may publish more frames before this warm-up even runs).
-    // An unconditional SET would clobber that live value with a stale DB row,
-    // so we only populate keys that are missing (true cold start, or keys
-    // whose TTL lapsed while api-backend was down).
-    {
-        let rows: Vec<(String, i32, i64, i64)> = sqlx::query_as(
-            "SELECT DISTINCT ON (user_id) user_id, bpm, \
-             EXTRACT(EPOCH FROM recorded_at)::BIGINT AS recorded_at, \
-             EXTRACT(EPOCH FROM received_at)::BIGINT AS received_at \
-             FROM heart_rate_records \
-             WHERE recorded_at >= NOW() - INTERVAL '6 hours' \
-             ORDER BY user_id, recorded_at DESC, received_at DESC, id DESC",
-        )
-        .fetch_all(&pool)
-        .await
-        .expect("Failed to warm latest_bpm cache from DB");
-
-        let now = unix_now_secs();
-
-        let mut warmed = 0u64;
-        let mut skipped = 0u64;
-        for (user_id, bpm, recorded_at, received_at) in rows {
-            let update = HeartRateReceived {
-                user_id: user_id.clone(),
-                bpm,
-                recorded_at,
-                received_at,
-            };
-            let value = serialize_latest_bpm(&update);
-            let key = latest_bpm_key(&user_id);
-            let age = (now - recorded_at).max(0) as u64;
-            let ttl = LATEST_BPM_TTL_SECS.saturating_sub(age).max(60);
-            let opts = SetOptions::default()
-                .conditional_set(ExistenceCheck::NX)
-                .with_expiration(SetExpiry::EX(ttl));
-            match redis_conn
-                .set_options::<_, _, Option<String>>(&key, &value, opts)
-                .await
-            {
-                Ok(None) => {
-                    // Key already existed — pulsoid-ingest has a fresher
-                    // value, leave it alone.
-                    skipped += 1;
-                }
-                Ok(Some(_)) => {
-                    warmed += 1;
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        user_id = %user_id,
-                        error = %e,
-                        "warm-up SET NX failed"
-                    );
-                }
-            }
-        }
-        tracing::info!(warmed, skipped, "Warmed latest_bpm cache from DB");
-    }
-
     let nats = async_nats::connect(&nats_url)
         .await
         .expect("Failed to connect to NATS");
 
     tracing::info!("Connected to NATS at {nats_url}");
-
-    let (hr_tx, _) = tokio_broadcast::channel::<HeartRateReceived>(256);
 
     let pulsoid_oauth = PulsoidOAuthConfig::from_env_full();
     let token_encryption = TokenEncryption::from_env();
@@ -194,78 +78,14 @@ async fn main() {
         "Auth config loaded"
     );
 
-    let allowed_ws_origin = load_allowed_ws_origin();
-    tracing::info!(allowed_ws_origin = %allowed_ws_origin, "WS origin allowlist loaded");
-
     let state = Arc::new(AppState {
         db: pool.clone(),
         redis: redis_conn.clone(),
         nats: nats.clone(),
-        hr_broadcast: hr_tx.clone(),
         auth_config,
         pulsoid_oauth,
         token_encryption,
-        allowed_ws_origin,
     });
-
-    // Spawn hr.received NATS subscriber.
-    // pulsoid-ingest writes Redis directly, so api-backend only broadcasts
-    // the event to connected WebSocket clients. NATS delivery is best-effort
-    // — WS self-heal (every 10s) backfills any missed updates from Redis.
-    //
-    // Wrapped in an outer reconnect loop so the task does not silently die
-    // if the Subscriber stream ends. Backoff is only reset after a
-    // subscription has stayed up for STABILITY_THRESHOLD — a flapping
-    // "subscribe → immediate end" cycle still backs off exponentially.
-    let mut hr_sub_task = {
-        let hr_tx = hr_tx.clone();
-        let nats = nats.clone();
-        tokio::spawn(async move {
-            let mut backoff = INITIAL_BACKOFF;
-            loop {
-                let mut hr_sub = match nats.subscribe(subjects::HR_RECEIVED).await {
-                    Ok(s) => {
-                        tracing::info!("Subscribed to {}", subjects::HR_RECEIVED);
-                        s
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "Failed to subscribe to {}: {e}; retrying in {:?}",
-                            subjects::HR_RECEIVED,
-                            backoff
-                        );
-                        tokio::time::sleep(backoff).await;
-                        backoff = advance_backoff(backoff);
-                        continue;
-                    }
-                };
-
-                let subscribed_at = std::time::Instant::now();
-                while let Some(msg) = hr_sub.next().await {
-                    match serde_json::from_slice::<HeartRateReceived>(&msg.payload) {
-                        Ok(update) => {
-                            let _ = hr_tx.send(update);
-                        }
-                        Err(e) => {
-                            tracing::warn!("Failed to parse hr.received event: {e}");
-                        }
-                    }
-                }
-
-                if subscribed_at.elapsed() >= STABILITY_THRESHOLD {
-                    backoff = INITIAL_BACKOFF;
-                } else {
-                    backoff = advance_backoff(backoff);
-                }
-                tracing::warn!(
-                    "{} subscription ended; resubscribing in {:?}",
-                    subjects::HR_RECEIVED,
-                    backoff
-                );
-                tokio::time::sleep(backoff).await;
-            }
-        })
-    };
 
     // Spawn session cleanup task (runs every hour)
     let cleanup_pool = pool;
@@ -401,32 +221,9 @@ async fn main() {
             auth::require_auth,
         ));
 
-    // WebSocket routes live in their own sub-router so that `require_ws_origin`
-    // runs *before* `require_auth`. Attack traffic from a foreign origin is
-    // rejected with 403 before any DB-backed authorization work runs. Axum
-    // applies layers outer-first, so the last `.layer(...)` call below is the
-    // outermost — request flow is `require_ws_origin` → `require_auth` →
-    // handler.
-    let ws_routes = Router::new()
-        .route("/api/ws/me", get(handlers::ws::my_heart_rate_ws))
-        .route("/api/ws/users/{id}", get(handlers::ws::user_heart_rate_ws))
-        .route(
-            "/api/ws/groups/{id}",
-            get(handlers::ws::group_heart_rate_ws),
-        )
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            auth::require_auth,
-        ))
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            auth::require_ws_origin,
-        ));
-
     let app = Router::new()
         .merge(public_routes)
         .merge(protected_routes)
-        .merge(ws_routes)
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3001")
@@ -451,37 +248,17 @@ async fn main() {
                 Err(e) => tracing::error!("Server error: {e}"),
             }
             task_failed = true;
-            hr_sub_task.abort();
-            cleanup_task.abort();
-            log_task_exit("NATS hr.received subscriber (sibling)", hr_sub_task.await);
-            log_task_exit("Session cleanup (sibling)", cleanup_task.await);
-        }
-        res = &mut hr_sub_task => {
-            log_task_exit("NATS hr.received subscriber", res);
-            task_failed = true;
-            // server future is cancelled (dropped) when select! exits
-            tracing::info!("HTTP server will be cancelled as select! exits");
             cleanup_task.abort();
             log_task_exit("Session cleanup (sibling)", cleanup_task.await);
         }
         res = &mut cleanup_task => {
             log_task_exit("Session cleanup", res);
             task_failed = true;
-            // server future is cancelled (dropped) when select! exits
             tracing::info!("HTTP server will be cancelled as select! exits");
-            hr_sub_task.abort();
-            log_task_exit("NATS hr.received subscriber (sibling)", hr_sub_task.await);
         }
         _ = &mut shutdown => {
             tracing::info!("Received shutdown signal");
-            // server future is not spawned — it is cancelled (dropped) when
-            // select! picks this branch, stopping the HTTP listener immediately.
-            // Unbounded graceful drain is avoided because long-lived WebSocket
-            // connections could block shutdown indefinitely. If bounded graceful
-            // drain is needed later, use with_graceful_shutdown() + a timeout.
-            hr_sub_task.abort();
             cleanup_task.abort();
-            let _ = hr_sub_task.await;
             let _ = cleanup_task.await;
         }
     }
@@ -504,63 +281,3 @@ fn log_task_exit(name: &str, result: Result<(), tokio::task::JoinError>) {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::canonical_ws_origin;
-
-    #[test]
-    fn preserves_non_default_port() {
-        assert_eq!(
-            canonical_ws_origin("http://localhost:3000"),
-            "http://localhost:3000"
-        );
-        assert_eq!(
-            canonical_ws_origin("https://example.com:8443"),
-            "https://example.com:8443"
-        );
-    }
-
-    #[test]
-    fn strips_default_http_port() {
-        assert_eq!(
-            canonical_ws_origin("http://example.com:80"),
-            "http://example.com"
-        );
-    }
-
-    #[test]
-    fn strips_default_https_port() {
-        assert_eq!(
-            canonical_ws_origin("https://example.com:443"),
-            "https://example.com"
-        );
-    }
-
-    #[test]
-    fn no_port_unchanged() {
-        assert_eq!(
-            canonical_ws_origin("https://example.com"),
-            "https://example.com"
-        );
-    }
-
-    #[test]
-    fn drops_path_and_query() {
-        assert_eq!(
-            canonical_ws_origin("https://example.com/path?x=1"),
-            "https://example.com"
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "has no host or has an opaque origin")]
-    fn rejects_opaque_origin() {
-        canonical_ws_origin("file:///etc/passwd");
-    }
-
-    #[test]
-    #[should_panic(expected = "is not a valid URL")]
-    fn rejects_parse_error() {
-        canonical_ws_origin("not a url");
-    }
-}

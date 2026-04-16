@@ -6,9 +6,7 @@ use common::time::unix_now_secs;
 use std::sync::Arc;
 
 use crate::AppState;
-use crate::auth::{AuthenticatedUser, ViewableUserId};
-use crate::error::AppError;
-use crate::handlers::groups::ensure_active_member;
+use crate::auth::{AppError, AuthenticatedUser, ViewableUserId, ensure_active_member};
 use crate::models::{
     DailyStatsQuery, DailyStatsResponse, GroupHeartRateResponse, GroupMinuteStatsResponse,
     HeartRateByDateQuery, HeartRateQuery, HeartRateResponse, MinuteStatsResponse,

@@ -9,10 +9,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::time::{Duration, interval};
 
-use crate::AppState;
-use crate::auth::{AuthenticatedUser, ViewableUserId, ensure_can_view_user};
-use crate::error::AppError;
-use crate::handlers::groups::ensure_active_member;
+use crate::{ViewableUserId, WsState};
+use common::access::{ensure_active_member, ensure_can_view_user};
+use common::auth::AuthenticatedUser;
+use common::error::AppError;
 use common::messages::HeartRateReceived;
 use common::redis_keys::latest_bpm_key;
 
@@ -33,7 +33,7 @@ enum WsServerMessage {
 
 pub async fn my_heart_rate_ws(
     ws: WebSocketUpgrade,
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<WsState>>,
     Extension(auth_user): Extension<AuthenticatedUser>,
 ) -> impl IntoResponse {
     let user_id = auth_user.id.clone();
@@ -47,7 +47,7 @@ pub async fn my_heart_rate_ws(
 pub async fn user_heart_rate_ws(
     ws: WebSocketUpgrade,
     ViewableUserId(target_id): ViewableUserId,
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<WsState>>,
     Extension(auth_user): Extension<AuthenticatedUser>,
 ) -> Result<impl IntoResponse, AppError> {
     let reauth = if auth_user.id == target_id {
@@ -65,7 +65,7 @@ pub async fn user_heart_rate_ws(
 pub async fn group_heart_rate_ws(
     ws: WebSocketUpgrade,
     Path(group_id): Path<String>,
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<WsState>>,
     Extension(auth_user): Extension<AuthenticatedUser>,
 ) -> Result<impl IntoResponse, AppError> {
     ensure_active_member(&state.db, &group_id, &auth_user.id).await?;
@@ -78,7 +78,7 @@ pub async fn group_heart_rate_ws(
 
 async fn handle_single_user_ws(
     socket: WebSocket,
-    state: Arc<AppState>,
+    state: Arc<WsState>,
     target_user_id: String,
     reauth: Option<AuthenticatedUser>, // None = self, skip reauth
 ) {
@@ -144,13 +144,6 @@ async fn handle_single_user_ws(
                 }
             }
             _ = self_heal_interval.tick() => {
-                // Reread Redis directly to recover from NATS publish loss or
-                // TTL expiry. On Hit where any field of the payload differs
-                // from what we last sent, send an Update. On Miss (cache
-                // expired / key deleted) send a Snapshot with null so the
-                // client drops the stale value. On Error (Redis read failure)
-                // keep last_sent as-is and send nothing — otherwise a
-                // transient outage would clear the client's display.
                 let snap = read_snapshot(&state, std::slice::from_ref(&target_user_id)).await;
                 log_snapshot_errors("single_user self_heal", &snap);
                 match snap.get(&target_user_id) {
@@ -194,26 +187,21 @@ async fn handle_single_user_ws(
 
 async fn handle_group_ws(
     socket: WebSocket,
-    state: Arc<AppState>,
+    state: Arc<WsState>,
     auth_user: AuthenticatedUser,
     group_id: String,
 ) {
     let (mut sender, mut receiver) = socket.split();
     let mut broadcast_rx = state.hr_broadcast.subscribe();
 
-    // Fetch initial member list (sharing=true OR self, status=active)
     let mut members: HashSet<String> =
         match fetch_sharing_members(&state.db, &group_id, &auth_user.id).await {
             Ok(m) => m,
             Err(_) => return,
         };
 
-    // Track the full last value we sent per user so self-heal can detect
-    // both Some→Some updates (including same-second bpm changes) and
-    // Some→None expiries.
     let mut last_sent: HashMap<String, HeartRateReceived> = HashMap::new();
 
-    // Send initial snapshot
     let user_ids: Vec<String> = members.iter().cloned().collect();
     let snap = read_snapshot(&state, &user_ids).await;
     log_snapshot_errors("group initial", &snap);
@@ -232,10 +220,10 @@ async fn handle_group_ws(
     }
 
     let mut reauth_interval = interval(Duration::from_secs(30));
-    reauth_interval.tick().await; // consume the immediate first tick
+    reauth_interval.tick().await;
 
     let mut self_heal_interval = interval(Duration::from_secs(10));
-    self_heal_interval.tick().await; // consume the immediate first tick
+    self_heal_interval.tick().await;
 
     loop {
         tokio::select! {
@@ -265,20 +253,15 @@ async fn handle_group_ws(
                 }
             }
             _ = reauth_interval.tick() => {
-                // Re-check membership and sharing
                 let new_members: HashSet<String> = match fetch_sharing_members(&state.db, &group_id, &auth_user.id).await {
                     Ok(m) => m,
-                    Err(_) => break, // group deleted or self removed
+                    Err(_) => break,
                 };
 
-                // Check self is still a member
                 if !new_members.contains(&auth_user.id) {
-                    // Self was removed or left — but fetch_sharing_members always
-                    // includes self if active, so absence means we left/group deleted.
                     break;
                 }
 
-                // Detect removed members → send snapshot with null
                 let removed: Vec<String> = members.difference(&new_members).cloned().collect();
                 if !removed.is_empty() {
                     let mut removal_data: HashMap<String, Option<HeartRateReceived>> =
@@ -295,7 +278,6 @@ async fn handle_group_ws(
                     }
                 }
 
-                // Detect added members → send snapshot with their data
                 let added: Vec<String> = new_members.difference(&members).cloned().collect();
                 if !added.is_empty() {
                     let snap = read_snapshot(&state, &added).await;
@@ -318,12 +300,6 @@ async fn handle_group_ws(
                 members = new_members;
             }
             _ = self_heal_interval.tick() => {
-                // Reread Redis for all current members and emit a Snapshot
-                // with only the diffs: new values (any field of the payload
-                // differs from what we last sent) and Hit→Miss transitions
-                // (TTL expiry). On Redis read Error, preserve last_sent for
-                // that user and skip it — otherwise a transient outage would
-                // clear every connected client's display.
                 let user_ids: Vec<String> = members.iter().cloned().collect();
                 let snap = read_snapshot(&state, &user_ids).await;
                 log_snapshot_errors("group self_heal", &snap);
@@ -363,9 +339,6 @@ async fn handle_group_ws(
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Fetch active group members who have sharing enabled, plus the auth user
-/// regardless of their sharing flag. Returns an error if the auth user is not
-/// an active member (i.e. left or group deleted).
 async fn fetch_sharing_members(
     db: &sqlx::PgPool,
     group_id: &str,
@@ -385,7 +358,6 @@ async fn fetch_sharing_members(
 
     let set: HashSet<String> = rows.into_iter().map(|(uid,)| uid).collect();
 
-    // If auth user is not in the result, they are no longer an active member
     if !set.contains(auth_user_id) {
         return Err(AppError::NotFound("Group not found".into()));
     }
@@ -393,32 +365,14 @@ async fn fetch_sharing_members(
     Ok(set)
 }
 
-/// Per-user outcome of a Redis snapshot read.
-///
-/// `Miss` means the cache is authoritatively empty (key absent / TTL expired /
-/// payload corrupt): the client should stop showing a stale value. `Error`
-/// means we could not read Redis at all (connection reset, timeout, etc.) and
-/// the caller must preserve whatever it last sent — otherwise a transient
-/// Redis outage would briefly clear every client's display.
 enum SnapshotEntry {
     Hit(HeartRateReceived),
     Miss,
     Error,
 }
 
-/// Read the latest heart rate for each user from Redis.
-///
-/// Redis is the authoritative latest-state store (populated on boot via
-/// warm-up and on every heartbeat by pulsoid-ingest). There is deliberately
-/// no DB fallback: if a user's key is missing or expired, they are reported
-/// as `Miss` ("no recent data") rather than surfacing stale hypertable rows.
-///
-/// This function does **not** log Redis connection errors on its own: the
-/// group self-heal path calls it every 10 s with N users, so logging per key
-/// would spam N × ticks lines during an outage. Callers should invoke
-/// [`log_snapshot_errors`] once per call to emit a single aggregated warn.
 async fn read_snapshot(
-    state: &AppState,
+    state: &WsState,
     user_ids: &[String],
 ) -> HashMap<String, SnapshotEntry> {
     let mut results: HashMap<String, SnapshotEntry> = HashMap::with_capacity(user_ids.len());
@@ -460,9 +414,6 @@ async fn read_snapshot(
     results
 }
 
-/// Emit at most one `warn` line per snapshot read if any users hit a Redis
-/// error. Aggregating here keeps group WS self-heal from spamming N lines
-/// every 10 seconds during an outage.
 fn log_snapshot_errors(context: &str, entries: &HashMap<String, SnapshotEntry>) {
     let error_count = entries
         .values()
@@ -478,11 +429,6 @@ fn log_snapshot_errors(context: &str, entries: &HashMap<String, SnapshotEntry>) 
     }
 }
 
-/// Convert a snapshot read result into the wire format the WS protocol uses.
-/// Both `Miss` and `Error` are reported to the client as `None` because the
-/// wire protocol has no third state — callers that need to distinguish them
-/// for self-heal bookkeeping must inspect [`SnapshotEntry`] directly before
-/// calling this.
 fn to_ws_snapshot(
     entries: HashMap<String, SnapshotEntry>,
 ) -> HashMap<String, Option<HeartRateReceived>> {

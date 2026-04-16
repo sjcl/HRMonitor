@@ -16,6 +16,8 @@ RUN mkdir -p migration/src && echo 'fn main() {}' > migration/src/main.rs
 COPY migration/Cargo.toml migration/Cargo.toml
 RUN mkdir -p pulsoid-refresher/src && echo 'fn main() {}' > pulsoid-refresher/src/main.rs
 COPY pulsoid-refresher/Cargo.toml pulsoid-refresher/Cargo.toml
+RUN mkdir -p ws-gateway/src && echo 'fn main() {}' > ws-gateway/src/main.rs
+COPY ws-gateway/Cargo.toml ws-gateway/Cargo.toml
 
 RUN cargo build --release -p pulsoid-ingest
 

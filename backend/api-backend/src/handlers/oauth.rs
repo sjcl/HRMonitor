@@ -9,8 +9,7 @@ use std::sync::Arc;
 use common::messages::{subjects, ConnectionChangeCommand};
 
 use crate::AppState;
-use crate::auth::AuthenticatedUser;
-use crate::error::AppError;
+use crate::auth::{AppError, AuthenticatedUser};
 
 // --- ReturnTo enum (open redirect prevention) ---
 
