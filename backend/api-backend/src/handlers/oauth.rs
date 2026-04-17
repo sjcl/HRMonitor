@@ -6,10 +6,11 @@ use axum::response::{IntoResponse, Redirect, Response};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use common::error::AppError;
 use common::messages::{subjects, ConnectionChangeCommand};
 
 use crate::AppState;
-use crate::auth::{AppError, AuthenticatedUser};
+use crate::auth::AuthenticatedUser;
 
 // --- ReturnTo enum (open redirect prevention) ---
 

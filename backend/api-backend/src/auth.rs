@@ -2,11 +2,12 @@ use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use std::sync::Arc;
 
+use common::error::AppError;
+
 use crate::AppState;
 
 pub use common::access::{ensure_active_member, ensure_can_view_user};
 pub use common::auth::{AuthConfig, AuthContext, AuthenticatedUser, UserIdParam};
-pub use common::error::AppError;
 
 pub async fn require_auth(
     state: axum::extract::State<Arc<AppState>>,

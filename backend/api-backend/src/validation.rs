@@ -1,6 +1,6 @@
 use std::fmt::Display;
 
-use crate::auth::AppError;
+use common::error::AppError;
 
 const MAX_NAME_CHARS: usize = 50;
 const MAX_TIMEZONE_BYTES: usize = 64;

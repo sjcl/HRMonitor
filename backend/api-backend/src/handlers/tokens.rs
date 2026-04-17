@@ -5,10 +5,11 @@ use axum::Json;
 use serde_json::json;
 use std::sync::Arc;
 
+use common::error::AppError;
 use common::messages::{subjects, ConnectionChangeCommand};
 use common::pulsoid_state::ConnectionState;
 
-use crate::auth::{AppError, AuthenticatedUser};
+use crate::auth::AuthenticatedUser;
 use crate::models::{PulsoidTokenResponse, SetManualTokenRequest};
 use crate::AppState;
 

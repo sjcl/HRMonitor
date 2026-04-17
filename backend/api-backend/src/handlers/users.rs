@@ -4,8 +4,10 @@ use axum::extract::State;
 use common::time::unix_now_secs;
 use std::sync::Arc;
 
+use common::error::AppError;
+
 use crate::AppState;
-use crate::auth::{AppError, AuthenticatedUser, ViewableUserId};
+use crate::auth::{AuthenticatedUser, ViewableUserId};
 use crate::models::{HeartRateProfile, SelfUser, UpdateUserRequest, UserRow};
 
 const SELECT_USER_ROW: &str = "SELECT u.id, u.display_name, u.timezone,

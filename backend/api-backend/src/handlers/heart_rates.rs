@@ -5,8 +5,10 @@ use chrono::NaiveDate;
 use common::time::unix_now_secs;
 use std::sync::Arc;
 
+use common::error::AppError;
+
 use crate::AppState;
-use crate::auth::{AppError, AuthenticatedUser, ViewableUserId, ensure_active_member};
+use crate::auth::{AuthenticatedUser, ViewableUserId, ensure_active_member};
 use crate::models::{
     DailyStatsQuery, DailyStatsResponse, GroupHeartRateResponse, GroupMinuteStatsResponse,
     HeartRateByDateQuery, HeartRateQuery, HeartRateResponse, MinuteStatsResponse,

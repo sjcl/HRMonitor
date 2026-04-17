@@ -5,8 +5,10 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use common::error::AppError;
+
 use crate::AppState;
-use crate::auth::{AppError, AuthenticatedUser, ensure_active_member};
+use crate::auth::{AuthenticatedUser, ensure_active_member};
 use crate::models::{
     AcceptInviteRequest, AcceptInviteResponse, CreateGroupRequest, CreateInviteRequest,
     CreateInviteResponse, GroupDetail, GroupListItem, GroupMemberInfo, GroupMemberPreview,
