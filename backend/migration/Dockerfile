@@ -24,8 +24,6 @@ RUN cargo build --release -p migration
 
 FROM debian:trixie-slim
 
-RUN apt-get update && apt-get install -y libssl3t64 libpq5 ca-certificates && rm -rf /var/lib/apt/lists/*
-
 COPY --from=builder /app/target/release/migration /usr/local/bin/migration
 
 CMD ["migration"]

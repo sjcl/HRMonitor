@@ -23,7 +23,7 @@ RUN cargo build --release -p pulsoid-ingest
 
 FROM debian:trixie-slim
 
-RUN apt-get update && apt-get install -y libssl3t64 libpq5 ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y libssl3t64 ca-certificates && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/release/pulsoid-ingest /usr/local/bin/pulsoid-ingest
 
