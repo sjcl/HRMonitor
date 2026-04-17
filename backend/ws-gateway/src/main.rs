@@ -18,7 +18,7 @@ use common::error::AppError;
 use common::messages::{HeartRateReceived, subjects};
 use common::nats_backoff::{INITIAL_BACKOFF, STABILITY_THRESHOLD, advance_backoff};
 use common::redis_keys::{LATEST_BPM_TTL_SECS, latest_bpm_key, serialize_latest_bpm};
-use common::signal::shutdown_signal;
+use common::signal::{log_task_exit, shutdown_signal};
 use common::time::unix_now_secs;
 
 pub struct WsState {
@@ -336,15 +336,6 @@ async fn main() {
         std::process::exit(1);
     }
     tracing::info!("ws-gateway shut down gracefully");
-}
-
-fn log_task_exit(name: &str, result: Result<(), tokio::task::JoinError>) {
-    match result {
-        Ok(()) => tracing::error!("{name} returned unexpectedly"),
-        Err(e) if e.is_panic() => tracing::error!("{name} panicked: {e}"),
-        Err(e) if e.is_cancelled() => tracing::debug!("{name} cancelled"),
-        Err(e) => tracing::error!("{name} failed: {e}"),
-    }
 }
 
 #[cfg(test)]
