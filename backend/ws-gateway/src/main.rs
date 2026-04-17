@@ -9,8 +9,11 @@ use axum::routing::get;
 use axum::Router;
 use futures_util::StreamExt;
 use redis::{AsyncCommands, ExistenceCheck, SetExpiry, SetOptions};
+use std::future::IntoFuture;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::broadcast as tokio_broadcast;
+use tokio_util::sync::CancellationToken;
 
 use common::access::ensure_can_view_user;
 use common::auth::{AuthConfig, AuthContext, AuthenticatedUser, UserIdParam};
@@ -29,6 +32,7 @@ pub struct WsState {
     /// Canonical browser origin (`scheme://host[:port]`) allowed to open
     /// WebSocket connections. Derived from `AUTH_URL` at startup.
     pub allowed_ws_origin: String,
+    pub shutdown: CancellationToken,
 }
 
 impl AuthContext for WsState {
@@ -239,12 +243,25 @@ async fn main() {
     let allowed_ws_origin = load_allowed_ws_origin();
     tracing::info!(allowed_ws_origin = %allowed_ws_origin, "WS origin allowlist loaded");
 
+    let shutdown = CancellationToken::new();
+    // Detached task: flips the shutdown token when SIGTERM/SIGINT arrives.
+    // Dropped with the tokio runtime at end of main.
+    tokio::spawn({
+        let token = shutdown.clone();
+        async move {
+            shutdown_signal().await;
+            tracing::info!("Received shutdown signal");
+            token.cancel();
+        }
+    });
+
     let state = Arc::new(WsState {
         db: pool.clone(),
         redis: redis_conn.clone(),
         hr_broadcast: hr_tx.clone(),
         auth_config,
         allowed_ws_origin,
+        shutdown: shutdown.clone(),
     });
 
     // Spawn hr.received NATS subscriber.
@@ -324,34 +341,58 @@ async fn main() {
 
     tracing::info!("Server listening on 0.0.0.0:3002");
 
-    let server = axum::serve(listener, app);
-    let shutdown = shutdown_signal();
-    tokio::pin!(shutdown);
+    let serve = axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown.clone().cancelled_owned())
+        .into_future();
+    tokio::pin!(serve);
 
     let mut task_failed = false;
+    let mut serve_done = false;
+    let mut hr_sub_done = false;
 
+    // Phase 1: wait for the first terminal event. No timeout here — `serve`
+    // resolves only after the shutdown token triggers the graceful drain.
     tokio::select! {
-        res = server => {
-            match res {
-                Ok(()) => tracing::error!("Server returned unexpectedly"),
-                Err(e) => tracing::error!("Server error: {e}"),
-            }
-            task_failed = true;
-            hr_sub_task.abort();
-            log_task_exit("NATS hr.received subscriber (sibling)", hr_sub_task.await);
+        _ = shutdown.cancelled() => {
+            // Normal shutdown path. The detached signal-watcher task flipped
+            // the token; with_graceful_shutdown is already draining.
         }
         res = &mut hr_sub_task => {
             log_task_exit("NATS hr.received subscriber", res);
             task_failed = true;
-            tracing::info!("HTTP server will be cancelled as select! exits");
+            hr_sub_done = true;
+            // Trip the token so WS handlers get a best-effort 1001 and
+            // with_graceful_shutdown stops accepting new connections.
+            shutdown.cancel();
         }
-        _ = &mut shutdown => {
-            tracing::info!("Received shutdown signal");
-            hr_sub_task.abort();
-            let _ = hr_sub_task.await;
+        res = &mut serve => {
+            match res {
+                Ok(()) => tracing::error!("Server returned unexpectedly before shutdown"),
+                Err(e) => tracing::error!("Server error: {e}"),
+            }
+            task_failed = true;
+            serve_done = true;
         }
     }
 
+    // Phase 2: grace clock starts here — only after shutdown is active.
+    if !serve_done {
+        match tokio::time::timeout(Duration::from_secs(5), &mut serve).await {
+            Ok(Ok(())) => tracing::info!("HTTP server shut down cleanly"),
+            Ok(Err(e)) => {
+                tracing::error!("Server error during drain: {e}");
+                task_failed = true;
+            }
+            Err(_) => tracing::warn!("Graceful shutdown timed out after 5s"),
+        }
+    }
+
+    // Guard against re-polling an already-completed JoinHandle
+    // (tokio panics on re-poll after Ready).
+    if !hr_sub_done {
+        hr_sub_task.abort();
+        let _ = hr_sub_task.await;
+    }
     warm_up_task.abort();
     let _ = warm_up_task.await;
 

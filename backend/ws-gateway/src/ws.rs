@@ -1,5 +1,5 @@
 use axum::Extension;
-use axum::extract::ws::{Message, WebSocket};
+use axum::extract::ws::{CloseFrame, Message, Utf8Bytes, WebSocket, close_code};
 use axum::extract::{Path, State, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
@@ -15,6 +15,15 @@ use common::auth::AuthenticatedUser;
 use common::error::AppError;
 use common::messages::HeartRateReceived;
 use common::redis_keys::latest_bpm_key;
+
+/// Close frame sent by every WS handler when the shutdown token fires.
+/// Shared so production code and tests stay locked on the same 1001 + reason.
+pub(crate) fn shutdown_close_frame() -> Message {
+    Message::Close(Some(CloseFrame {
+        code: close_code::AWAY,
+        reason: Utf8Bytes::from_static("server shutting down"),
+    }))
+}
 
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -109,6 +118,11 @@ async fn handle_single_user_ws(
 
     loop {
         tokio::select! {
+            biased;
+            _ = state.shutdown.cancelled() => {
+                let _ = sender.send(shutdown_close_frame()).await;
+                break;
+            }
             msg = receiver.next() => {
                 match msg {
                     Some(Ok(Message::Close(_))) | None => break,
@@ -227,6 +241,11 @@ async fn handle_group_ws(
 
     loop {
         tokio::select! {
+            biased;
+            _ = state.shutdown.cancelled() => {
+                let _ = sender.send(shutdown_close_frame()).await;
+                break;
+            }
             msg = receiver.next() => {
                 match msg {
                     Some(Ok(Message::Close(_))) | None => break,
@@ -442,4 +461,20 @@ fn to_ws_snapshot(
             (k, slot)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shutdown_close_frame_is_1001_going_away() {
+        match shutdown_close_frame() {
+            Message::Close(Some(cf)) => {
+                assert_eq!(cf.code, 1001);
+                assert_eq!(&*cf.reason, "server shutting down");
+            }
+            other => panic!("expected Close(Some(_)), got {other:?}"),
+        }
+    }
 }
