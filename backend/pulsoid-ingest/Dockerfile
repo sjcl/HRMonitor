@@ -1,7 +1,5 @@
 FROM rust:1.94-slim AS builder
 
-RUN apt-get update && apt-get install -y pkg-config libssl-dev libpq-dev && rm -rf /var/lib/apt/lists/*
-
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY common/Cargo.toml common/Cargo.toml
@@ -23,7 +21,7 @@ RUN cargo build --release -p pulsoid-ingest
 
 FROM debian:trixie-slim
 
-RUN apt-get update && apt-get install -y libssl3t64 ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/release/pulsoid-ingest /usr/local/bin/pulsoid-ingest
 
