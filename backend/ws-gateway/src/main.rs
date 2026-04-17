@@ -117,6 +117,72 @@ pub async fn require_ws_origin(
     }
 }
 
+/// Populates `latest_bpm:{user_id}` from the last 6h of `heart_rate_records`
+/// using `SET NX EX`, so pulsoid-ingest's authoritative plain `SET` is never
+/// overwritten. Failures are logged but not fatal — the WS self_heal path
+/// will recover once writes resume.
+async fn warm_latest_bpm_cache(
+    pool: sqlx::PgPool,
+    mut redis_conn: redis::aio::MultiplexedConnection,
+) {
+    let rows: Vec<(String, i32, i64, i64)> = match sqlx::query_as(
+        "SELECT DISTINCT ON (user_id) user_id, bpm, \
+         EXTRACT(EPOCH FROM recorded_at)::BIGINT AS recorded_at, \
+         EXTRACT(EPOCH FROM received_at)::BIGINT AS received_at \
+         FROM heart_rate_records \
+         WHERE recorded_at >= NOW() - INTERVAL '6 hours' \
+         ORDER BY user_id, recorded_at DESC, received_at DESC, id DESC",
+    )
+    .fetch_all(&pool)
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(error = %e, "warm-up DB scan failed; skipping latest_bpm warm-up");
+            return;
+        }
+    };
+
+    let now = unix_now_secs();
+
+    let mut warmed = 0u64;
+    let mut skipped = 0u64;
+    for (user_id, bpm, recorded_at, received_at) in rows {
+        let update = HeartRateReceived {
+            user_id: user_id.clone(),
+            bpm,
+            recorded_at,
+            received_at,
+        };
+        let value = serialize_latest_bpm(&update);
+        let key = latest_bpm_key(&user_id);
+        let age = (now - recorded_at).max(0) as u64;
+        let ttl = LATEST_BPM_TTL_SECS.saturating_sub(age).max(60);
+        let opts = SetOptions::default()
+            .conditional_set(ExistenceCheck::NX)
+            .with_expiration(SetExpiry::EX(ttl));
+        match redis_conn
+            .set_options::<_, _, Option<String>>(&key, &value, opts)
+            .await
+        {
+            Ok(None) => {
+                skipped += 1;
+            }
+            Ok(Some(_)) => {
+                warmed += 1;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    user_id = %user_id,
+                    error = %e,
+                    "warm-up SET NX failed"
+                );
+            }
+        }
+    }
+    tracing::info!(warmed, skipped, "Warmed latest_bpm cache from DB");
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
@@ -140,68 +206,20 @@ async fn main() {
         .expect("Failed to initialize database");
 
     let redis_client = redis::Client::open(redis_url).expect("Invalid REDIS_URL");
-    let mut redis_conn = redis_client
+    let redis_conn = redis_client
         .get_multiplexed_async_connection()
         .await
         .expect("Failed to connect to Redis");
 
     tracing::info!("Connected to Redis");
 
-    // Warm latest_bpm cache from DB: each user's latest record within 6h.
-    // `SET NX EX` preserves any fresher value pulsoid-ingest has already
-    // written while ws-gateway was down.
-    {
-        let rows: Vec<(String, i32, i64, i64)> = sqlx::query_as(
-            "SELECT DISTINCT ON (user_id) user_id, bpm, \
-             EXTRACT(EPOCH FROM recorded_at)::BIGINT AS recorded_at, \
-             EXTRACT(EPOCH FROM received_at)::BIGINT AS received_at \
-             FROM heart_rate_records \
-             WHERE recorded_at >= NOW() - INTERVAL '6 hours' \
-             ORDER BY user_id, recorded_at DESC, received_at DESC, id DESC",
-        )
-        .fetch_all(&pool)
-        .await
-        .expect("Failed to warm latest_bpm cache from DB");
-
-        let now = unix_now_secs();
-
-        let mut warmed = 0u64;
-        let mut skipped = 0u64;
-        for (user_id, bpm, recorded_at, received_at) in rows {
-            let update = HeartRateReceived {
-                user_id: user_id.clone(),
-                bpm,
-                recorded_at,
-                received_at,
-            };
-            let value = serialize_latest_bpm(&update);
-            let key = latest_bpm_key(&user_id);
-            let age = (now - recorded_at).max(0) as u64;
-            let ttl = LATEST_BPM_TTL_SECS.saturating_sub(age).max(60);
-            let opts = SetOptions::default()
-                .conditional_set(ExistenceCheck::NX)
-                .with_expiration(SetExpiry::EX(ttl));
-            match redis_conn
-                .set_options::<_, _, Option<String>>(&key, &value, opts)
-                .await
-            {
-                Ok(None) => {
-                    skipped += 1;
-                }
-                Ok(Some(_)) => {
-                    warmed += 1;
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        user_id = %user_id,
-                        error = %e,
-                        "warm-up SET NX failed"
-                    );
-                }
-            }
-        }
-        tracing::info!(warmed, skipped, "Warmed latest_bpm cache from DB");
-    }
+    // Warm latest_bpm cache in the background so axum::serve can start
+    // accepting WS upgrades immediately. `SET NX EX` preserves any fresher
+    // value pulsoid-ingest has already written, so warm-up ordering against
+    // live writes is a non-issue. Clients that connect mid-warm-up may see
+    // a null initial snapshot for inactive users; the WS handler's 10s
+    // self_heal_interval converts that to an Update once warm-up lands.
+    let warm_up_task = tokio::spawn(warm_latest_bpm_cache(pool.clone(), redis_conn.clone()));
 
     let nats = async_nats::connect(&nats_url)
         .await
@@ -328,6 +346,9 @@ async fn main() {
             let _ = hr_sub_task.await;
         }
     }
+
+    warm_up_task.abort();
+    let _ = warm_up_task.await;
 
     nats.flush().await.ok();
 
