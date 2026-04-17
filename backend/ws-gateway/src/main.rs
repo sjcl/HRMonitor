@@ -311,7 +311,12 @@ async fn main() {
             require_ws_origin,
         ));
 
-    let app = Router::new().merge(ws_routes).with_state(state);
+    let public_routes = Router::new().route("/healthz", get(|| async { "ok" }));
+
+    let app = Router::new()
+        .merge(public_routes)
+        .merge(ws_routes)
+        .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3002")
         .await

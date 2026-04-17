@@ -64,6 +64,12 @@ services:
         condition: service_started
       migration:
         condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:3001/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
     restart: unless-stopped
 
   ws-gateway:
@@ -87,6 +93,12 @@ services:
         condition: service_started
       migration:
         condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:3002/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
     restart: unless-stopped
 
   pulsoid-ingest:
@@ -155,6 +167,12 @@ services:
     depends_on:
       - timescaledb
       - backend
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:3000/api/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
     restart: unless-stopped
 
   nginx:
