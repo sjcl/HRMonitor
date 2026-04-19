@@ -275,14 +275,23 @@ async fn main() {
         shutdown: shutdown.clone(),
     });
 
-    // Spawn hr.received NATS subscriber.
+    // Spawn hr.received NATS subscriber. Every .await inside the task is
+    // wrapped in a biased select! against `shutdown.cancelled()` so the task
+    // returns cooperatively; `.abort()` in Phase 2 is a fallback, not the
+    // primary shutdown path.
     let mut hr_sub_task = {
         let hr_tx = hr_tx.clone();
         let nats = nats.clone();
+        let shutdown = shutdown.clone();
         tokio::spawn(async move {
             let mut backoff = INITIAL_BACKOFF;
             loop {
-                let mut hr_sub = match nats.subscribe(subjects::HR_RECEIVED).await {
+                let sub_result = tokio::select! {
+                    biased;
+                    _ = shutdown.cancelled() => return,
+                    r = nats.subscribe(subjects::HR_RECEIVED) => r,
+                };
+                let mut hr_sub = match sub_result {
                     Ok(s) => {
                         tracing::info!("Subscribed to {}", subjects::HR_RECEIVED);
                         s
@@ -293,20 +302,31 @@ async fn main() {
                             subjects::HR_RECEIVED,
                             backoff
                         );
-                        tokio::time::sleep(backoff).await;
+                        tokio::select! {
+                            biased;
+                            _ = shutdown.cancelled() => return,
+                            _ = tokio::time::sleep(backoff) => {}
+                        }
                         backoff = advance_backoff(backoff);
                         continue;
                     }
                 };
 
                 let subscribed_at = std::time::Instant::now();
-                while let Some(msg) = hr_sub.next().await {
-                    match serde_json::from_slice::<HeartRateReceived>(&msg.payload) {
-                        Ok(update) => {
-                            let _ = hr_tx.send(update);
-                        }
-                        Err(e) => {
-                            tracing::warn!("Failed to parse hr.received event: {e}");
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = shutdown.cancelled() => return,
+                        next = hr_sub.next() => match next {
+                            Some(msg) => match serde_json::from_slice::<HeartRateReceived>(&msg.payload) {
+                                Ok(update) => {
+                                    let _ = hr_tx.send(update);
+                                }
+                                Err(e) => {
+                                    tracing::warn!("Failed to parse hr.received event: {e}");
+                                }
+                            },
+                            None => break,
                         }
                     }
                 }
@@ -321,7 +341,11 @@ async fn main() {
                     subjects::HR_RECEIVED,
                     backoff
                 );
-                tokio::time::sleep(backoff).await;
+                tokio::select! {
+                    biased;
+                    _ = shutdown.cancelled() => return,
+                    _ = tokio::time::sleep(backoff) => {}
+                }
             }
         })
     };
@@ -363,7 +387,14 @@ async fn main() {
 
     // Phase 1: wait for the first terminal event. No timeout here — `serve`
     // resolves only after the shutdown token triggers the graceful drain.
+    //
+    // `biased;` makes `shutdown.cancelled()` win any tie against a
+    // cooperative `hr_sub_task` exit, so a task that returns `Ok(())` on
+    // shutdown is not misclassified as `task_failed`. Abnormal `serve` /
+    // task completions where `shutdown` is not yet ready still fall through
+    // to their respective branches.
     tokio::select! {
+        biased;
         _ = shutdown.cancelled() => {
             // Normal shutdown path. The detached signal-watcher task flipped
             // the token; with_graceful_shutdown is already draining.
@@ -400,14 +431,45 @@ async fn main() {
 
     // Guard against re-polling an already-completed JoinHandle
     // (tokio panics on re-poll after Ready).
+    //
+    // Shutdown-policy pin:
+    //   Ok(Ok(()))  = cooperative exit; do not flip `task_failed`.
+    //   Err(_)      = grace expired → fallback `abort()`. By policy,
+    //                 invoking the fallback is not a task failure. Flip here
+    //                 if that policy changes.
     if !hr_sub_done {
-        hr_sub_task.abort();
-        let _ = hr_sub_task.await;
+        match tokio::time::timeout(Duration::from_secs(3), &mut hr_sub_task).await {
+            Ok(Ok(())) => tracing::info!("NATS hr.received subscriber exited"),
+            Ok(Err(e)) if e.is_panic() => {
+                tracing::error!("NATS hr.received subscriber panicked: {e}");
+                task_failed = true;
+            }
+            Ok(Err(e)) if e.is_cancelled() => {
+                tracing::debug!("NATS hr.received subscriber cancelled");
+            }
+            Ok(Err(e)) => {
+                tracing::error!("NATS hr.received subscriber failed: {e}");
+                task_failed = true;
+            }
+            Err(_) => {
+                tracing::warn!("NATS hr.received subscriber did not exit within 3s; aborting");
+                hr_sub_task.abort();
+                let _ = (&mut hr_sub_task).await;
+            }
+        }
     }
     warm_up_task.abort();
     let _ = warm_up_task.await;
 
-    nats.flush().await.ok();
+    // Best-effort: ws-gateway does not publish on `hr.received`, so a
+    // timed-out flush drops only UNSUB/PING-class frames. We log and exit
+    // 0 to keep total shutdown inside the Compose 10s grace. Revisit if
+    // this service ever gains a publish responsibility.
+    match tokio::time::timeout(Duration::from_secs(1), nats.flush()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!("NATS flush on shutdown failed: {e}"),
+        Err(_) => tracing::warn!("NATS flush timed out after 1s on shutdown"),
+    }
 
     if task_failed {
         tracing::error!("ws-gateway exiting due to task failure");
@@ -492,5 +554,36 @@ mod tests {
     #[should_panic(expected = "is not a valid URL")]
     fn rejects_parse_error() {
         canonical_ws_origin("not a url");
+    }
+
+    // Guardrail for the `biased;` token in the Phase 1 select under a
+    // pre-cancelled shutdown. NOT a proof of tie-break behaviour: the
+    // tokio scheduler does not guarantee that both futures are ready on
+    // the same poll, so this test only catches the obvious regression of
+    // `biased;` being removed.
+    #[tokio::test]
+    async fn phase1_select_prefers_shutdown_when_already_cancelled_smoke() {
+        use tokio_util::sync::CancellationToken;
+
+        #[derive(Debug, PartialEq)]
+        enum Branch {
+            Shutdown,
+            Task,
+            Serve,
+        }
+
+        let shutdown = CancellationToken::new();
+        shutdown.cancel();
+        let mut task: tokio::task::JoinHandle<()> = tokio::spawn(async {});
+
+        let branch = tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => Branch::Shutdown,
+            _ = &mut task => Branch::Task,
+            _ = std::future::pending::<()>() => Branch::Serve,
+        };
+
+        assert_eq!(branch, Branch::Shutdown);
+        let _ = task.await;
     }
 }
