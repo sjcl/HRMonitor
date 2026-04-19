@@ -100,8 +100,20 @@ fn canonical_ws_origin(raw: &str) -> String {
     origin.ascii_serialization()
 }
 
-/// Rejects WebSocket upgrade requests whose `Origin` header is not the
-/// configured public origin.
+/// Returns `Ok(())` if the request may proceed, `Err(reason)` if the upgrade
+/// must be rejected with 403. The reason is a static string used for logging.
+/// Missing and non-UTF-8/invalid Origin headers are collapsed into the same
+/// `None` case at the caller and rejected here (fail-closed).
+fn check_ws_origin(header: Option<&str>, allowed: &str) -> Result<(), &'static str> {
+    match header {
+        None => Err("missing or invalid Origin header"),
+        Some(o) if o == allowed => Ok(()),
+        Some(_) => Err("disallowed Origin"),
+    }
+}
+
+/// Rejects WebSocket upgrade requests whose `Origin` header is missing,
+/// invalid (non-UTF-8), or does not exactly match the configured public origin.
 pub async fn require_ws_origin(
     State(state): State<Arc<WsState>>,
     req: Request,
@@ -111,11 +123,10 @@ pub async fn require_ws_origin(
         .headers()
         .get(axum::http::header::ORIGIN)
         .and_then(|v| v.to_str().ok());
-    match origin {
-        None => Ok(next.run(req).await),
-        Some(o) if o == state.allowed_ws_origin => Ok(next.run(req).await),
-        Some(o) => {
-            tracing::warn!(origin = %o, "Rejecting WS upgrade from disallowed origin");
+    match check_ws_origin(origin, &state.allowed_ws_origin) {
+        Ok(()) => Ok(next.run(req).await),
+        Err(reason) => {
+            tracing::warn!(origin = ?origin, reason, "Rejecting WS upgrade");
             Err(StatusCode::FORBIDDEN)
         }
     }
@@ -407,7 +418,25 @@ async fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::canonical_ws_origin;
+    use super::{canonical_ws_origin, check_ws_origin};
+
+    #[test]
+    fn rejects_missing_origin() {
+        assert!(check_ws_origin(None, "http://localhost:3000").is_err());
+    }
+
+    #[test]
+    fn accepts_exact_match() {
+        assert_eq!(
+            check_ws_origin(Some("http://localhost:3000"), "http://localhost:3000"),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn rejects_mismatched_origin() {
+        assert!(check_ws_origin(Some("http://evil.example"), "http://localhost:3000").is_err());
+    }
 
     #[test]
     fn preserves_non_default_port() {
