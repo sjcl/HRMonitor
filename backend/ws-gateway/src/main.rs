@@ -7,8 +7,8 @@ use axum::middleware::{self, Next};
 use axum::response::Response;
 use axum::routing::get;
 use axum::Router;
-use futures_util::StreamExt;
-use redis::{AsyncCommands, ExistenceCheck, SetExpiry, SetOptions};
+use futures_util::{StreamExt, TryStreamExt};
+use redis::{ExistenceCheck, SetExpiry, SetOptions};
 use std::future::IntoFuture;
 use std::sync::Arc;
 use std::time::Duration;
@@ -132,15 +132,89 @@ pub async fn require_ws_origin(
     }
 }
 
+/// One-RTT upper bound for a warm-up Redis pipeline. Large enough to amortise
+/// the round-trip, small enough that one reply stays well under socket buffers.
+const WARM_UP_CHUNK_SIZE: usize = 500;
+
+type WarmUpRow = (String, i32, i64, i64);
+
+/// Sends a single pipelined `SET NX EX` batch for `chunk` and updates the
+/// warmed/skipped counters. No-op on empty. Failures are warned and the
+/// chunk is dropped — warm-up is best-effort.
+async fn flush_chunk(
+    chunk: &mut Vec<WarmUpRow>,
+    redis_conn: &mut redis::aio::MultiplexedConnection,
+    now: i64,
+    warmed: &mut u64,
+    skipped: &mut u64,
+) {
+    if chunk.is_empty() {
+        return;
+    }
+    let mut pipe = redis::pipe();
+    for (user_id, bpm, recorded_at, received_at) in chunk.iter() {
+        let update = HeartRateReceived {
+            user_id: user_id.clone(),
+            bpm: *bpm,
+            recorded_at: *recorded_at,
+            received_at: *received_at,
+        };
+        let value = serialize_latest_bpm(&update);
+        let key = latest_bpm_key(user_id);
+        let age = (now - *recorded_at).max(0) as u64;
+        let ttl = LATEST_BPM_TTL_SECS.saturating_sub(age).max(60);
+        let opts = SetOptions::default()
+            .conditional_set(ExistenceCheck::NX)
+            .with_expiration(SetExpiry::EX(ttl));
+        pipe.set_options(&key, &value, opts);
+    }
+    let chunk_len = chunk.len();
+    let first_user_id = chunk.first().map(|r| r.0.clone());
+    let last_user_id = if chunk_len > 1 {
+        chunk.last().map(|r| r.0.clone())
+    } else {
+        None
+    };
+    chunk.clear();
+    match pipe
+        .query_async::<Vec<Option<String>>>(redis_conn)
+        .await
+    {
+        Ok(results) => {
+            for r in results {
+                if r.is_some() {
+                    *warmed += 1;
+                } else {
+                    *skipped += 1;
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                chunk_len,
+                first_user_id = ?first_user_id,
+                last_user_id = ?last_user_id,
+                error = %e,
+                "warm-up SET NX pipeline failed"
+            );
+        }
+    }
+}
+
 /// Populates `latest_bpm:{user_id}` from the last 6h of `heart_rate_records`
 /// using `SET NX EX`, so pulsoid-ingest's authoritative plain `SET` is never
 /// overwritten. Failures are logged but not fatal — the WS self_heal path
 /// will recover once writes resume.
+///
+/// Rows stream from Postgres and are flushed to Redis in `WARM_UP_CHUNK_SIZE`
+/// pipelined batches. On shutdown we stop pulling new rows but flush the
+/// buffered tail once so already-fetched work isn't discarded.
 async fn warm_latest_bpm_cache(
     pool: sqlx::PgPool,
     mut redis_conn: redis::aio::MultiplexedConnection,
+    shutdown: CancellationToken,
 ) {
-    let rows: Vec<(String, i32, i64, i64)> = match sqlx::query_as(
+    let mut stream = sqlx::query_as::<_, WarmUpRow>(
         "SELECT DISTINCT ON (user_id) user_id, bpm, \
          EXTRACT(EPOCH FROM recorded_at)::BIGINT AS recorded_at, \
          EXTRACT(EPOCH FROM received_at)::BIGINT AS received_at \
@@ -148,54 +222,42 @@ async fn warm_latest_bpm_cache(
          WHERE recorded_at >= NOW() - INTERVAL '6 hours' \
          ORDER BY user_id, recorded_at DESC, received_at DESC, id DESC",
     )
-    .fetch_all(&pool)
-    .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::error!(error = %e, "warm-up DB scan failed; skipping latest_bpm warm-up");
-            return;
-        }
-    };
+    .fetch(&pool);
 
     let now = unix_now_secs();
-
+    let mut chunk: Vec<WarmUpRow> = Vec::with_capacity(WARM_UP_CHUNK_SIZE);
     let mut warmed = 0u64;
     let mut skipped = 0u64;
-    for (user_id, bpm, recorded_at, received_at) in rows {
-        let update = HeartRateReceived {
-            user_id: user_id.clone(),
-            bpm,
-            recorded_at,
-            received_at,
-        };
-        let value = serialize_latest_bpm(&update);
-        let key = latest_bpm_key(&user_id);
-        let age = (now - recorded_at).max(0) as u64;
-        let ttl = LATEST_BPM_TTL_SECS.saturating_sub(age).max(60);
-        let opts = SetOptions::default()
-            .conditional_set(ExistenceCheck::NX)
-            .with_expiration(SetExpiry::EX(ttl));
-        match redis_conn
-            .set_options::<_, _, Option<String>>(&key, &value, opts)
-            .await
-        {
-            Ok(None) => {
-                skipped += 1;
-            }
-            Ok(Some(_)) => {
-                warmed += 1;
-            }
-            Err(e) => {
-                tracing::warn!(
-                    user_id = %user_id,
-                    error = %e,
-                    "warm-up SET NX failed"
-                );
+
+    loop {
+        tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => break,
+            row = stream.try_next() => match row {
+                Ok(Some(r)) => {
+                    chunk.push(r);
+                    if chunk.len() >= WARM_UP_CHUNK_SIZE {
+                        flush_chunk(&mut chunk, &mut redis_conn, now, &mut warmed, &mut skipped).await;
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    tracing::error!(error = %e, "warm-up DB scan failed mid-stream");
+                    break;
+                }
             }
         }
     }
-    tracing::info!(warmed, skipped, "Warmed latest_bpm cache from DB");
+
+    // Flush the buffered tail: cancel (and mid-stream DB errors) stop new
+    // reads, but rows we already paid to fetch are still best-effort-warmable.
+    flush_chunk(&mut chunk, &mut redis_conn, now, &mut warmed, &mut skipped).await;
+    tracing::info!(
+        warmed,
+        skipped,
+        cancelled = shutdown.is_cancelled(),
+        "Warmed latest_bpm cache from DB"
+    );
 }
 
 #[tokio::main]
@@ -228,13 +290,19 @@ async fn main() {
 
     tracing::info!("Connected to Redis");
 
+    let shutdown = CancellationToken::new();
+
     // Warm latest_bpm cache in the background so axum::serve can start
     // accepting WS upgrades immediately. `SET NX EX` preserves any fresher
     // value pulsoid-ingest has already written, so warm-up ordering against
     // live writes is a non-issue. Clients that connect mid-warm-up may see
     // a null initial snapshot for inactive users; the WS handler's 10s
     // self_heal_interval converts that to an Update once warm-up lands.
-    let warm_up_task = tokio::spawn(warm_latest_bpm_cache(pool.clone(), redis_conn.clone()));
+    let mut warm_up_task = tokio::spawn(warm_latest_bpm_cache(
+        pool.clone(),
+        redis_conn.clone(),
+        shutdown.clone(),
+    ));
 
     let nats = async_nats::connect(&nats_url)
         .await
@@ -254,7 +322,6 @@ async fn main() {
     let allowed_ws_origin = load_allowed_ws_origin();
     tracing::info!(allowed_ws_origin = %allowed_ws_origin, "WS origin allowlist loaded");
 
-    let shutdown = CancellationToken::new();
     // Detached task: flips the shutdown token when SIGTERM/SIGINT arrives.
     // Dropped with the tokio runtime at end of main.
     tokio::spawn({
@@ -458,8 +525,19 @@ async fn main() {
             }
         }
     }
-    warm_up_task.abort();
-    let _ = warm_up_task.await;
+    match tokio::time::timeout(Duration::from_secs(2), &mut warm_up_task).await {
+        Ok(Ok(())) => tracing::debug!("warm-up task exited"),
+        Ok(Err(e)) if e.is_panic() => {
+            tracing::error!("warm-up task panicked: {e}");
+            task_failed = true;
+        }
+        Ok(Err(_)) => {}
+        Err(_) => {
+            tracing::warn!("warm-up task did not exit within 2s; aborting");
+            warm_up_task.abort();
+            let _ = (&mut warm_up_task).await;
+        }
+    }
 
     // Best-effort: ws-gateway does not publish on `hr.received`, so a
     // timed-out flush drops only UNSUB/PING-class frames. We log and exit
