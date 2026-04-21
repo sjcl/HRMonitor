@@ -298,11 +298,30 @@ async fn main() {
     // live writes is a non-issue. Clients that connect mid-warm-up may see
     // a null initial snapshot for inactive users; the WS handler's 10s
     // self_heal_interval converts that to an Update once warm-up lands.
-    let mut warm_up_task = tokio::spawn(warm_latest_bpm_cache(
-        pool.clone(),
-        redis_conn.clone(),
-        shutdown.clone(),
-    ));
+    //
+    // The task opens its own MultiplexedConnection so its 500-command
+    // pipelines cannot queue in front of WS read_snapshot() MGETs on the
+    // connection stored in WsState. Acquisition happens inside the task:
+    // warm-up is best-effort, so a failure here must not block startup.
+    let mut warm_up_task = tokio::spawn({
+        let pool = pool.clone();
+        let redis_client = redis_client.clone();
+        let shutdown = shutdown.clone();
+        async move {
+            let conn = match redis_client.get_multiplexed_async_connection().await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "warm-up Redis connection unavailable; skipping warm-up \
+                         — self_heal will recover"
+                    );
+                    return;
+                }
+            };
+            warm_latest_bpm_cache(pool, conn, shutdown).await;
+        }
+    });
 
     let nats = async_nats::connect(&nats_url)
         .await
