@@ -473,31 +473,19 @@ async fn main() {
 
     // Phase 1: wait for the first terminal event. No timeout here — `serve`
     // resolves only after the shutdown token triggers the graceful drain.
-    //
-    // `biased;` makes `shutdown.cancelled()` win any tie against a
-    // cooperative `hr_sub_task` exit, so a task that returns `Ok(())` on
-    // shutdown is not misclassified as `task_failed`. Abnormal `serve` /
-    // task completions where `shutdown` is not yet ready still fall through
-    // to their respective branches.
-    tokio::select! {
-        biased;
-        _ = shutdown.cancelled() => {
+    // See `await_phase1_terminal_event` for the policy that every
+    // non-shutdown-first arm flips the token so the peer task can exit
+    // cooperatively.
+    match await_phase1_terminal_event(&mut serve, &mut hr_sub_task, &shutdown).await {
+        Phase1Outcome::ShutdownCancelled => {
             // Normal shutdown path. The detached signal-watcher task flipped
             // the token; with_graceful_shutdown is already draining.
         }
-        res = &mut hr_sub_task => {
-            log_task_exit("NATS hr.received subscriber", res);
+        Phase1Outcome::TaskExited => {
             task_failed = true;
             hr_sub_done = true;
-            // Trip the token so WS handlers get a best-effort 1001 and
-            // with_graceful_shutdown stops accepting new connections.
-            shutdown.cancel();
         }
-        res = &mut serve => {
-            match res {
-                Ok(()) => tracing::error!("Server returned unexpectedly before shutdown"),
-                Err(e) => tracing::error!("Server error: {e}"),
-            }
+        Phase1Outcome::ServeExited => {
             task_failed = true;
             serve_done = true;
         }
@@ -573,6 +561,52 @@ async fn main() {
         std::process::exit(1);
     }
     tracing::info!("ws-gateway shut down gracefully");
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Phase1Outcome {
+    ShutdownCancelled,
+    TaskExited,
+    ServeExited,
+}
+
+/// Await the first Phase 1 terminal event. This is the single Phase 1
+/// wait point — any future change that adds a new terminal event must be
+/// wired in here, not via a parallel `select!` in `main()`, or the
+/// policy tests will not cover it.
+///
+/// Both non-shutdown-first arms trip the shutdown token — the `task` arm
+/// because `with_graceful_shutdown` still needs to stop the listener, and
+/// the `serve` arm because `hr_sub_task` exits only via its own
+/// `shutdown.cancelled()` select branches. Every way the `serve` arm can
+/// fire is abnormal; under normal shutdown the `shutdown.cancelled()` arm
+/// wins first thanks to `biased;`.
+async fn await_phase1_terminal_event<S, T>(
+    serve: &mut S,
+    task: &mut T,
+    shutdown: &CancellationToken,
+) -> Phase1Outcome
+where
+    S: std::future::Future<Output = std::io::Result<()>> + Unpin,
+    T: std::future::Future<Output = Result<(), tokio::task::JoinError>> + Unpin,
+{
+    tokio::select! {
+        biased;
+        _ = shutdown.cancelled() => Phase1Outcome::ShutdownCancelled,
+        res = task => {
+            log_task_exit("NATS hr.received subscriber", res);
+            shutdown.cancel();
+            Phase1Outcome::TaskExited
+        }
+        res = serve => {
+            match res {
+                Ok(()) => tracing::error!("Server returned unexpectedly before shutdown"),
+                Err(e) => tracing::error!("Server error: {e}"),
+            }
+            shutdown.cancel();
+            Phase1Outcome::ServeExited
+        }
+    }
 }
 
 #[cfg(test)]
@@ -682,5 +716,69 @@ mod tests {
 
         assert_eq!(branch, Branch::Shutdown);
         let _ = task.await;
+    }
+
+    // Policy guardrail for `await_phase1_terminal_event`'s contract: when
+    // its `serve` arm fires, the shutdown token must be flipped so a peer
+    // task blocked on `shutdown.cancelled()` returns cooperatively — not
+    // via the Phase 2 `abort()` fallback. Does NOT guard main()'s use of
+    // the helper; that is review-time.
+    #[tokio::test]
+    async fn phase1_serve_exit_cancels_shutdown_for_cooperative_peer() {
+        use tokio_util::sync::CancellationToken;
+
+        let shutdown = CancellationToken::new();
+
+        let mut peer = tokio::spawn({
+            let shutdown = shutdown.clone();
+            async move {
+                tokio::select! {
+                    biased;
+                    _ = shutdown.cancelled() => {}
+                    _ = std::future::pending::<()>() => unreachable!(),
+                }
+            }
+        });
+
+        let serve = async {
+            Err::<(), std::io::Error>(std::io::Error::other("simulated abnormal serve exit"))
+        };
+        tokio::pin!(serve);
+
+        let outcome =
+            super::await_phase1_terminal_event(&mut serve, &mut peer, &shutdown).await;
+
+        assert_eq!(outcome, super::Phase1Outcome::ServeExited);
+        assert!(shutdown.is_cancelled(), "serve arm must trip the shutdown token");
+
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut peer)
+            .await
+            .expect("peer did not exit cooperatively within 100ms")
+            .expect("peer panicked or was cancelled");
+    }
+
+    // Companion policy guardrail for the `task` arm.
+    #[tokio::test]
+    async fn phase1_task_exit_cancels_shutdown_for_cooperative_peer() {
+        use tokio_util::sync::CancellationToken;
+
+        let shutdown = CancellationToken::new();
+
+        let mut peer = tokio::spawn(async {});
+
+        let serve = {
+            let shutdown = shutdown.clone();
+            async move {
+                shutdown.cancelled().await;
+                Ok::<(), std::io::Error>(())
+            }
+        };
+        tokio::pin!(serve);
+
+        let outcome =
+            super::await_phase1_terminal_event(&mut serve, &mut peer, &shutdown).await;
+
+        assert_eq!(outcome, super::Phase1Outcome::TaskExited);
+        assert!(shutdown.is_cancelled(), "task arm must trip the shutdown token");
     }
 }
