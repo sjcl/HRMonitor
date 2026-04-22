@@ -7,8 +7,11 @@ use std::sync::Arc;
 
 use common::error::AppError;
 
+use common::access::ensure_active_member;
+use common::auth::AuthenticatedUser;
+
 use crate::AppState;
-use crate::auth::{AuthenticatedUser, ViewableUserId, ensure_active_member};
+use crate::ViewableUserId;
 use crate::models::{
     DailyStatsQuery, DailyStatsResponse, GroupHeartRateResponse, GroupMinuteStatsResponse,
     HeartRateByDateQuery, HeartRateQuery, HeartRateResponse, MinuteStatsResponse,

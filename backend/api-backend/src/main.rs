@@ -1,4 +1,3 @@
-mod auth;
 mod db;
 mod handlers;
 mod models;
@@ -6,13 +5,16 @@ mod validation;
 
 use common::signal::{log_task_exit, shutdown_signal};
 
+use axum::extract::FromRequestParts;
+use axum::http::request::Parts;
 use axum::middleware;
 use axum::routing::get;
 use axum::Router;
 use std::sync::Arc;
 
-use auth::AuthConfig;
-use common::auth::AuthContext;
+use common::access::ensure_can_view_user;
+use common::auth::{AuthConfig, AuthContext, AuthenticatedUser, UserIdParam};
+use common::error::AppError;
 use common::pulsoid_oauth::PulsoidOAuthConfig;
 use common::token_encryption::TokenEncryption;
 
@@ -31,6 +33,26 @@ impl AuthContext for AppState {
     }
     fn auth_config(&self) -> &AuthConfig {
         &self.auth_config
+    }
+}
+
+pub struct ViewableUserId(pub String);
+
+impl FromRequestParts<Arc<AppState>> for ViewableUserId {
+    type Rejection = AppError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        let auth_user = parts
+            .extensions
+            .get::<AuthenticatedUser>()
+            .cloned()
+            .ok_or_else(|| AppError::Unauthorized("Not authenticated".into()))?;
+        let UserIdParam(target_id) = UserIdParam::from_request_parts(parts, state).await?;
+        ensure_can_view_user(&state.db, &auth_user, &target_id).await?;
+        Ok(ViewableUserId(target_id))
     }
 }
 
@@ -218,7 +240,7 @@ async fn main() {
         )
         .layer(middleware::from_fn_with_state(
             state.clone(),
-            auth::require_auth,
+            common::auth::require_auth::<AppState>,
         ));
 
     let app = Router::new()

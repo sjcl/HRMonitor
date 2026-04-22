@@ -7,8 +7,10 @@ use std::sync::Arc;
 
 use common::error::AppError;
 
+use common::access::ensure_active_member;
+use common::auth::AuthenticatedUser;
+
 use crate::AppState;
-use crate::auth::{AuthenticatedUser, ensure_active_member};
 use crate::models::{
     AcceptInviteRequest, AcceptInviteResponse, CreateGroupRequest, CreateInviteRequest,
     CreateInviteResponse, GroupDetail, GroupListItem, GroupMemberInfo, GroupMemberPreview,
