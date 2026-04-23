@@ -306,7 +306,7 @@ async fn main() {
 
     tracing::info!("Connected to NATS at {nats_url}");
 
-    let (hr_tx, _) = tokio_broadcast::channel::<HeartRateReceived>(256);
+    let (hr_tx, _) = tokio_broadcast::channel::<HeartRateReceived>(4096);
 
     let auth_config = AuthConfig::default();
     tracing::info!(
