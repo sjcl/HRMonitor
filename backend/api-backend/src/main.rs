@@ -10,7 +10,10 @@ use axum::http::request::Parts;
 use axum::middleware;
 use axum::routing::get;
 use axum::Router;
+use std::future::IntoFuture;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 use common::access::ensure_can_view_user;
 use common::auth::{AuthConfig, AuthContext, AuthenticatedUser, UserIdParam};
@@ -254,38 +257,81 @@ async fn main() {
 
     tracing::info!("Server listening on 0.0.0.0:3001");
 
-    // Wait for shutdown signal, server exit, or unexpected background task exit.
-    let server = axum::serve(listener, app);
-    let shutdown = shutdown_signal();
-    tokio::pin!(shutdown);
+    let shutdown = CancellationToken::new();
+
+    // Detached task: flips the shutdown token when SIGTERM/SIGINT arrives.
+    tokio::spawn({
+        let token = shutdown.clone();
+        async move {
+            shutdown_signal().await;
+            tracing::info!("Received shutdown signal");
+            token.cancel();
+        }
+    });
+
+    let serve = axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown.clone().cancelled_owned())
+        .into_future();
+    tokio::pin!(serve);
 
     let mut task_failed = false;
+    let mut serve_done = false;
+    let mut cleanup_done = false;
 
+    // Phase 1: wait for the first terminal event. `biased` ensures shutdown
+    // signal takes priority so graceful drain begins immediately.
     tokio::select! {
-        res = server => {
-            // axum::serve returns only on error or if all listeners close.
-            // Without with_graceful_shutdown(), Ok(()) is also unexpected.
-            match res {
-                Ok(()) => tracing::error!("Server returned unexpectedly"),
-                Err(e) => tracing::error!("Server error: {e}"),
-            }
-            task_failed = true;
-            cleanup_task.abort();
-            log_task_exit("Session cleanup (sibling)", cleanup_task.await);
+        biased;
+        _ = shutdown.cancelled() => {
+            // Normal shutdown — `serve` is already draining via with_graceful_shutdown.
         }
         res = &mut cleanup_task => {
             log_task_exit("Session cleanup", res);
             task_failed = true;
-            tracing::info!("HTTP server will be cancelled as select! exits");
+            cleanup_done = true;
+            shutdown.cancel();
         }
-        _ = &mut shutdown => {
-            tracing::info!("Received shutdown signal");
-            cleanup_task.abort();
-            let _ = cleanup_task.await;
+        res = &mut serve => {
+            match res {
+                Ok(()) => tracing::error!("Server returned unexpectedly before shutdown"),
+                Err(e) => tracing::error!("Server error: {e}"),
+            }
+            task_failed = true;
+            serve_done = true;
+            shutdown.cancel();
         }
     }
 
-    nats.flush().await.ok();
+    // Phase 2: wait for remaining tasks with timeout.
+    if !serve_done {
+        match tokio::time::timeout(Duration::from_secs(5), &mut serve).await {
+            Ok(Ok(())) => tracing::info!("HTTP server shut down cleanly"),
+            Ok(Err(e)) => {
+                tracing::error!("Server error during drain: {e}");
+                task_failed = true;
+            }
+            Err(_) => tracing::warn!("Graceful shutdown timed out after 5s"),
+        }
+    }
+
+    if !cleanup_done {
+        match tokio::time::timeout(Duration::from_secs(1), &mut cleanup_task).await {
+            Ok(res) => {
+                log_task_exit("Session cleanup", res);
+            }
+            Err(_) => {
+                tracing::warn!("Session cleanup did not exit within 1s; aborting");
+                cleanup_task.abort();
+                let _ = (&mut cleanup_task).await;
+            }
+        }
+    }
+
+    match tokio::time::timeout(Duration::from_secs(1), nats.flush()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!("NATS flush on shutdown failed: {e}"),
+        Err(_) => tracing::warn!("NATS flush timed out after 1s on shutdown"),
+    }
 
     if task_failed {
         tracing::error!("api-backend exiting due to task failure");
