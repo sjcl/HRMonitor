@@ -2,12 +2,13 @@ use axum::Extension;
 use axum::extract::ws::{CloseFrame, Message, Utf8Bytes, WebSocket, close_code};
 use axum::extract::{Path, State, WebSocketUpgrade};
 use axum::response::IntoResponse;
+use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use redis::AsyncCommands;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::time::{Duration, interval};
+use tokio::time::{Duration, Interval, interval};
 
 use common::access::ViewableUserId;
 use crate::WsState;
@@ -97,30 +98,21 @@ async fn handle_single_user_ws(
     let (mut sender, mut receiver) = socket.split();
     let mut broadcast_rx = state.hr_broadcast.subscribe();
 
-    // Send initial snapshot
     let snap = read_snapshot(&state, std::slice::from_ref(&target_user_id)).await;
     log_snapshot_errors("single_user initial", &snap);
     let mut last_sent: Option<HeartRateReceived> = match snap.get(&target_user_id) {
         Some(SnapshotEntry::Hit(hr)) => Some(hr.clone()),
         _ => None,
     };
-    let msg = WsServerMessage::Snapshot {
+    let initial = WsServerMessage::Snapshot {
         data: to_ws_snapshot(snap),
     };
-    if let Ok(json) = serde_json::to_string(&msg)
-        && sender.send(Message::Text(json.into())).await.is_err()
-    {
+    if !send_ws_message(&mut sender, &initial).await {
         return;
     }
 
-    let mut reauth_interval = interval(Duration::from_secs(30));
-    reauth_interval.tick().await;
-
-    let mut self_heal_interval = interval(Duration::from_secs(10));
-    self_heal_interval.tick().await;
-
-    let mut ping_interval = interval(Duration::from_secs(30));
-    ping_interval.tick().await;
+    let (mut reauth_interval, mut self_heal_interval, mut ping_interval) =
+        make_ws_intervals().await;
 
     loop {
         tokio::select! {
@@ -129,19 +121,10 @@ async fn handle_single_user_ws(
                 let _ = sender.send(shutdown_close_frame()).await;
                 break;
             }
-            should_disconnect = async {
-                tokio::select! {
-                    msg = receiver.next() => {
-                        matches!(msg, Some(Ok(Message::Close(_))) | None)
-                    }
-                    _ = ping_interval.tick() => {
-                        sender.send(Message::Ping(Default::default())).await.is_err()
-                    }
-                }
-            } => {
-                if should_disconnect {
-                    break;
-                }
+            should_disconnect = poll_receiver_or_ping(
+                &mut receiver, &mut sender, &mut ping_interval,
+            ) => {
+                if should_disconnect { break; }
             }
             result = broadcast_rx.recv() => {
                 match result {
@@ -149,17 +132,10 @@ async fn handle_single_user_ws(
                         if update.user_id == target_user_id {
                             last_sent = Some(update.clone());
                             let msg = WsServerMessage::Update { data: update };
-                            if let Ok(json) = serde_json::to_string(&msg)
-                                && sender.send(Message::Text(json.into())).await.is_err()
-                            {
-                                break;
-                            }
+                            if !send_ws_message(&mut sender, &msg).await { break; }
                         }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!("WebSocket broadcast lagged by {n} messages");
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(e) => if broadcast_error_should_break(e) { break; }
                 }
             }
             _ = reauth_interval.tick() => {
@@ -179,11 +155,7 @@ async fn handle_single_user_ws(
                         if last_sent.as_ref() != Some(hr) {
                             last_sent = Some(hr.clone());
                             let msg = WsServerMessage::Update { data: hr.clone() };
-                            if let Ok(json) = serde_json::to_string(&msg)
-                                && sender.send(Message::Text(json.into())).await.is_err()
-                            {
-                                break;
-                            }
+                            if !send_ws_message(&mut sender, &msg).await { break; }
                         }
                     }
                     Some(SnapshotEntry::Miss) | None => {
@@ -193,11 +165,7 @@ async fn handle_single_user_ws(
                                 HashMap::with_capacity(1);
                             data.insert(target_user_id.clone(), None);
                             let msg = WsServerMessage::Snapshot { data };
-                            if let Ok(json) = serde_json::to_string(&msg)
-                                && sender.send(Message::Text(json.into())).await.is_err()
-                            {
-                                break;
-                            }
+                            if !send_ws_message(&mut sender, &msg).await { break; }
                         }
                     }
                     Some(SnapshotEntry::Error) => {}
@@ -236,23 +204,15 @@ async fn handle_group_ws(
             last_sent.insert(uid.clone(), hr.clone());
         }
     }
-    let msg = WsServerMessage::Snapshot {
+    let initial = WsServerMessage::Snapshot {
         data: to_ws_snapshot(snap),
     };
-    if let Ok(json) = serde_json::to_string(&msg)
-        && sender.send(Message::Text(json.into())).await.is_err()
-    {
+    if !send_ws_message(&mut sender, &initial).await {
         return;
     }
 
-    let mut reauth_interval = interval(Duration::from_secs(30));
-    reauth_interval.tick().await;
-
-    let mut self_heal_interval = interval(Duration::from_secs(10));
-    self_heal_interval.tick().await;
-
-    let mut ping_interval = interval(Duration::from_secs(30));
-    ping_interval.tick().await;
+    let (mut reauth_interval, mut self_heal_interval, mut ping_interval) =
+        make_ws_intervals().await;
 
     loop {
         tokio::select! {
@@ -261,19 +221,10 @@ async fn handle_group_ws(
                 let _ = sender.send(shutdown_close_frame()).await;
                 break;
             }
-            should_disconnect = async {
-                tokio::select! {
-                    msg = receiver.next() => {
-                        matches!(msg, Some(Ok(Message::Close(_))) | None)
-                    }
-                    _ = ping_interval.tick() => {
-                        sender.send(Message::Ping(Default::default())).await.is_err()
-                    }
-                }
-            } => {
-                if should_disconnect {
-                    break;
-                }
+            should_disconnect = poll_receiver_or_ping(
+                &mut receiver, &mut sender, &mut ping_interval,
+            ) => {
+                if should_disconnect { break; }
             }
             result = broadcast_rx.recv() => {
                 match result {
@@ -281,17 +232,10 @@ async fn handle_group_ws(
                         if members.contains(&update.user_id) {
                             last_sent.insert(update.user_id.clone(), update.clone());
                             let msg = WsServerMessage::Update { data: update };
-                            if let Ok(json) = serde_json::to_string(&msg)
-                                && sender.send(Message::Text(json.into())).await.is_err()
-                            {
-                                break;
-                            }
+                            if !send_ws_message(&mut sender, &msg).await { break; }
                         }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!("WebSocket broadcast lagged by {n} messages");
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(e) => if broadcast_error_should_break(e) { break; }
                 }
             }
             _ = reauth_interval.tick() => {
@@ -313,11 +257,7 @@ async fn handle_group_ws(
                         removal_data.insert(uid.clone(), None::<HeartRateReceived>);
                     }
                     let msg = WsServerMessage::Snapshot { data: removal_data };
-                    if let Ok(json) = serde_json::to_string(&msg)
-                        && sender.send(Message::Text(json.into())).await.is_err()
-                    {
-                        break;
-                    }
+                    if !send_ws_message(&mut sender, &msg).await { break; }
                 }
 
                 let added: Vec<String> = new_members.difference(&members).cloned().collect();
@@ -332,11 +272,7 @@ async fn handle_group_ws(
                     let msg = WsServerMessage::Snapshot {
                         data: to_ws_snapshot(snap),
                     };
-                    if let Ok(json) = serde_json::to_string(&msg)
-                        && sender.send(Message::Text(json.into())).await.is_err()
-                    {
-                        break;
-                    }
+                    if !send_ws_message(&mut sender, &msg).await { break; }
                 }
 
                 members = new_members;
@@ -364,11 +300,7 @@ async fn handle_group_ws(
                 }
                 if !diffs.is_empty() {
                     let msg = WsServerMessage::Snapshot { data: diffs };
-                    if let Ok(json) = serde_json::to_string(&msg)
-                        && sender.send(Message::Text(json.into())).await.is_err()
-                    {
-                        break;
-                    }
+                    if !send_ws_message(&mut sender, &msg).await { break; }
                 }
             }
         }
@@ -378,6 +310,56 @@ async fn handle_group_ws(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+async fn make_ws_intervals() -> (Interval, Interval, Interval) {
+    let mut reauth = interval(Duration::from_secs(30));
+    reauth.tick().await;
+    let mut self_heal = interval(Duration::from_secs(10));
+    self_heal.tick().await;
+    let mut ping = interval(Duration::from_secs(30));
+    ping.tick().await;
+    (reauth, self_heal, ping)
+}
+
+/// Serialize `msg` and send it. Returns `false` iff the socket send failed —
+/// caller should `break` the loop. Returns `true` on success and also on
+/// `serde_json::to_string` failure, preserving the original
+/// `if let Ok(json) = … && sender.send(…).is_err() { break }` semantics that
+/// silently skip unsendable messages rather than tearing down the connection.
+async fn send_ws_message(
+    sender: &mut SplitSink<WebSocket, Message>,
+    msg: &WsServerMessage,
+) -> bool {
+    let Ok(json) = serde_json::to_string(msg) else {
+        return true;
+    };
+    sender.send(Message::Text(json.into())).await.is_ok()
+}
+
+async fn poll_receiver_or_ping(
+    receiver: &mut SplitStream<WebSocket>,
+    sender: &mut SplitSink<WebSocket, Message>,
+    ping_interval: &mut Interval,
+) -> bool {
+    tokio::select! {
+        msg = receiver.next() => {
+            matches!(msg, Some(Ok(Message::Close(_))) | None)
+        }
+        _ = ping_interval.tick() => {
+            sender.send(Message::Ping(Default::default())).await.is_err()
+        }
+    }
+}
+
+fn broadcast_error_should_break(err: tokio::sync::broadcast::error::RecvError) -> bool {
+    match err {
+        tokio::sync::broadcast::error::RecvError::Lagged(n) => {
+            tracing::warn!("WebSocket broadcast lagged by {n} messages");
+            false
+        }
+        tokio::sync::broadcast::error::RecvError::Closed => true,
+    }
+}
 
 async fn fetch_sharing_members(
     db: &sqlx::PgPool,
