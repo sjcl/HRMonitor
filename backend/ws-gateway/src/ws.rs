@@ -113,13 +113,13 @@ async fn handle_single_user_ws(
     }
 
     let mut reauth_interval = interval(Duration::from_secs(30));
-    reauth_interval.tick().await; // consume the immediate first tick
+    reauth_interval.tick().await;
 
     let mut self_heal_interval = interval(Duration::from_secs(10));
-    self_heal_interval.tick().await; // consume the immediate first tick
+    self_heal_interval.tick().await;
 
     let mut ping_interval = interval(Duration::from_secs(30));
-    ping_interval.tick().await; // consume the immediate first tick
+    ping_interval.tick().await;
 
     loop {
         tokio::select! {
@@ -128,10 +128,18 @@ async fn handle_single_user_ws(
                 let _ = sender.send(shutdown_close_frame()).await;
                 break;
             }
-            msg = receiver.next() => {
-                match msg {
-                    Some(Ok(Message::Close(_))) | None => break,
-                    _ => {} // ignore all client messages
+            should_disconnect = async {
+                tokio::select! {
+                    msg = receiver.next() => {
+                        matches!(msg, Some(Ok(Message::Close(_))) | None)
+                    }
+                    _ = ping_interval.tick() => {
+                        sender.send(Message::Ping(Default::default())).await.is_err()
+                    }
+                }
+            } => {
+                if should_disconnect {
+                    break;
                 }
             }
             result = broadcast_rx.recv() => {
@@ -159,7 +167,7 @@ async fn handle_single_user_ws(
                         .await
                         .is_err()
                 {
-                    break; // permission revoked
+                    break;
                 }
             }
             _ = self_heal_interval.tick() => {
@@ -191,14 +199,7 @@ async fn handle_single_user_ws(
                             }
                         }
                     }
-                    Some(SnapshotEntry::Error) => {
-                        // Preserve last_sent; log already emitted above.
-                    }
-                }
-            }
-            _ = ping_interval.tick() => {
-                if sender.send(Message::Ping(Default::default())).await.is_err() {
-                    break;
+                    Some(SnapshotEntry::Error) => {}
                 }
             }
         }
@@ -259,10 +260,18 @@ async fn handle_group_ws(
                 let _ = sender.send(shutdown_close_frame()).await;
                 break;
             }
-            msg = receiver.next() => {
-                match msg {
-                    Some(Ok(Message::Close(_))) | None => break,
-                    _ => {} // ignore all client messages
+            should_disconnect = async {
+                tokio::select! {
+                    msg = receiver.next() => {
+                        matches!(msg, Some(Ok(Message::Close(_))) | None)
+                    }
+                    _ = ping_interval.tick() => {
+                        sender.send(Message::Ping(Default::default())).await.is_err()
+                    }
+                }
+            } => {
+                if should_disconnect {
+                    break;
                 }
             }
             result = broadcast_rx.recv() => {
@@ -349,9 +358,7 @@ async fn handle_group_ws(
                                 diffs.insert(uid, None);
                             }
                         }
-                        SnapshotEntry::Error => {
-                            // Preserve last_sent for this user; log above.
-                        }
+                        SnapshotEntry::Error => {}
                     }
                 }
                 if !diffs.is_empty() {
@@ -361,11 +368,6 @@ async fn handle_group_ws(
                     {
                         break;
                     }
-                }
-            }
-            _ = ping_interval.tick() => {
-                if sender.send(Message::Ping(Default::default())).await.is_err() {
-                    break;
                 }
             }
         }
