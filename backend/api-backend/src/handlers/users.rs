@@ -9,7 +9,7 @@ use common::error::AppError;
 use common::auth::AuthenticatedUser;
 
 use crate::AppState;
-use crate::ViewableUserId;
+use common::access::ViewableUserId;
 use crate::models::{HeartRateProfile, SelfUser, UpdateUserRequest, UserRow};
 
 const SELECT_USER_ROW: &str = "SELECT u.id, u.display_name, u.timezone,

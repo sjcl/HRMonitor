@@ -11,7 +11,7 @@ use common::access::ensure_active_member;
 use common::auth::AuthenticatedUser;
 
 use crate::AppState;
-use crate::ViewableUserId;
+use common::access::ViewableUserId;
 use crate::models::{
     DailyStatsQuery, DailyStatsResponse, GroupHeartRateResponse, GroupMinuteStatsResponse,
     HeartRateByDateQuery, HeartRateQuery, HeartRateResponse, MinuteStatsResponse,

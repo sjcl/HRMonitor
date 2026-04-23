@@ -1,8 +1,7 @@
 mod ws;
 
-use axum::extract::{FromRequestParts, Request, State};
+use axum::extract::{Request, State};
 use axum::http::StatusCode;
-use axum::http::request::Parts;
 use axum::middleware::{self, Next};
 use axum::response::Response;
 use axum::routing::get;
@@ -15,9 +14,7 @@ use std::time::Duration;
 use tokio::sync::broadcast as tokio_broadcast;
 use tokio_util::sync::CancellationToken;
 
-use common::access::ensure_can_view_user;
-use common::auth::{AuthConfig, AuthContext, AuthenticatedUser, UserIdParam};
-use common::error::AppError;
+use common::auth::{AuthConfig, AuthContext};
 use common::messages::{HeartRateReceived, subjects};
 use common::nats_backoff::{INITIAL_BACKOFF, STABILITY_THRESHOLD, advance_backoff};
 use common::redis_keys::{LATEST_BPM_TTL_SECS, latest_bpm_key, serialize_latest_bpm};
@@ -41,26 +38,6 @@ impl AuthContext for WsState {
     }
     fn auth_config(&self) -> &AuthConfig {
         &self.auth_config
-    }
-}
-
-pub struct ViewableUserId(pub String);
-
-impl FromRequestParts<Arc<WsState>> for ViewableUserId {
-    type Rejection = AppError;
-
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &Arc<WsState>,
-    ) -> Result<Self, Self::Rejection> {
-        let auth_user = parts
-            .extensions
-            .get::<AuthenticatedUser>()
-            .cloned()
-            .ok_or_else(|| AppError::Unauthorized("Not authenticated".into()))?;
-        let UserIdParam(target_id) = UserIdParam::from_request_parts(parts, state).await?;
-        ensure_can_view_user(&state.db, &auth_user, &target_id).await?;
-        Ok(ViewableUserId(target_id))
     }
 }
 

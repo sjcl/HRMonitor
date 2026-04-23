@@ -40,6 +40,15 @@ pub trait AuthContext: Send + Sync + 'static {
     fn auth_config(&self) -> &AuthConfig;
 }
 
+impl<T: AuthContext> AuthContext for Arc<T> {
+    fn db(&self) -> &sqlx::PgPool {
+        self.as_ref().db()
+    }
+    fn auth_config(&self) -> &AuthConfig {
+        self.as_ref().auth_config()
+    }
+}
+
 pub async fn require_auth<T: AuthContext>(
     State(state): State<Arc<T>>,
     mut req: Request,

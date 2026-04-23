@@ -9,7 +9,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::time::{Duration, interval};
 
-use crate::{ViewableUserId, WsState};
+use common::access::ViewableUserId;
+use crate::WsState;
+
 use common::access::{ensure_active_member, ensure_can_view_user};
 use common::auth::AuthenticatedUser;
 use common::error::AppError;

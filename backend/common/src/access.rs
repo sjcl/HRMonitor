@@ -1,4 +1,7 @@
-use crate::auth::AuthenticatedUser;
+use axum::extract::FromRequestParts;
+use axum::http::request::Parts;
+
+use crate::auth::{AuthenticatedUser, AuthContext, UserIdParam};
 use crate::error::AppError;
 
 /// Check whether `auth_user` is allowed to view `target_id`'s heart rate data.
@@ -63,5 +66,28 @@ pub async fn ensure_active_member(
     .fetch_optional(db)
     .await?;
     row.ok_or_else(|| AppError::NotFound("Group not found".into()))
+}
+
+/// Extractor that combines authentication, user ID resolution (`me` → auth user),
+/// and visibility check into a single step. The target user must be viewable by
+/// the authenticated user per `ensure_can_view_user`.
+pub struct ViewableUserId(pub String);
+
+impl<S: AuthContext> FromRequestParts<S> for ViewableUserId {
+    type Rejection = AppError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        let auth_user = parts
+            .extensions
+            .get::<AuthenticatedUser>()
+            .cloned()
+            .ok_or_else(|| AppError::Unauthorized("Not authenticated".into()))?;
+        let UserIdParam(target_id) = UserIdParam::from_request_parts(parts, state).await?;
+        ensure_can_view_user(state.db(), &auth_user, &target_id).await?;
+        Ok(ViewableUserId(target_id))
+    }
 }
 
