@@ -6,6 +6,7 @@ use common::time::unix_now_secs;
 use std::sync::Arc;
 
 use common::error::AppError;
+use common::visibility::values::PRIVATE;
 
 use common::access::ensure_active_member;
 use common::auth::AuthenticatedUser;
@@ -186,7 +187,7 @@ pub async fn group_heart_rates(
 
     ensure_active_member(&state.db, &group_id, &auth_user.id).await?;
 
-    let records: Vec<GroupHeartRateResponse> = sqlx::query_as(
+    let query = format!(
         "SELECT hr.user_id,
                 hr.bpm,
                 EXTRACT(EPOCH FROM hr.recorded_at)::BIGINT AS timestamp
@@ -196,10 +197,12 @@ pub async fn group_heart_rates(
          WHERE gm.group_id = $1
            AND gm.status = 'active'
            AND (gm.sharing = true OR gm.user_id = $2)
-           AND (u.heart_rate_visibility != 'private' OR gm.user_id = $2)
+           AND (u.heart_rate_visibility != '{}' OR gm.user_id = $2)
            AND hr.recorded_at >= to_timestamp($3)
          ORDER BY hr.recorded_at",
-    )
+        PRIVATE
+    );
+    let records: Vec<GroupHeartRateResponse> = sqlx::query_as(&query)
     .bind(&group_id)
     .bind(&auth_user.id)
     .bind(from)
@@ -221,7 +224,7 @@ pub async fn group_minute_stats(
 
     ensure_active_member(&state.db, &group_id, &auth_user.id).await?;
 
-    let records: Vec<GroupMinuteStatsResponse> = sqlx::query_as(
+    let query = format!(
         "SELECT hm.user_id,
                 EXTRACT(EPOCH FROM hm.bucket)::BIGINT AS timestamp,
                 hm.avg_bpm,
@@ -234,10 +237,12 @@ pub async fn group_minute_stats(
          WHERE gm.group_id = $1
            AND gm.status = 'active'
            AND (gm.sharing = true OR gm.user_id = $2)
-           AND (u.heart_rate_visibility != 'private' OR gm.user_id = $2)
+           AND (u.heart_rate_visibility != '{}' OR gm.user_id = $2)
            AND hm.bucket >= to_timestamp($3)
          ORDER BY hm.bucket",
-    )
+        PRIVATE
+    );
+    let records: Vec<GroupMinuteStatsResponse> = sqlx::query_as(&query)
     .bind(&group_id)
     .bind(&auth_user.id)
     .bind(from)

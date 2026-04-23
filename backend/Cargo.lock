@@ -3902,6 +3902,7 @@ dependencies = [
  "common",
  "futures-util",
  "redis",
+ "reqwest",
  "serde",
  "serde_json",
  "sqlx",

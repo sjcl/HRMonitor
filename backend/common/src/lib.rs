@@ -15,3 +15,5 @@ pub mod error;
 pub mod auth;
 #[cfg(feature = "web")]
 pub mod access;
+#[cfg(feature = "web")]
+pub mod visibility;

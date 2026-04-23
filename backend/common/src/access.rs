@@ -3,6 +3,7 @@ use axum::http::request::Parts;
 
 use crate::auth::{AuthenticatedUser, AuthContext, UserIdParam};
 use crate::error::AppError;
+use crate::visibility::values::{GROUP_DEFAULT, PRIVATE};
 
 /// Check whether `auth_user` is allowed to view `target_id`'s heart rate data.
 ///
@@ -26,8 +27,8 @@ pub async fn ensure_can_view_user(
             .fetch_optional(db)
             .await?;
     match vis.as_deref() {
-        Some("private") => Err(AppError::Forbidden("Not allowed to view this user".into())),
-        Some("group_default") => {
+        Some(PRIVATE) => Err(AppError::Forbidden("Not allowed to view this user".into())),
+        Some(GROUP_DEFAULT) => {
             let shared: bool = sqlx::query_scalar(
                 "SELECT EXISTS(
                     SELECT 1 FROM group_members gm1

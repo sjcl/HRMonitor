@@ -5,6 +5,7 @@ use common::time::unix_now_secs;
 use std::sync::Arc;
 
 use common::error::AppError;
+use common::visibility::values::{GROUP_DEFAULT, PRIVATE};
 
 use common::auth::AuthenticatedUser;
 
@@ -18,7 +19,7 @@ const SELECT_USER_ROW: &str = "SELECT u.id, u.display_name, u.timezone,
      FROM users u
      LEFT JOIN accounts a ON a.user_id = u.id AND a.provider = 'discord'";
 
-const VALID_VISIBILITIES: &[&str] = &["group_default", "private"];
+const VALID_VISIBILITIES: &[&str] = &[GROUP_DEFAULT, PRIVATE];
 
 pub async fn get_self_user(
     State(state): State<Arc<AppState>>,
