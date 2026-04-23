@@ -116,6 +116,9 @@ async fn handle_single_user_ws(
     let mut self_heal_interval = interval(Duration::from_secs(10));
     self_heal_interval.tick().await; // consume the immediate first tick
 
+    let mut ping_interval = interval(Duration::from_secs(30));
+    ping_interval.tick().await; // consume the immediate first tick
+
     loop {
         tokio::select! {
             biased;
@@ -191,6 +194,11 @@ async fn handle_single_user_ws(
                     }
                 }
             }
+            _ = ping_interval.tick() => {
+                if sender.send(Message::Ping(Default::default())).await.is_err() {
+                    break;
+                }
+            }
         }
     }
 }
@@ -238,6 +246,9 @@ async fn handle_group_ws(
 
     let mut self_heal_interval = interval(Duration::from_secs(10));
     self_heal_interval.tick().await;
+
+    let mut ping_interval = interval(Duration::from_secs(30));
+    ping_interval.tick().await;
 
     loop {
         tokio::select! {
@@ -348,6 +359,11 @@ async fn handle_group_ws(
                     {
                         break;
                     }
+                }
+            }
+            _ = ping_interval.tick() => {
+                if sender.send(Message::Ping(Default::default())).await.is_err() {
+                    break;
                 }
             }
         }
