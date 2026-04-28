@@ -5,9 +5,12 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use common::error::AppError;
+
+use common::access::ensure_active_member;
+use common::auth::AuthenticatedUser;
+
 use crate::AppState;
-use crate::auth::AuthenticatedUser;
-use crate::error::AppError;
 use crate::models::{
     AcceptInviteRequest, AcceptInviteResponse, CreateGroupRequest, CreateInviteRequest,
     CreateInviteResponse, GroupDetail, GroupListItem, GroupMemberInfo, GroupMemberPreview,
@@ -91,25 +94,6 @@ async fn fetch_active_members(
             sharing: r.sharing,
         })
         .collect())
-}
-
-/// Ensure the authenticated user is an active member of the group.
-/// Returns (role, sharing) on success.
-pub async fn ensure_active_member(
-    db: &sqlx::PgPool,
-    group_id: &str,
-    user_id: &str,
-) -> Result<(String, bool), AppError> {
-    let row: Option<(String, bool)> = sqlx::query_as(
-        "SELECT role, sharing FROM group_members
-         WHERE group_id = $1 AND user_id = $2 AND status = 'active'",
-    )
-    .bind(group_id)
-    .bind(user_id)
-    .fetch_optional(db)
-    .await?;
-
-    row.ok_or_else(|| AppError::NotFound("Group not found".into()))
 }
 
 // =============================================================================

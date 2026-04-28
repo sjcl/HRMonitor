@@ -1,7 +1,5 @@
 FROM rust:1.95-slim AS builder
 
-RUN apt-get update && apt-get install -y pkg-config libssl-dev libpq-dev && rm -rf /var/lib/apt/lists/*
-
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY common/Cargo.toml common/Cargo.toml
@@ -16,12 +14,14 @@ RUN mkdir -p pulsoid-ingest/src && echo 'fn main() {}' > pulsoid-ingest/src/main
 COPY pulsoid-ingest/Cargo.toml pulsoid-ingest/Cargo.toml
 RUN mkdir -p pulsoid-refresher/src && echo 'fn main() {}' > pulsoid-refresher/src/main.rs
 COPY pulsoid-refresher/Cargo.toml pulsoid-refresher/Cargo.toml
+RUN mkdir -p ws-gateway/src && echo 'fn main() {}' > ws-gateway/src/main.rs
+COPY ws-gateway/Cargo.toml ws-gateway/Cargo.toml
 
 RUN cargo build --release -p api-backend
 
 FROM debian:trixie-slim
 
-RUN apt-get update && apt-get install -y libssl3t64 libpq5 ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y ca-certificates curl && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/release/api-backend /usr/local/bin/api-backend
 

@@ -1,4 +1,4 @@
-use crate::error::AppError;
+use common::error::AppError;
 
 pub(crate) async fn check_user_exists(db: &sqlx::PgPool, user_id: &str) -> Result<(), AppError> {
     let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)")

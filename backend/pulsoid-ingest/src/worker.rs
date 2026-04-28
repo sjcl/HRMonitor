@@ -8,7 +8,7 @@ use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 
 use common::messages::{HeartRateReceived, subjects};
 use common::pulsoid_state::{ConnectionState, WriteOutcome, classify_no_op};
-use common::redis_keys::{LATEST_BPM_TTL_SECS, latest_bpm_key, serialize_latest_bpm};
+use common::redis_keys::{latest_bpm_key, latest_bpm_ttl_secs, serialize_latest_bpm};
 use common::time::unix_now_secs;
 use common::token_encryption::TokenEncryption;
 use redis::AsyncCommands;
@@ -484,6 +484,28 @@ async fn handle_message(
     .await
     .map_err(|e| format!("DB insert error: {e}"))?;
 
+    // Anchor staleness on `recorded_at`, not `now`. A frame whose measurement is
+    // already older than `LATEST_BPM_TTL_SECS` must not become "latest" — the DB
+    // insert above preserves it for history, but we deliberately skip both the
+    // Redis SET and the live broadcast so the snapshot/self-heal path doesn't
+    // resurrect a stale reading. `latest_bpm_ttl_secs` returns `Some(full_ttl)`
+    // for future timestamps (clock skew), so this `None` branch is guaranteed
+    // `now >= recorded_at`.
+    let ttl = match latest_bpm_ttl_secs(now, recorded_at) {
+        Some(t) => t,
+        None => {
+            let age_secs = now - recorded_at;
+            tracing::info!(
+                user_id = %user_id,
+                recorded_at,
+                now,
+                age_secs,
+                "skipping latest_bpm SET and hr.received publish for stale measurement"
+            );
+            return Ok(());
+        }
+    };
+
     let update = HeartRateReceived {
         user_id: user_id.to_string(),
         bpm,
@@ -503,7 +525,7 @@ async fn handle_message(
     let key = latest_bpm_key(user_id);
     let value = serialize_latest_bpm(&update);
     if let Err(e) = redis
-        .set_ex::<_, _, ()>(&key, &value, LATEST_BPM_TTL_SECS)
+        .set_ex::<_, _, ()>(&key, &value, ttl)
         .await
     {
         return Err(format!("latest_bpm Redis write failed after DB insert: {e}"));

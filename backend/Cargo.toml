@@ -4,6 +4,7 @@ members = [
     "common",
     "migration",
     "pulsoid-ingest",
-    "pulsoid-refresher"
+    "pulsoid-refresher",
+    "ws-gateway"
 ]
 resolver = "3"

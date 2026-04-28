@@ -5,10 +5,14 @@ use chrono::NaiveDate;
 use common::time::unix_now_secs;
 use std::sync::Arc;
 
+use common::error::AppError;
+use common::visibility::values::PRIVATE;
+
+use common::access::ensure_active_member;
+use common::auth::AuthenticatedUser;
+
 use crate::AppState;
-use crate::auth::{AuthenticatedUser, ViewableUserId};
-use crate::error::AppError;
-use crate::handlers::groups::ensure_active_member;
+use common::access::ViewableUserId;
 use crate::models::{
     DailyStatsQuery, DailyStatsResponse, GroupHeartRateResponse, GroupMinuteStatsResponse,
     HeartRateByDateQuery, HeartRateQuery, HeartRateResponse, MinuteStatsResponse,
@@ -193,13 +197,14 @@ pub async fn group_heart_rates(
          WHERE gm.group_id = $1
            AND gm.status = 'active'
            AND (gm.sharing = true OR gm.user_id = $2)
-           AND (u.heart_rate_visibility != 'private' OR gm.user_id = $2)
+           AND (u.heart_rate_visibility != $4 OR gm.user_id = $2)
            AND hr.recorded_at >= to_timestamp($3)
          ORDER BY hr.recorded_at",
     )
     .bind(&group_id)
     .bind(&auth_user.id)
     .bind(from)
+    .bind(PRIVATE)
     .fetch_all(&state.db)
     .await?;
 
@@ -231,13 +236,14 @@ pub async fn group_minute_stats(
          WHERE gm.group_id = $1
            AND gm.status = 'active'
            AND (gm.sharing = true OR gm.user_id = $2)
-           AND (u.heart_rate_visibility != 'private' OR gm.user_id = $2)
+           AND (u.heart_rate_visibility != $4 OR gm.user_id = $2)
            AND hm.bucket >= to_timestamp($3)
          ORDER BY hm.bucket",
     )
     .bind(&group_id)
     .bind(&auth_user.id)
     .bind(from)
+    .bind(PRIVATE)
     .fetch_all(&state.db)
     .await?;
 

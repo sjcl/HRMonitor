@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::messages::{ConnectionChangeCommand, subjects};
-use common::signal::shutdown_signal;
+use common::signal::{log_task_exit, shutdown_signal};
 use common::nats_backoff::{advance_backoff, INITIAL_BACKOFF, STABILITY_THRESHOLD};
 use common::token_encryption::TokenEncryption;
 use worker_manager::WorkerManager;
@@ -186,14 +186,5 @@ async fn main() {
         std::process::exit(1);
     }
     tracing::info!("pulsoid-ingest shut down gracefully");
-}
-
-fn log_task_exit(name: &str, result: Result<(), tokio::task::JoinError>) {
-    match result {
-        Ok(()) => tracing::error!("{name} returned unexpectedly"),
-        Err(e) if e.is_panic() => tracing::error!("{name} panicked: {e}"),
-        Err(e) if e.is_cancelled() => tracing::debug!("{name} cancelled"),
-        Err(e) => tracing::error!("{name} failed: {e}"),
-    }
 }
 

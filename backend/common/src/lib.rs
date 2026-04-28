@@ -8,3 +8,12 @@ pub mod pulsoid_state;
 pub mod redis_keys;
 pub mod time;
 pub mod token_encryption;
+
+#[cfg(feature = "web")]
+pub mod error;
+#[cfg(feature = "web")]
+pub mod auth;
+#[cfg(feature = "web")]
+pub mod access;
+#[cfg(feature = "web")]
+pub mod visibility;

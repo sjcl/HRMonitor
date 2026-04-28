@@ -1,26 +1,22 @@
 [package]
-name = "api-backend"
+name = "ws-gateway"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-common = { path = "../common", features = ["oauth", "signal", "web"] }
-axum = "0.8.8"
+common = { path = "../common", features = ["web", "signal"] }
+axum = { version = "0.8.8", features = ["ws"] }
 tokio = { version = "1.51.1", features = ["full"] }
 sqlx = { version = "0.8.6", features = ["runtime-tokio", "postgres"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
-uuid = { version = "1.23.0", features = ["v4"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 async-nats = "0.47.0"
-chrono = "0.4.44"
-chrono-tz = "0.10"
-reqwest = { version = "0.13.2", features = ["json", "form"] }
-aes-gcm = "0.10.3"
-base64 = "0.22.1"
-rand = "0.10.0"
-urlencoding = "2.1.3"
-sha2 = "0.11.0"
-hex = "0.4.3"
+futures-util = "0.3.32"
+redis = { version = "1.1.0", features = ["tokio-comp", "aio"] }
 tokio-util = "0.7.18"
+url = "2.5.4"
+
+[dev-dependencies]
+reqwest = "0.13.2"

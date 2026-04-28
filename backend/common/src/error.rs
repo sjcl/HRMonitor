@@ -31,7 +31,26 @@ impl IntoResponse for AppError {
 
 impl From<sqlx::Error> for AppError {
     fn from(e: sqlx::Error) -> Self {
-        tracing::error!("Database error: {e}");
+        match &e {
+            sqlx::Error::Database(db_err) => {
+                if db_err.is_foreign_key_violation() || db_err.is_unique_violation() {
+                    tracing::warn!("Database constraint violation: {e}");
+                } else {
+                    tracing::error!("Database error: {e}");
+                }
+            }
+            sqlx::Error::PoolClosed => {
+                tracing::warn!("Database pool closed: {e}");
+            }
+            sqlx::Error::RowNotFound => {
+                tracing::debug!(
+                    "Database row not found (should be handled by fetch_optional): {e}"
+                );
+            }
+            _ => {
+                tracing::error!("Database error: {e}");
+            }
+        }
         AppError::Internal("Internal server error".into())
     }
 }
