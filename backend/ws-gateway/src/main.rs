@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 use common::auth::{AuthConfig, AuthContext};
 use common::messages::{HeartRateReceived, subjects};
 use common::nats_backoff::{INITIAL_BACKOFF, STABILITY_THRESHOLD, advance_backoff};
-use common::redis_keys::{LATEST_BPM_TTL_SECS, latest_bpm_key, serialize_latest_bpm};
+use common::redis_keys::{latest_bpm_key, latest_bpm_ttl_secs, serialize_latest_bpm};
 use common::signal::{log_task_exit, shutdown_signal};
 use common::time::unix_now_secs;
 
@@ -116,20 +116,32 @@ const WARM_UP_CHUNK_SIZE: usize = 500;
 type WarmUpRow = (String, i32, i64, i64);
 
 /// Sends a single pipelined `SET NX EX` batch for `chunk` and updates the
-/// warmed/skipped counters. No-op on empty. Failures are warned and the
-/// chunk is dropped — warm-up is best-effort.
+/// counters. No-op on empty. Rows whose `recorded_at` is already past
+/// `LATEST_BPM_TTL_SECS` are dropped without ever entering the pipeline —
+/// otherwise we'd resurrect stale readings that the snapshot path is supposed
+/// to consider expired. Failures are warned and the chunk is dropped — warm-up
+/// is best-effort.
 async fn flush_chunk(
     chunk: &mut Vec<WarmUpRow>,
     redis_conn: &mut redis::aio::MultiplexedConnection,
     now: i64,
     warmed: &mut u64,
-    skipped: &mut u64,
+    nx_skipped: &mut u64,
+    stale_skipped: &mut u64,
 ) {
     if chunk.is_empty() {
         return;
     }
     let mut pipe = redis::pipe();
+    let mut pipeline_len: usize = 0;
     for (user_id, bpm, recorded_at, received_at) in chunk.iter() {
+        let ttl = match latest_bpm_ttl_secs(now, *recorded_at) {
+            Some(t) => t,
+            None => {
+                *stale_skipped += 1;
+                continue;
+            }
+        };
         let update = HeartRateReceived {
             user_id: user_id.clone(),
             bpm: *bpm,
@@ -138,12 +150,11 @@ async fn flush_chunk(
         };
         let value = serialize_latest_bpm(&update);
         let key = latest_bpm_key(user_id);
-        let age = (now - *recorded_at).max(0) as u64;
-        let ttl = LATEST_BPM_TTL_SECS.saturating_sub(age).max(60);
         let opts = SetOptions::default()
             .conditional_set(ExistenceCheck::NX)
             .with_expiration(SetExpiry::EX(ttl));
         pipe.set_options(&key, &value, opts);
+        pipeline_len += 1;
     }
     let chunk_len = chunk.len();
     let first_user_id = chunk.first().map(|r| r.0.clone());
@@ -153,22 +164,37 @@ async fn flush_chunk(
         None
     };
     chunk.clear();
+
+    // Every row in the chunk was stale — don't fire an empty pipeline; the
+    // backend's behavior on a zero-command pipe is unspecified.
+    if pipeline_len == 0 {
+        return;
+    }
+
     match pipe
         .query_async::<Vec<Option<String>>>(redis_conn)
         .await
     {
         Ok(results) => {
+            if results.len() != pipeline_len {
+                tracing::warn!(
+                    pipeline_len,
+                    result_len = results.len(),
+                    "warm-up pipeline result length mismatch"
+                );
+            }
             for r in results {
                 if r.is_some() {
                     *warmed += 1;
                 } else {
-                    *skipped += 1;
+                    *nx_skipped += 1;
                 }
             }
         }
         Err(e) => {
             tracing::warn!(
                 chunk_len,
+                pipeline_len,
                 first_user_id = ?first_user_id,
                 last_user_id = ?last_user_id,
                 error = %e,
@@ -191,6 +217,11 @@ async fn warm_latest_bpm_cache(
     mut redis_conn: redis::aio::MultiplexedConnection,
     shutdown: CancellationToken,
 ) {
+    // SQL prefilter: drop rows already past the 6h horizon at query time so the
+    // happy path doesn't pull six months of history. The final stale check
+    // lives in `latest_bpm_ttl_secs` (called inside `flush_chunk`) — that
+    // guarantees rows that crossed the horizon between the query and the flush
+    // are still rejected, and centralises the boundary semantics.
     let mut stream = sqlx::query_as::<_, WarmUpRow>(
         "SELECT DISTINCT ON (user_id) user_id, bpm, \
          EXTRACT(EPOCH FROM recorded_at)::BIGINT AS recorded_at, \
@@ -204,7 +235,8 @@ async fn warm_latest_bpm_cache(
     let now = unix_now_secs();
     let mut chunk: Vec<WarmUpRow> = Vec::with_capacity(WARM_UP_CHUNK_SIZE);
     let mut warmed = 0u64;
-    let mut skipped = 0u64;
+    let mut nx_skipped = 0u64;
+    let mut stale_skipped = 0u64;
 
     loop {
         tokio::select! {
@@ -214,7 +246,15 @@ async fn warm_latest_bpm_cache(
                 Ok(Some(r)) => {
                     chunk.push(r);
                     if chunk.len() >= WARM_UP_CHUNK_SIZE {
-                        flush_chunk(&mut chunk, &mut redis_conn, now, &mut warmed, &mut skipped).await;
+                        flush_chunk(
+                            &mut chunk,
+                            &mut redis_conn,
+                            now,
+                            &mut warmed,
+                            &mut nx_skipped,
+                            &mut stale_skipped,
+                        )
+                        .await;
                     }
                 }
                 Ok(None) => break,
@@ -228,10 +268,19 @@ async fn warm_latest_bpm_cache(
 
     // Flush the buffered tail: cancel (and mid-stream DB errors) stop new
     // reads, but rows we already paid to fetch are still best-effort-warmable.
-    flush_chunk(&mut chunk, &mut redis_conn, now, &mut warmed, &mut skipped).await;
+    flush_chunk(
+        &mut chunk,
+        &mut redis_conn,
+        now,
+        &mut warmed,
+        &mut nx_skipped,
+        &mut stale_skipped,
+    )
+    .await;
     tracing::info!(
         warmed,
-        skipped,
+        nx_skipped,
+        stale_skipped,
         cancelled = shutdown.is_cancelled(),
         "Warmed latest_bpm cache from DB"
     );
