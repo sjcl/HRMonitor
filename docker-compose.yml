@@ -46,7 +46,6 @@ services:
       dockerfile: api-backend/Dockerfile
     environment:
       - DATABASE_URL=postgres://hrmonitor:hrmonitor@timescaledb:5432/hrmonitor
-      - REDIS_URL=redis://redis:6379
       - NATS_URL=nats://nats:4222
       - RUST_LOG=api_backend=info
       - PULSOID_CLIENT_ID=${PULSOID_CLIENT_ID}
@@ -58,8 +57,6 @@ services:
     depends_on:
       timescaledb:
         condition: service_healthy
-      redis:
-        condition: service_started
       nats:
         condition: service_started
       migration:

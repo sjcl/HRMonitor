@@ -80,7 +80,6 @@ dependencies = [
  "common",
  "hex",
  "rand 0.10.1",
- "redis",
  "reqwest",
  "serde",
  "serde_json",

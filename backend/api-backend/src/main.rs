@@ -19,7 +19,6 @@ use common::token_encryption::TokenEncryption;
 
 pub struct AppState {
     pub db: sqlx::PgPool,
-    pub redis: redis::aio::MultiplexedConnection,
     pub nats: async_nats::Client,
     pub auth_config: AuthConfig,
     pub pulsoid_oauth: PulsoidOAuthConfig,
@@ -47,21 +46,11 @@ async fn main() {
     let database_url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://hrmonitor:hrmonitor@localhost:5432/hrmonitor".into());
 
-    let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".into());
-
     let nats_url = std::env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".into());
 
     let pool = db::init_pool(&database_url)
         .await
         .expect("Failed to initialize database");
-
-    let redis_client = redis::Client::open(redis_url).expect("Invalid REDIS_URL");
-    let redis_conn = redis_client
-        .get_multiplexed_async_connection()
-        .await
-        .expect("Failed to connect to Redis");
-
-    tracing::info!("Connected to Redis");
 
     let nats = async_nats::connect(&nats_url)
         .await
@@ -81,7 +70,6 @@ async fn main() {
 
     let state = Arc::new(AppState {
         db: pool.clone(),
-        redis: redis_conn.clone(),
         nats: nats.clone(),
         auth_config,
         pulsoid_oauth,
