@@ -22,6 +22,11 @@ RUN cargo build --release -p migration
 
 FROM debian:trixie-slim
 
+RUN groupadd --system --gid 10001 app \
+ && useradd --system --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin app
+
 COPY --from=builder /app/target/release/migration /usr/local/bin/migration
+
+USER app:app
 
 CMD ["migration"]

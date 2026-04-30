@@ -21,9 +21,15 @@ RUN cargo build --release -p api-backend
 
 FROM debian:trixie-slim
 
-RUN apt-get update && apt-get install -y ca-certificates curl && rm -rf /var/lib/apt/lists/*
+RUN apt-get update \
+ && apt-get install -y ca-certificates curl \
+ && rm -rf /var/lib/apt/lists/* \
+ && groupadd --system --gid 10001 app \
+ && useradd --system --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin app
 
 COPY --from=builder /app/target/release/api-backend /usr/local/bin/api-backend
+
+USER app:app
 
 EXPOSE 3001
 
