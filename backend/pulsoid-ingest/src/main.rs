@@ -10,7 +10,7 @@ use std::time::Duration;
 use tokio::task::JoinHandle;
 
 use common::messages::{ConnectionChangeCommand, subjects};
-use common::nats_backoff::{INITIAL_BACKOFF, STABILITY_THRESHOLD, advance_backoff};
+use common::nats_backoff::{INITIAL_BACKOFF, advance_backoff};
 use common::signal::shutdown_signal;
 use common::token_encryption::TokenEncryption;
 use worker_manager::WorkerManager;
@@ -90,10 +90,9 @@ async fn main() {
     //
     // Wrapped in an outer reconnect loop so the task does not silently die if
     // the Subscriber stream ends (`async_nats` auto-reconnects the client but
-    // does NOT re-install existing Subscriber handles). Backoff is only reset
-    // after a subscription has stayed up for STABILITY_THRESHOLD — a flapping
-    // "subscribe → immediate end" cycle still backs off exponentially. Mirrors
-    // the api-backend `hr.received` subscriber.
+    // does NOT re-install existing Subscriber handles). Subscribe failures
+    // back off exponentially, while a created subscription that later ends is
+    // retried from the initial delay.
     let nats_events = nats.clone();
     let _events_task = spawn_critical_task("Connection events subscriber", async move {
         let mut backoff = INITIAL_BACKOFF;
@@ -125,7 +124,6 @@ async fn main() {
             // a first-time vs. reconnect branch.
             wm_events.reconcile().await;
 
-            let subscribed_at = std::time::Instant::now();
             while let Some(msg) = connection_sub.next().await {
                 match serde_json::from_slice::<ConnectionChangeCommand>(&msg.payload) {
                     Ok(cmd) => {
@@ -141,11 +139,7 @@ async fn main() {
                 }
             }
 
-            if subscribed_at.elapsed() >= STABILITY_THRESHOLD {
-                backoff = INITIAL_BACKOFF;
-            } else {
-                backoff = advance_backoff(backoff);
-            }
+            backoff = INITIAL_BACKOFF;
             tracing::warn!(
                 "{} subscription ended; resubscribing in {:?}",
                 subjects::CONNECTION_CHANGED,

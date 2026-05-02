@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 
 use common::auth::{AuthConfig, AuthContext};
 use common::messages::{HeartRateReceived, subjects};
-use common::nats_backoff::{INITIAL_BACKOFF, STABILITY_THRESHOLD, advance_backoff};
+use common::nats_backoff::{INITIAL_BACKOFF, advance_backoff};
 use common::redis_keys::{latest_bpm_key, latest_bpm_ttl_secs, serialize_latest_bpm};
 use common::signal::shutdown_signal;
 use common::time::unix_now_secs;
@@ -446,7 +446,6 @@ async fn main() {
                     }
                 };
 
-                let subscribed_at = std::time::Instant::now();
                 loop {
                     tokio::select! {
                         biased;
@@ -465,11 +464,7 @@ async fn main() {
                     }
                 }
 
-                if subscribed_at.elapsed() >= STABILITY_THRESHOLD {
-                    backoff = INITIAL_BACKOFF;
-                } else {
-                    backoff = advance_backoff(backoff);
-                }
+                backoff = INITIAL_BACKOFF;
                 tracing::warn!(
                     "{} subscription ended; resubscribing in {:?}",
                     subjects::HR_RECEIVED,
