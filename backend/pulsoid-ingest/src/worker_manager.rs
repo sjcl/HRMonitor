@@ -10,6 +10,21 @@ use crate::worker::run_worker;
 
 type ReconcileSnapshot = (HashMap<String, i32>, Vec<(String, JoinHandle<()>)>);
 
+#[derive(Debug, PartialEq, Eq)]
+enum WorkerAction {
+    Spawn {
+        revision: i32,
+    },
+    Replace {
+        old_revision: i32,
+        new_revision: i32,
+    },
+    Stop {
+        revision: i32,
+    },
+    Noop,
+}
+
 /// Connections eligible for worker spawning.
 /// Error states are terminal — recovery requires a revision bump
 /// (re-auth, new manual token, successful token refresh, etc.), which
@@ -75,12 +90,8 @@ impl WorkerManager {
     /// hint. A DB error leaves the existing worker running and logs a warning.
     pub async fn reconcile_user(&self, user_id: &str) {
         // 1. Query DB (SPAWNABLE filter — same as periodic reconcile)
-        let db_version: Option<i32> = match sqlx::query_as::<_, (i32,)>(SPAWNABLE_USER_SQL)
-            .bind(user_id)
-            .fetch_optional(&self.db)
-            .await
-        {
-            Ok(row) => row.map(|(rev,)| rev),
+        let db_version: Option<i32> = match self.fetch_spawnable_user_revision(user_id).await {
+            Ok(revision) => revision,
             Err(e) => {
                 tracing::warn!(user_id, "reconcile_user DB error: {e}");
                 return;
@@ -96,55 +107,96 @@ impl WorkerManager {
     /// changed" logs live in this function so that skipped and no-op
     /// invocations do not get double-logged.
     async fn apply_db_state_for_user(&self, user_id: &str, db_version: Option<i32>) {
-        let mut state = self.state.lock().await;
-        let active_version = state.get(user_id).map(|ws| ws.revision);
+        let active_version = {
+            let state = self.state.lock().await;
+            state.get(user_id).map(|ws| ws.revision)
+        };
 
-        match (db_version, active_version) {
-            // DB has row, no worker → spawn
-            (Some(db_ver), None) => {
-                tracing::debug!(user_id, db_ver, "apply: spawn branch");
-                let worker = self.spawn_worker(user_id, db_ver);
-                state.insert(user_id.to_string(), worker);
-                tracing::info!(user_id, new_revision = db_ver, "Worker spawned");
-            }
-            // DB has row, worker at same version → no-op
-            (Some(db_ver), Some(active_ver)) if db_ver == active_ver => {
-                tracing::debug!(user_id, db_ver, "apply: in-sync, no-op");
-            }
-            // DB has row, worker at different version → replace
-            (Some(db_ver), Some(active_ver)) => {
-                tracing::debug!(
-                    user_id,
-                    old_version = active_ver,
-                    new_version = db_ver,
-                    "apply: replace branch"
-                );
-                if let Some(old_worker) = state.remove(user_id) {
-                    old_worker.handle.abort();
-                    let _ = old_worker.handle.await;
-                }
-
-                let worker = self.spawn_worker(user_id, db_ver);
-                state.insert(user_id.to_string(), worker);
-                tracing::info!(
-                    user_id,
-                    old_revision = active_ver,
-                    new_revision = db_ver,
-                    "Worker replaced"
-                );
-            }
-            // DB has no spawnable row, worker exists → stop
-            (None, Some(active_ver)) => {
-                tracing::debug!(user_id, active_ver, "apply: stop branch");
-                if let Some(old_worker) = state.remove(user_id) {
-                    old_worker.handle.abort();
-                    let _ = old_worker.handle.await;
-                    tracing::info!(user_id, active_ver, "Worker stopped");
-                }
-            }
-            // Neither → no-op
-            (None, None) => {}
+        if worker_action(db_version, active_version) == WorkerAction::Noop {
+            log_noop(user_id, db_version, active_version);
+            return;
         }
+
+        // The caller's DB snapshot may be stale by the time this task wins the
+        // manager lock. Re-read before changing the active worker slot so an
+        // old reconcile cannot overwrite a newer revision.
+        let fresh_db_version = match self.fetch_spawnable_user_revision(user_id).await {
+            Ok(revision) => revision,
+            Err(e) => {
+                tracing::warn!(user_id, "apply DB recheck error: {e}");
+                return;
+            }
+        };
+
+        let mut old_handle = None;
+        let (action, fresh_active_version) = {
+            let mut state = self.state.lock().await;
+            let active_version = state.get(user_id).map(|ws| ws.revision);
+            let action = worker_action(fresh_db_version, active_version);
+
+            match action {
+                WorkerAction::Spawn { revision } => {
+                    tracing::debug!(user_id, revision, "apply: spawn branch");
+                    let worker = self.spawn_worker(user_id, revision);
+                    state.insert(user_id.to_string(), worker);
+                }
+                WorkerAction::Replace {
+                    old_revision: _,
+                    new_revision,
+                } => {
+                    tracing::debug!(
+                        user_id,
+                        old_version = active_version,
+                        new_version = new_revision,
+                        "apply: replace branch"
+                    );
+                    old_handle = state.remove(user_id).map(|old_worker| old_worker.handle);
+                    let worker = self.spawn_worker(user_id, new_revision);
+                    state.insert(user_id.to_string(), worker);
+                }
+                WorkerAction::Stop { .. } => {
+                    tracing::debug!(user_id, active_version, "apply: stop branch");
+                    old_handle = state.remove(user_id).map(|old_worker| old_worker.handle);
+                }
+                WorkerAction::Noop => {}
+            }
+
+            (action, active_version)
+        };
+
+        if let Some(handle) = old_handle {
+            handle.abort();
+            let _ = handle.await;
+        }
+
+        match action {
+            WorkerAction::Spawn { revision } => {
+                tracing::info!(user_id, new_revision = revision, "Worker spawned");
+            }
+            WorkerAction::Replace {
+                old_revision,
+                new_revision,
+            } => {
+                tracing::info!(user_id, old_revision, new_revision, "Worker replaced");
+            }
+            WorkerAction::Stop { revision } => {
+                tracing::info!(user_id, active_ver = revision, "Worker stopped");
+            }
+            WorkerAction::Noop => {
+                log_noop(user_id, fresh_db_version, fresh_active_version);
+            }
+        }
+    }
+
+    async fn fetch_spawnable_user_revision(
+        &self,
+        user_id: &str,
+    ) -> Result<Option<i32>, sqlx::Error> {
+        sqlx::query_as::<_, (i32,)>(SPAWNABLE_USER_SQL)
+            .bind(user_id)
+            .fetch_optional(&self.db)
+            .await
+            .map(|row| row.map(|(rev,)| rev))
     }
 
     /// Reconcile active workers with DB state.
@@ -244,5 +296,83 @@ impl WorkerManager {
                 Err(e) => tracing::warn!(user_id, "Worker join error: {e}"),
             }
         }
+    }
+}
+
+fn worker_action(db_version: Option<i32>, active_version: Option<i32>) -> WorkerAction {
+    match (db_version, active_version) {
+        (Some(db_ver), None) => WorkerAction::Spawn { revision: db_ver },
+        (Some(db_ver), Some(active_ver)) if db_ver > active_ver => WorkerAction::Replace {
+            old_revision: active_ver,
+            new_revision: db_ver,
+        },
+        (None, Some(active_ver)) => WorkerAction::Stop {
+            revision: active_ver,
+        },
+        _ => WorkerAction::Noop,
+    }
+}
+
+fn log_noop(user_id: &str, db_version: Option<i32>, active_version: Option<i32>) {
+    match (db_version, active_version) {
+        (Some(db_ver), Some(active_ver)) if db_ver == active_ver => {
+            tracing::debug!(user_id, db_ver, "apply: in-sync, no-op");
+        }
+        (Some(db_ver), Some(active_ver)) if db_ver < active_ver => {
+            tracing::debug!(
+                user_id,
+                stale_version = db_ver,
+                active_version = active_ver,
+                "apply: stale revision, no-op"
+            );
+        }
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WorkerAction, worker_action};
+
+    #[test]
+    fn stale_db_revision_does_not_replace_newer_active_worker() {
+        assert_eq!(worker_action(Some(7), Some(8)), WorkerAction::Noop);
+    }
+
+    #[test]
+    fn newer_db_revision_replaces_active_worker() {
+        assert_eq!(
+            worker_action(Some(8), Some(7)),
+            WorkerAction::Replace {
+                old_revision: 7,
+                new_revision: 8,
+            }
+        );
+    }
+
+    #[test]
+    fn spawnable_db_row_without_active_worker_spawns() {
+        assert_eq!(
+            worker_action(Some(3), None),
+            WorkerAction::Spawn { revision: 3 }
+        );
+    }
+
+    #[test]
+    fn missing_spawnable_row_stops_active_worker() {
+        assert_eq!(
+            worker_action(None, Some(3)),
+            WorkerAction::Stop { revision: 3 }
+        );
+    }
+
+    #[test]
+    fn matching_revisions_are_noop() {
+        assert_eq!(worker_action(Some(3), Some(3)), WorkerAction::Noop);
+    }
+
+    #[test]
+    fn missing_row_without_active_worker_is_noop() {
+        assert_eq!(worker_action(None, None), WorkerAction::Noop);
     }
 }
