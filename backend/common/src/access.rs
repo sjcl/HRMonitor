@@ -1,7 +1,7 @@
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 
-use crate::auth::{AuthenticatedUser, AuthContext, UserIdParam};
+use crate::auth::{AuthContext, AuthenticatedUser, UserIdParam};
 use crate::error::AppError;
 use crate::visibility::values::{GROUP_DEFAULT, PRIVATE};
 
@@ -77,10 +77,7 @@ pub struct ViewableUserId(pub String);
 impl<S: AuthContext> FromRequestParts<S> for ViewableUserId {
     type Rejection = AppError;
 
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &S,
-    ) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let auth_user = parts
             .extensions
             .get::<AuthenticatedUser>()
@@ -91,4 +88,3 @@ impl<S: AuthContext> FromRequestParts<S> for ViewableUserId {
         Ok(ViewableUserId(target_id))
     }
 }
-

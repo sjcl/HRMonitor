@@ -140,7 +140,9 @@ impl PulsoidOAuthConfig {
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();
-            return Err(OAuthError::TokenEndpoint(TokenEndpointError::new(status, body)));
+            return Err(OAuthError::TokenEndpoint(TokenEndpointError::new(
+                status, body,
+            )));
         }
 
         Ok(resp.json().await?)
@@ -162,7 +164,9 @@ impl PulsoidOAuthConfig {
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();
-            return Err(OAuthError::TokenEndpoint(TokenEndpointError::new(status, body)));
+            return Err(OAuthError::TokenEndpoint(TokenEndpointError::new(
+                status, body,
+            )));
         }
 
         Ok(resp.json().await?)

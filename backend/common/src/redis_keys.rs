@@ -67,6 +67,9 @@ mod tests {
     fn future_recorded_at_collapses_to_full_ttl() {
         let now = 1_700_000_000;
         let recorded = now + 60;
-        assert_eq!(latest_bpm_ttl_secs(now, recorded), Some(LATEST_BPM_TTL_SECS));
+        assert_eq!(
+            latest_bpm_ttl_secs(now, recorded),
+            Some(LATEST_BPM_TTL_SECS)
+        );
     }
 }

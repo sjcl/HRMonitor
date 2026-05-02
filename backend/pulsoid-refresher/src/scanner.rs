@@ -24,8 +24,8 @@ use std::time::Instant;
 
 use common::pulsoid_oauth::PulsoidOAuthConfig;
 use common::token_encryption::TokenEncryption;
-use futures::stream::FuturesUnordered;
 use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 use sqlx::PgPool;
 use tokio::sync::watch;
 
@@ -67,7 +67,10 @@ pub async fn scan_and_refresh_once(
     };
 
     if candidates.is_empty() {
-        tracing::debug!(elapsed_ms = started.elapsed().as_millis() as u64, "Scan: no candidates");
+        tracing::debug!(
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "Scan: no candidates"
+        );
         return false;
     }
 
@@ -120,9 +123,7 @@ pub async fn scan_and_refresh_once(
         }
 
         // Feed the next candidate if we're not shutting down.
-        if !shutting_down
-            && let Some((user_id, expected_revision)) = iter.next()
-        {
+        if !shutting_down && let Some((user_id, expected_revision)) = iter.next() {
             in_flight.push(make_future(user_id, expected_revision));
         }
     }

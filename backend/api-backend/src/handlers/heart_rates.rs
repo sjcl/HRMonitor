@@ -12,11 +12,11 @@ use common::access::ensure_active_member;
 use common::auth::AuthenticatedUser;
 
 use crate::AppState;
-use common::access::ViewableUserId;
 use crate::models::{
     DailyStatsQuery, DailyStatsResponse, GroupHeartRateResponse, GroupMinuteStatsResponse,
     HeartRateByDateQuery, HeartRateQuery, HeartRateResponse, MinuteStatsResponse,
 };
+use common::access::ViewableUserId;
 
 fn parse_date(s: &str) -> Result<NaiveDate, AppError> {
     NaiveDate::parse_from_str(s, "%Y-%m-%d")
