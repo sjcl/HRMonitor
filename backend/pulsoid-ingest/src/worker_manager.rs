@@ -66,7 +66,7 @@ impl WorkerManager {
         tracing::info!("Starting {} active workers", rows.len());
 
         for (user_id, revision) in rows {
-            self.replace_worker(&user_id, revision, None).await;
+            self.apply_db_state_for_user(&user_id, Some(revision)).await;
         }
     }
 
@@ -87,80 +87,31 @@ impl WorkerManager {
             }
         };
 
-        // 2. Snapshot the in-memory worker version
-        let active_version = {
-            let state = self.state.lock().await;
-            state.get(user_id).map(|ws| ws.revision)
-        };
-
-        // 3. Delegate to the shared decision function
-        self.apply_db_state_for_user(user_id, db_version, active_version)
-            .await;
+        // 2. Delegate to the shared decision function
+        self.apply_db_state_for_user(user_id, db_version).await;
     }
 
     /// Apply DB state to the in-memory worker slot for one user.
-    /// Both versions are snapshotted by the caller (under lock or via atomic query).
     /// Logs the branch taken at debug level only — info-level "state actually
-    /// changed" logs live in `replace_worker` / `guarded_stop` so that skipped
-    /// and no-op invocations do not get double-logged.
-    ///
-    /// If the inner CAS loses a slot race (e.g. a stale reconcile inserted
-    /// first), re-snapshots DB + in-memory state and retries once so the
-    /// fresh caller can overtake the stale worker.
-    async fn apply_db_state_for_user(
-        &self,
-        user_id: &str,
-        db_version: Option<i32>,
-        active_version: Option<i32>,
-    ) {
-        if self.try_apply(user_id, db_version, active_version).await {
-            return;
-        }
+    /// changed" logs live in this function so that skipped and no-op
+    /// invocations do not get double-logged.
+    async fn apply_db_state_for_user(&self, user_id: &str, db_version: Option<i32>) {
+        let mut state = self.state.lock().await;
+        let active_version = state.get(user_id).map(|ws| ws.revision);
 
-        // replace_worker or guarded_stop lost a CAS race.
-        // Re-snapshot both sides and retry once so the fresh caller
-        // can overtake a stale insert.
-        tracing::debug!(user_id, ?db_version, ?active_version, "apply: CAS failed, re-snapshotting for retry");
-
-        let db_version = match sqlx::query_as::<_, (i32,)>(SPAWNABLE_USER_SQL)
-            .bind(user_id)
-            .fetch_optional(&self.db)
-            .await
-        {
-            Ok(row) => row.map(|(rev,)| rev),
-            Err(e) => {
-                tracing::warn!(user_id, "apply retry: DB error: {e}");
-                return;
-            }
-        };
-        let active_version = {
-            let state = self.state.lock().await;
-            state.get(user_id).map(|ws| ws.revision)
-        };
-
-        self.try_apply(user_id, db_version, active_version).await;
-    }
-
-    /// Core decision logic. Returns true if the action succeeded or state is
-    /// already converged; false means a CAS/slot race — caller may retry.
-    async fn try_apply(
-        &self,
-        user_id: &str,
-        db_version: Option<i32>,
-        active_version: Option<i32>,
-    ) -> bool {
         match (db_version, active_version) {
             // DB has row, no worker → spawn
             (Some(db_ver), None) => {
                 tracing::debug!(user_id, db_ver, "apply: spawn branch");
-                self.replace_worker(user_id, db_ver, None).await
+                let worker = self.spawn_worker(user_id, db_ver);
+                state.insert(user_id.to_string(), worker);
+                tracing::info!(user_id, new_revision = db_ver, "Worker spawned");
             }
             // DB has row, worker at same version → no-op
             (Some(db_ver), Some(active_ver)) if db_ver == active_ver => {
                 tracing::debug!(user_id, db_ver, "apply: in-sync, no-op");
-                true
             }
-            // DB has row, worker at different version → guarded replace
+            // DB has row, worker at different version → replace
             (Some(db_ver), Some(active_ver)) => {
                 tracing::debug!(
                     user_id,
@@ -168,15 +119,31 @@ impl WorkerManager {
                     new_version = db_ver,
                     "apply: replace branch"
                 );
-                self.replace_worker(user_id, db_ver, Some(active_ver)).await
+                if let Some(old_worker) = state.remove(user_id) {
+                    old_worker.handle.abort();
+                    let _ = old_worker.handle.await;
+                }
+
+                let worker = self.spawn_worker(user_id, db_ver);
+                state.insert(user_id.to_string(), worker);
+                tracing::info!(
+                    user_id,
+                    old_revision = active_ver,
+                    new_revision = db_ver,
+                    "Worker replaced"
+                );
             }
-            // DB has no spawnable row, worker exists → guarded stop
+            // DB has no spawnable row, worker exists → stop
             (None, Some(active_ver)) => {
                 tracing::debug!(user_id, active_ver, "apply: stop branch");
-                self.guarded_stop(user_id, active_ver).await
+                if let Some(old_worker) = state.remove(user_id) {
+                    old_worker.handle.abort();
+                    let _ = old_worker.handle.await;
+                    tracing::info!(user_id, active_ver, "Worker stopped");
+                }
             }
             // Neither → no-op
-            (None, None) => true,
+            (None, None) => {}
         }
     }
 
@@ -214,10 +181,7 @@ impl WorkerManager {
                 })
                 .collect();
 
-            let snapshot = state
-                .iter()
-                .map(|(k, v)| (k.clone(), v.revision))
-                .collect();
+            let snapshot = state.iter().map(|(k, v)| (k.clone(), v.revision)).collect();
 
             (snapshot, finished_workers)
         };
@@ -246,85 +210,18 @@ impl WorkerManager {
 
         for user_id in &all_ids {
             let db_ver = db_connections.get(user_id).copied();
-            let active_ver = snapshot.get(user_id).copied();
-            self.apply_db_state_for_user(user_id, db_ver, active_ver)
-                .await;
+            self.apply_db_state_for_user(user_id, db_ver).await;
         }
     }
 
-    /// Replace a worker, guarded by version.
-    ///
-    /// Behavior depends on current slot state and `expected_current_version`:
-    /// - Slot vacant: insert (regardless of expected_current_version).
-    /// - Slot occupied, `Some(v)`, current version == v: remove + abort + insert.
-    /// - Slot occupied, `Some(v)`, current version != v: return false.
-    /// - Slot occupied, `None`: return false (never overwrite without a version token).
-    ///
-    /// This is NOT "unconditional replace" — it never overwrites a worker whose
-    /// version is unknown or doesn't match `expected_current_version`.
-    ///
-    /// Two-phase to avoid awaiting under the lock.
-    /// Returns true if a new worker was spawned.
-    async fn replace_worker(
-        &self,
-        user_id: &str,
-        new_revision: i32,
-        expected_current_version: Option<i32>,
-    ) -> bool {
-        // Phase 1: lock, check, remove handle if allowed
-        let old_handle = {
-            let mut state = self.state.lock().await;
-            match state.get(user_id) {
-                Some(current) => match expected_current_version {
-                    Some(expected) if current.revision == expected => {
-                        state.remove(user_id).map(|ws| ws.handle)
-                    }
-                    _ => return false,
-                },
-                None => None,
-            }
-        };
-
-        // Phase 2: abort + await outside lock
-        if let Some(handle) = old_handle {
-            handle.abort();
-            let _ = handle.await;
-        }
-
-        // Phase 3: re-lock, verify slot is still vacant, insert
-        let mut state = self.state.lock().await;
-        if state.contains_key(user_id) {
-            // Another call inserted a worker between unlock and re-lock.
-            return false;
-        }
-
+    fn spawn_worker(&self, user_id: &str, revision: i32) -> WorkerState {
         let db = self.db.clone();
         let nats = self.nats.clone();
         let redis = self.redis.clone();
         let encryption = self.encryption.clone();
         let uid = user_id.to_string();
-        let handle = tokio::spawn(run_worker(
-            db,
-            nats,
-            redis,
-            encryption,
-            uid,
-            new_revision,
-        ));
-        state.insert(
-            user_id.to_string(),
-            WorkerState {
-                handle,
-                revision: new_revision,
-            },
-        );
-        tracing::info!(
-            user_id,
-            new_revision,
-            ?expected_current_version,
-            "Worker spawned"
-        );
-        true
+        let handle = tokio::spawn(run_worker(db, nats, redis, encryption, uid, revision));
+        WorkerState { handle, revision }
     }
 
     /// Abort and await all active workers. Called once during graceful shutdown.
@@ -347,27 +244,5 @@ impl WorkerManager {
                 Err(e) => tracing::warn!(user_id, "Worker join error: {e}"),
             }
         }
-    }
-
-    /// Stop a worker only if it holds exactly `expected_version`.
-    /// Two-phase to avoid awaiting under the lock.
-    /// Returns true if the worker was stopped.
-    async fn guarded_stop(&self, user_id: &str, expected_version: i32) -> bool {
-        let old_handle = {
-            let mut state = self.state.lock().await;
-            match state.get(user_id) {
-                Some(current) if current.revision == expected_version => {
-                    state.remove(user_id).map(|ws| ws.handle)
-                }
-                _ => return false,
-            }
-        };
-
-        if let Some(handle) = old_handle {
-            handle.abort();
-            let _ = handle.await;
-            tracing::info!(user_id, expected_version, "Worker stopped (guarded)");
-        }
-        true
     }
 }
