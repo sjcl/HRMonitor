@@ -4,21 +4,21 @@ use axum::extract::{Path, State, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
-use redis::AsyncCommands;
+use redis::{AsyncCommands, RedisError};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::time::{Duration, Interval, interval};
 
-use common::access::ViewableUserId;
 use crate::WsState;
+use common::access::ViewableUserId;
 
 use common::access::{ensure_active_member, ensure_can_view_user};
 use common::auth::AuthenticatedUser;
 use common::error::AppError;
 use common::messages::HeartRateReceived;
-use common::visibility::values::PRIVATE;
 use common::redis_keys::latest_bpm_key;
+use common::visibility::values::PRIVATE;
 
 /// Close frame sent by every WS handler when the shutdown token fires.
 /// Shared so production code and tests stay locked on the same 1001 + reason.
@@ -98,15 +98,16 @@ async fn handle_single_user_ws(
     let (mut sender, mut receiver) = socket.split();
     let mut broadcast_rx = state.hr_broadcast.subscribe();
 
-    let snap = read_snapshot(&state, std::slice::from_ref(&target_user_id)).await;
-    log_snapshot_errors("single_user initial", &snap);
-    let mut last_sent: Option<HeartRateReceived> = match snap.get(&target_user_id) {
-        Some(SnapshotEntry::Hit(hr)) => Some(hr.clone()),
-        _ => None,
+    let snap = match read_snapshot(&state, std::slice::from_ref(&target_user_id)).await {
+        Ok(snap) => snap,
+        Err(e) => {
+            warn_snapshot_error("single_user initial", &e);
+            return;
+        }
     };
-    let initial = WsServerMessage::Snapshot {
-        data: to_ws_snapshot(snap),
-    };
+    let mut last_sent: Option<HeartRateReceived> =
+        snap.get(&target_user_id).and_then(|hr| hr.clone());
+    let initial = WsServerMessage::Snapshot { data: snap };
     if !send_ws_message(&mut sender, &initial).await {
         return;
     }
@@ -148,17 +149,22 @@ async fn handle_single_user_ws(
                 }
             }
             _ = self_heal_interval.tick() => {
-                let snap = read_snapshot(&state, std::slice::from_ref(&target_user_id)).await;
-                log_snapshot_errors("single_user self_heal", &snap);
+                let snap = match read_snapshot(&state, std::slice::from_ref(&target_user_id)).await {
+                    Ok(snap) => snap,
+                    Err(e) => {
+                        warn_snapshot_error("single_user self_heal", &e);
+                        continue;
+                    }
+                };
                 match snap.get(&target_user_id) {
-                    Some(SnapshotEntry::Hit(hr)) => {
+                    Some(Some(hr)) => {
                         if last_sent.as_ref() != Some(hr) {
                             last_sent = Some(hr.clone());
                             let msg = WsServerMessage::Update { data: hr.clone() };
                             if !send_ws_message(&mut sender, &msg).await { break; }
                         }
                     }
-                    Some(SnapshotEntry::Miss) | None => {
+                    Some(None) | None => {
                         if last_sent.is_some() {
                             last_sent = None;
                             let mut data: HashMap<String, Option<HeartRateReceived>> =
@@ -168,7 +174,6 @@ async fn handle_single_user_ws(
                             if !send_ws_message(&mut sender, &msg).await { break; }
                         }
                     }
-                    Some(SnapshotEntry::Error) => {}
                 }
             }
         }
@@ -197,16 +202,19 @@ async fn handle_group_ws(
     let mut last_sent: HashMap<String, HeartRateReceived> = HashMap::new();
 
     let user_ids: Vec<String> = members.iter().cloned().collect();
-    let snap = read_snapshot(&state, &user_ids).await;
-    log_snapshot_errors("group initial", &snap);
+    let snap = match read_snapshot(&state, &user_ids).await {
+        Ok(snap) => snap,
+        Err(e) => {
+            warn_snapshot_error("group initial", &e);
+            return;
+        }
+    };
     for (uid, entry) in &snap {
-        if let SnapshotEntry::Hit(hr) = entry {
+        if let Some(hr) = entry {
             last_sent.insert(uid.clone(), hr.clone());
         }
     }
-    let initial = WsServerMessage::Snapshot {
-        data: to_ws_snapshot(snap),
-    };
+    let initial = WsServerMessage::Snapshot { data: snap };
     if !send_ws_message(&mut sender, &initial).await {
         return;
     }
@@ -262,40 +270,45 @@ async fn handle_group_ws(
 
                 let added: Vec<String> = new_members.difference(&members).cloned().collect();
                 if !added.is_empty() {
-                    let snap = read_snapshot(&state, &added).await;
-                    log_snapshot_errors("group added_members", &snap);
-                    for (uid, entry) in &snap {
-                        if let SnapshotEntry::Hit(hr) = entry {
-                            last_sent.insert(uid.clone(), hr.clone());
+                    match read_snapshot(&state, &added).await {
+                        Ok(snap) => {
+                            for (uid, entry) in &snap {
+                                if let Some(hr) = entry {
+                                    last_sent.insert(uid.clone(), hr.clone());
+                                }
+                            }
+                            let msg = WsServerMessage::Snapshot { data: snap };
+                            if !send_ws_message(&mut sender, &msg).await { break; }
                         }
+                        Err(e) => warn_snapshot_error("group added_members", &e),
                     }
-                    let msg = WsServerMessage::Snapshot {
-                        data: to_ws_snapshot(snap),
-                    };
-                    if !send_ws_message(&mut sender, &msg).await { break; }
                 }
 
                 members = new_members;
             }
             _ = self_heal_interval.tick() => {
                 let user_ids: Vec<String> = members.iter().cloned().collect();
-                let snap = read_snapshot(&state, &user_ids).await;
-                log_snapshot_errors("group self_heal", &snap);
+                let snap = match read_snapshot(&state, &user_ids).await {
+                    Ok(snap) => snap,
+                    Err(e) => {
+                        warn_snapshot_error("group self_heal", &e);
+                        continue;
+                    }
+                };
                 let mut diffs: HashMap<String, Option<HeartRateReceived>> = HashMap::new();
                 for (uid, entry) in snap {
                     match entry {
-                        SnapshotEntry::Hit(hr) => {
+                        Some(hr) => {
                             if last_sent.get(&uid) != Some(&hr) {
                                 last_sent.insert(uid.clone(), hr.clone());
                                 diffs.insert(uid, Some(hr));
                             }
                         }
-                        SnapshotEntry::Miss => {
+                        None => {
                             if last_sent.remove(&uid).is_some() {
                                 diffs.insert(uid, None);
                             }
                         }
-                        SnapshotEntry::Error => {}
                     }
                 }
                 if !diffs.is_empty() {
@@ -388,83 +401,48 @@ async fn fetch_sharing_members(
     Ok(set)
 }
 
-enum SnapshotEntry {
-    Hit(HeartRateReceived),
-    Miss,
-    Error,
-}
-
 async fn read_snapshot(
     state: &WsState,
     user_ids: &[String],
-) -> HashMap<String, SnapshotEntry> {
-    let mut results: HashMap<String, SnapshotEntry> = HashMap::with_capacity(user_ids.len());
+) -> redis::RedisResult<HashMap<String, Option<HeartRateReceived>>> {
+    let mut results: HashMap<String, Option<HeartRateReceived>> =
+        HashMap::with_capacity(user_ids.len());
 
     if user_ids.is_empty() {
-        return results;
+        return Ok(results);
     }
 
     let keys: Vec<String> = user_ids.iter().map(|id| latest_bpm_key(id)).collect();
     let mut redis = state.redis.clone();
 
-    match redis.mget::<_, Vec<Option<String>>>(&keys).await {
-        Ok(values) => {
-            for (user_id, value) in user_ids.iter().zip(values) {
-                let entry = match value {
-                    Some(s) => match serde_json::from_str::<HeartRateReceived>(&s) {
-                        Ok(hr) => SnapshotEntry::Hit(hr),
-                        Err(e) => {
-                            tracing::warn!(
-                                user_id = %user_id,
-                                error = %e,
-                                "failed to parse latest_bpm payload; treating as miss"
-                            );
-                            SnapshotEntry::Miss
-                        }
-                    },
-                    None => SnapshotEntry::Miss,
-                };
-                results.insert(user_id.clone(), entry);
-            }
-        }
-        Err(_) => {
-            for user_id in user_ids {
-                results.insert(user_id.clone(), SnapshotEntry::Error);
-            }
-        }
+    let values = redis.mget::<_, Vec<Option<String>>>(&keys).await?;
+    for (user_id, value) in user_ids.iter().zip(values) {
+        let entry = match value {
+            Some(s) => match serde_json::from_str::<HeartRateReceived>(&s) {
+                Ok(hr) => Some(hr),
+                Err(e) => {
+                    tracing::warn!(
+                        user_id = %user_id,
+                        error = %e,
+                        "failed to parse latest_bpm payload; treating as miss"
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
+        results.insert(user_id.clone(), entry);
     }
 
-    results
+    Ok(results)
 }
 
-fn log_snapshot_errors(context: &str, entries: &HashMap<String, SnapshotEntry>) {
-    let error_count = entries
-        .values()
-        .filter(|e| matches!(e, SnapshotEntry::Error))
-        .count();
-    if error_count > 0 {
-        tracing::warn!(
-            context,
-            error_count,
-            total = entries.len(),
-            "redis snapshot read had errors; preserving last sent values"
-        );
-    }
-}
-
-fn to_ws_snapshot(
-    entries: HashMap<String, SnapshotEntry>,
-) -> HashMap<String, Option<HeartRateReceived>> {
-    entries
-        .into_iter()
-        .map(|(k, v)| {
-            let slot = match v {
-                SnapshotEntry::Hit(hr) => Some(hr),
-                SnapshotEntry::Miss | SnapshotEntry::Error => None,
-            };
-            (k, slot)
-        })
-        .collect()
+fn warn_snapshot_error(context: &str, error: &RedisError) {
+    tracing::warn!(
+        context,
+        error = %error,
+        "redis snapshot read failed; preserving last sent values"
+    );
 }
 
 #[cfg(test)]
