@@ -16,6 +16,7 @@ use redis::AsyncCommands;
 use crate::models::{PulsoidConnectionRow, PulsoidMessage, SOURCE_OAUTH};
 
 const PULSOID_WS_URL: &str = "wss://dev.pulsoid.net/api/v1/data/real_time";
+const HR_RECEIVED_PUBLISH_TIMEOUT: Duration = Duration::from_millis(100);
 /// Worker-side expiry floor: if `token_expires_at` is within this many
 /// seconds of `now()` the worker will NOT attempt a WS connect and will
 /// instead back off until pulsoid-refresher bumps `revision`. This
@@ -462,11 +463,26 @@ async fn handle_message(
     // Best-effort publish. `hr.received` is a live-notification hint only:
     // history is already in the DB and the latest value is already in Redis.
     // Dropping this frame is fine; the next Pulsoid frame refreshes live state.
-    if let Err(e) = nats.publish(subjects::HR_RECEIVED, payload.into()).await {
-        tracing::warn!(
-            user_id = %user_id,
-            "Dropped hr.received publish (best-effort, next frame will refresh live state): {e}"
-        );
+    match tokio::time::timeout(
+        HR_RECEIVED_PUBLISH_TIMEOUT,
+        nats.publish(subjects::HR_RECEIVED, payload.into()),
+    )
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            tracing::warn!(
+                user_id = %user_id,
+                "Dropped hr.received publish (best-effort, next frame will refresh live state): {e}"
+            );
+        }
+        Err(_) => {
+            tracing::warn!(
+                user_id = %user_id,
+                timeout_ms = HR_RECEIVED_PUBLISH_TIMEOUT.as_millis(),
+                "Dropped hr.received publish after timeout (best-effort, next frame will refresh live state)"
+            );
+        }
     }
 
     Ok(())
