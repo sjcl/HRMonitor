@@ -81,21 +81,13 @@ pub async fn run_worker(
             Ok(t) => t,
             Err(e) => {
                 tracing::error!(user_id = %user_id, "Failed to decrypt access token: {e}");
-                if let Err(update_err) = update_connection_state(
+                persist_terminal_error_best_effort(
                     &db,
                     &user_id,
                     revision,
-                    ConnectionState::Error,
                     Some("Failed to decrypt access token"),
                 )
-                .await
-                {
-                    tracing::warn!(
-                        user_id = %user_id,
-                        revision,
-                        "Failed to persist terminal error state: {update_err}"
-                    );
-                }
+                .await;
                 return;
             }
         };
@@ -117,21 +109,13 @@ pub async fn run_worker(
                 // zero-row result means the row was superseded (stale
                 // revision) or concurrently removed — either way we're
                 // already about to `return`.
-                if let Err(update_err) = update_connection_state(
+                persist_terminal_error_best_effort(
                     &db,
                     &user_id,
                     revision,
-                    ConnectionState::Error,
                     conn.last_error.as_deref(),
                 )
-                .await
-                {
-                    tracing::warn!(
-                        user_id = %user_id,
-                        revision,
-                        "Failed to persist terminal error state: {update_err}"
-                    );
-                }
+                .await;
                 return;
             }
 
@@ -149,21 +133,13 @@ pub async fn run_worker(
                 }
             } else {
                 tracing::error!(user_id = %user_id, "OAuth connection missing token_expires_at");
-                if let Err(update_err) = update_connection_state(
+                persist_terminal_error_best_effort(
                     &db,
                     &user_id,
                     revision,
-                    ConnectionState::Error,
                     Some("OAuth connection missing expiry (data inconsistency)"),
                 )
-                .await
-                {
-                    tracing::warn!(
-                        user_id = %user_id,
-                        revision,
-                        "Failed to persist terminal error state: {update_err}"
-                    );
-                }
+                .await;
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(max_backoff);
                 continue;
@@ -327,6 +303,23 @@ async fn update_connection_state(
         Ok(WriteOutcome::Applied)
     } else {
         classify_no_op(db, user_id, revision).await
+    }
+}
+
+async fn persist_terminal_error_best_effort(
+    db: &PgPool,
+    user_id: &str,
+    revision: i32,
+    error: Option<&str>,
+) {
+    if let Err(update_err) =
+        update_connection_state(db, user_id, revision, ConnectionState::Error, error).await
+    {
+        tracing::warn!(
+            user_id = %user_id,
+            revision,
+            "Failed to persist terminal error state: {update_err}"
+        );
     }
 }
 
