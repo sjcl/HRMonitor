@@ -26,7 +26,7 @@
 //!    zero-row updates is delegated to [`classify_no_op`] for identical
 //!    logging shape with the other services.
 
-use common::messages::{subjects, ConnectionChangeCommand};
+use common::messages::{ConnectionChangeCommand, subjects};
 use common::pulsoid_oauth::{OAuthError, PulsoidOAuthConfig};
 use common::pulsoid_state::{ConnectionState, WriteOutcome, classify_no_op};
 use common::time::unix_now_secs;
@@ -100,13 +100,12 @@ pub async fn refresh_if_expiring(
         }
     };
 
-    let acquired: Result<(bool,), _> = sqlx::query_as(
-        "SELECT pg_try_advisory_xact_lock($1, hashtext('pulsoid_refresh:' || $2))",
-    )
-    .bind(ADVISORY_LOCK_NAMESPACE)
-    .bind(user_id)
-    .fetch_one(&mut *lock_tx)
-    .await;
+    let acquired: Result<(bool,), _> =
+        sqlx::query_as("SELECT pg_try_advisory_xact_lock($1, hashtext('pulsoid_refresh:' || $2))")
+            .bind(ADVISORY_LOCK_NAMESPACE)
+            .bind(user_id)
+            .fetch_one(&mut *lock_tx)
+            .await;
 
     match acquired {
         Ok((true,)) => {}
@@ -126,8 +125,7 @@ pub async fn refresh_if_expiring(
     // function. All DML runs on *different* connections obtained from the
     // pool, so the row locks they take are short-lived while the advisory
     // lock stays held.
-    let outcome = refresh_inner(db, nats, encryption, oauth, user_id, expected_revision)
-        .await;
+    let outcome = refresh_inner(db, nats, encryption, oauth, user_id, expected_revision).await;
 
     // Release the advisory lock. Either direction is fine (commit vs
     // rollback — no DML was executed) but commit is cheaper and clearer.
@@ -296,32 +294,15 @@ async fn refresh_inner(
     {
         Ok(r) if r.rows_affected() == 0 => {
             let _ = tx_b.rollback().await;
-            match classify_no_op(db, user_id, expected_revision).await {
-                Ok(WriteOutcome::StickyError) => {
-                    tracing::warn!(
-                        user_id,
-                        expected_revision,
-                        "Refresh abandoned: row is in sticky error state"
-                    );
-                    return RefreshOutcome::SkippedStickyError;
-                }
-                Ok(_) => {
-                    tracing::info!(
-                        user_id,
-                        expected_revision,
-                        "Token refresh abandoned: connection superseded"
-                    );
-                    return RefreshOutcome::SkippedSuperseded;
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        user_id,
-                        expected_revision,
-                        "Failed to classify zero-row update: {e}"
-                    );
-                    return RefreshOutcome::TransientFailure;
-                }
-            }
+            return classify_refresh_no_op(
+                db,
+                user_id,
+                expected_revision,
+                "Refresh abandoned: row is in sticky error state",
+                "Token refresh abandoned: connection superseded",
+                false,
+            )
+            .await;
         }
         Ok(_) => {}
         Err(e) => {
@@ -415,32 +396,15 @@ async fn refresh_inner(
         Ok(Some((rev,))) => rev,
         Ok(None) => {
             let _ = tx_c.rollback().await;
-            match classify_no_op(db, user_id, expected_revision).await {
-                Ok(WriteOutcome::StickyError) => {
-                    tracing::warn!(
-                        user_id,
-                        expected_revision,
-                        "Refreshed tokens discarded: row is in sticky error state (resurrect only via fresh re-auth)"
-                    );
-                    return RefreshOutcome::SkippedStickyError;
-                }
-                Ok(_) => {
-                    tracing::warn!(
-                        user_id,
-                        expected_revision,
-                        "Refreshed tokens discarded: connection superseded"
-                    );
-                    return RefreshOutcome::SkippedSuperseded;
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        user_id,
-                        expected_revision,
-                        "Failed to classify zero-row update: {e}"
-                    );
-                    return RefreshOutcome::TransientFailure;
-                }
-            }
+            return classify_refresh_no_op(
+                db,
+                user_id,
+                expected_revision,
+                "Refreshed tokens discarded: row is in sticky error state (resurrect only via fresh re-auth)",
+                "Refreshed tokens discarded: connection superseded",
+                true,
+            )
+            .await;
         }
         Err(e) => {
             tracing::error!(user_id, "Failed to save refreshed tokens: {e}");
@@ -463,6 +427,64 @@ async fn refresh_inner(
     publish_connection_changed(nats, user_id).await;
 
     RefreshOutcome::Refreshed { new_revision }
+}
+
+async fn classify_refresh_no_op(
+    db: &PgPool,
+    user_id: &str,
+    expected_revision: i32,
+    sticky_msg: &'static str,
+    stale_msg: &'static str,
+    stale_warn: bool,
+) -> RefreshOutcome {
+    match classify_no_op(db, user_id, expected_revision).await {
+        Ok(WriteOutcome::StickyError) => {
+            tracing::warn!(user_id, expected_revision, "{sticky_msg}");
+            RefreshOutcome::SkippedStickyError
+        }
+        Ok(WriteOutcome::Applied) | Ok(WriteOutcome::StaleOrMissing) => {
+            if stale_warn {
+                tracing::warn!(user_id, expected_revision, "{stale_msg}");
+            } else {
+                tracing::info!(user_id, expected_revision, "{stale_msg}");
+            }
+            RefreshOutcome::SkippedSuperseded
+        }
+        Err(e) => {
+            tracing::warn!(
+                user_id,
+                expected_revision,
+                "Failed to classify zero-row update: {e}"
+            );
+            RefreshOutcome::TransientFailure
+        }
+    }
+}
+
+async fn log_error_state_no_op(db: &PgPool, user_id: &str, expected_revision: i32) {
+    match classify_no_op(db, user_id, expected_revision).await {
+        Ok(WriteOutcome::StickyError) => {
+            tracing::warn!(
+                user_id,
+                expected_revision,
+                "Non-terminal refresh error not written: row is in sticky error state"
+            );
+        }
+        Ok(WriteOutcome::Applied) | Ok(WriteOutcome::StaleOrMissing) => {
+            tracing::info!(
+                user_id,
+                expected_revision,
+                "Error state not written: connection superseded"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                user_id,
+                expected_revision,
+                "Failed to classify zero-row update: {e}"
+            );
+        }
+    }
 }
 
 /// Write an error state to `pulsoid_connections` in a dedicated short-lived
@@ -506,29 +528,7 @@ async fn write_error_state(
 
     let did_write = match res {
         Ok(r) if r.rows_affected() == 0 => {
-            match classify_no_op(db, user_id, expected_revision).await {
-                Ok(WriteOutcome::StickyError) => {
-                    tracing::warn!(
-                        user_id,
-                        expected_revision,
-                        "Non-terminal refresh error not written: row is in sticky error state"
-                    );
-                }
-                Ok(_) => {
-                    tracing::info!(
-                        user_id,
-                        expected_revision,
-                        "Error state not written: connection superseded"
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        user_id,
-                        expected_revision,
-                        "Failed to classify zero-row update: {e}"
-                    );
-                }
-            }
+            log_error_state_no_op(db, user_id, expected_revision).await;
             false
         }
         Ok(_) => {

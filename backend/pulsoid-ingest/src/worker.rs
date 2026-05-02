@@ -211,31 +211,14 @@ pub async fn run_worker(
                 .await
                 {
                     Ok(result) if result.rows_affected() == 0 => {
-                        // Disambiguate: stale revision vs. sticky error
-                        // state flipped by api-backend during WS connect.
-                        match classify_no_op(&db, &user_id, revision).await {
-                            Ok(WriteOutcome::StaleOrMissing) | Ok(WriteOutcome::Applied) => {
-                                tracing::info!(
-                                    user_id = %user_id,
-                                    revision,
-                                    "Stale worker detected (revision mismatch), exiting"
-                                );
-                            }
-                            Ok(WriteOutcome::StickyError) => {
-                                tracing::warn!(
-                                    user_id = %user_id,
-                                    revision,
-                                    "Refused to mark connected: row in sticky error state, exiting"
-                                );
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    user_id = %user_id,
-                                    revision,
-                                    "Failed to classify zero-row update: {e}; exiting"
-                                );
-                            }
-                        }
+                        classify_worker_zero_row_exit(
+                            &db,
+                            &user_id,
+                            revision,
+                            "Stale worker detected (revision mismatch), exiting",
+                            "Refused to mark connected: row in sticky error state, exiting",
+                        )
+                        .await;
                         return;
                     }
                     Ok(_) => {}
@@ -274,39 +257,22 @@ pub async fn run_worker(
                     }
                 }
 
-                match update_connection_state(
-                    &db,
+                if worker_state_write_should_exit(
+                    update_connection_state(
+                        &db,
+                        &user_id,
+                        revision,
+                        ConnectionState::Pending,
+                        Some("WebSocket disconnected, reconnecting"),
+                    )
+                    .await,
                     &user_id,
                     revision,
-                    ConnectionState::Pending,
-                    Some("WebSocket disconnected, reconnecting"),
-                )
-                .await
-                {
-                    Ok(WriteOutcome::Applied) => {}
-                    Ok(WriteOutcome::StaleOrMissing) => {
-                        tracing::info!(
-                            user_id = %user_id,
-                            revision,
-                            "Stale worker detected (revision mismatch), exiting"
-                        );
-                        return;
-                    }
-                    Ok(WriteOutcome::StickyError) => {
-                        tracing::warn!(
-                            user_id = %user_id,
-                            revision,
-                            "WS disconnected and row is now in sticky error state, exiting"
-                        );
-                        return;
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            user_id = %user_id,
-                            revision,
-                            "Failed to set pending state after disconnect: {e}"
-                        );
-                    }
+                    "Stale worker detected (revision mismatch), exiting",
+                    "WS disconnected and row is now in sticky error state, exiting",
+                    "Failed to set pending state after disconnect",
+                ) {
+                    return;
                 }
             }
             Err(error_msg) => {
@@ -361,6 +327,55 @@ async fn update_connection_state(
         Ok(WriteOutcome::Applied)
     } else {
         classify_no_op(db, user_id, revision).await
+    }
+}
+
+async fn classify_worker_zero_row_exit(
+    db: &PgPool,
+    user_id: &str,
+    revision: i32,
+    stale_msg: &'static str,
+    sticky_msg: &'static str,
+) {
+    match classify_no_op(db, user_id, revision).await {
+        Ok(WriteOutcome::Applied) | Ok(WriteOutcome::StaleOrMissing) => {
+            tracing::info!(user_id = %user_id, revision, "{stale_msg}");
+        }
+        Ok(WriteOutcome::StickyError) => {
+            tracing::warn!(user_id = %user_id, revision, "{sticky_msg}");
+        }
+        Err(e) => {
+            tracing::warn!(
+                user_id = %user_id,
+                revision,
+                "Failed to classify zero-row update: {e}; exiting"
+            );
+        }
+    }
+}
+
+fn worker_state_write_should_exit(
+    outcome: Result<WriteOutcome, sqlx::Error>,
+    user_id: &str,
+    revision: i32,
+    stale_msg: &'static str,
+    sticky_msg: &'static str,
+    error_msg: &'static str,
+) -> bool {
+    match outcome {
+        Ok(WriteOutcome::Applied) => false,
+        Ok(WriteOutcome::StaleOrMissing) => {
+            tracing::info!(user_id = %user_id, revision, "{stale_msg}");
+            true
+        }
+        Ok(WriteOutcome::StickyError) => {
+            tracing::warn!(user_id = %user_id, revision, "{sticky_msg}");
+            true
+        }
+        Err(e) => {
+            tracing::warn!(user_id = %user_id, revision, "{error_msg}: {e}");
+            false
+        }
     }
 }
 
@@ -437,11 +452,10 @@ async fn handle_message(
     // Redis recovers.
     let key = latest_bpm_key(user_id);
     let value = serialize_latest_bpm(&update);
-    if let Err(e) = redis
-        .set_ex::<_, _, ()>(&key, &value, ttl)
-        .await
-    {
-        return Err(format!("latest_bpm Redis write failed after DB insert: {e}"));
+    if let Err(e) = redis.set_ex::<_, _, ()>(&key, &value, ttl).await {
+        return Err(format!(
+            "latest_bpm Redis write failed after DB insert: {e}"
+        ));
     }
 
     let payload = match serde_json::to_vec(&update) {
@@ -477,33 +491,21 @@ async fn persist_pending_or_stale(
     revision: i32,
     error_msg: &str,
 ) -> bool {
-    match update_connection_state(db, user_id, revision, ConnectionState::Pending, Some(error_msg)).await {
-        Ok(WriteOutcome::Applied) => false,
-        Ok(WriteOutcome::StaleOrMissing) => {
-            tracing::info!(
-                user_id = %user_id,
-                revision,
-                "Stale worker detected (revision mismatch), exiting"
-            );
-            true
-        }
-        Ok(WriteOutcome::StickyError) => {
-            tracing::warn!(
-                user_id = %user_id,
-                revision,
-                "Connection error persist refused: row is in sticky error state, exiting"
-            );
-            true
-        }
-        Err(e) => {
-            tracing::warn!(
-                user_id = %user_id,
-                revision,
-                "Failed to set pending state after connection error: {e}"
-            );
-            false
-        }
-    }
+    worker_state_write_should_exit(
+        update_connection_state(
+            db,
+            user_id,
+            revision,
+            ConnectionState::Pending,
+            Some(error_msg),
+        )
+        .await,
+        user_id,
+        revision,
+        "Stale worker detected (revision mismatch), exiting",
+        "Connection error persist refused: row is in sticky error state, exiting",
+        "Failed to set pending state after connection error",
+    )
 }
 
 /// Redact any Pulsoid access tokens that may have leaked into an error
