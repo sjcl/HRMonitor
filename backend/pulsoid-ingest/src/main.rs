@@ -2,15 +2,36 @@ mod models;
 mod worker;
 mod worker_manager;
 
-use futures_util::StreamExt;
+use futures_util::{FutureExt, StreamExt};
+use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::task::JoinHandle;
 
 use common::messages::{ConnectionChangeCommand, subjects};
-use common::signal::{log_task_exit, shutdown_signal};
-use common::nats_backoff::{advance_backoff, INITIAL_BACKOFF, STABILITY_THRESHOLD};
+use common::nats_backoff::{INITIAL_BACKOFF, STABILITY_THRESHOLD, advance_backoff};
+use common::signal::shutdown_signal;
 use common::token_encryption::TokenEncryption;
 use worker_manager::WorkerManager;
+
+fn spawn_critical_task<F>(name: &'static str, future: F) -> JoinHandle<()>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(async move {
+        match AssertUnwindSafe(future).catch_unwind().await {
+            Ok(()) => {
+                tracing::error!("{name} returned unexpectedly; exiting");
+                std::process::exit(1);
+            }
+            Err(_) => {
+                tracing::error!("{name} panicked; exiting");
+                std::process::exit(1);
+            }
+        }
+    })
+}
 
 #[tokio::main]
 async fn main() {
@@ -26,8 +47,7 @@ async fn main() {
 
     let nats_url = std::env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".into());
 
-    let redis_url =
-        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".into());
+    let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".into());
 
     // Load encryption key BEFORE opening external connections so a missing
     // or invalid key fails fast without touching the DB or NATS server.
@@ -75,12 +95,10 @@ async fn main() {
     // "subscribe → immediate end" cycle still backs off exponentially. Mirrors
     // the api-backend `hr.received` subscriber.
     let nats_events = nats.clone();
-    let mut events_task = tokio::spawn(async move {
+    let _events_task = spawn_critical_task("Connection events subscriber", async move {
         let mut backoff = INITIAL_BACKOFF;
         loop {
-            let mut connection_sub = match nats_events
-                .subscribe(subjects::CONNECTION_CHANGED)
-                .await
+            let mut connection_sub = match nats_events.subscribe(subjects::CONNECTION_CHANGED).await
             {
                 Ok(s) => {
                     tracing::info!("Subscribed to {}", subjects::CONNECTION_CHANGED);
@@ -138,41 +156,15 @@ async fn main() {
     });
 
     // Spawn periodic DB reconciliation (every 60 seconds)
-    let mut reconcile_task = tokio::spawn(async move {
+    let _reconcile_task = spawn_critical_task("Reconciliation task", async move {
         loop {
             tokio::time::sleep(Duration::from_secs(60)).await;
             wm_reconcile.reconcile().await;
         }
     });
 
-    // Wait for shutdown signal or unexpected task exit.
-    let shutdown = shutdown_signal();
-    tokio::pin!(shutdown);
-
-    let mut task_failed = false;
-
-    tokio::select! {
-        res = &mut events_task => {
-            log_task_exit("Connection events subscriber", res);
-            task_failed = true;
-            reconcile_task.abort();
-            log_task_exit("Reconciliation task (sibling)", reconcile_task.await);
-        }
-        res = &mut reconcile_task => {
-            log_task_exit("Reconciliation task", res);
-            task_failed = true;
-            events_task.abort();
-            log_task_exit("Connection events subscriber (sibling)", events_task.await);
-        }
-        _ = &mut shutdown => {
-            tracing::info!("Received shutdown signal");
-            events_task.abort();
-            reconcile_task.abort();
-            // Normal shutdown — cancelled is expected, no need to log
-            let _ = events_task.await;
-            let _ = reconcile_task.await;
-        }
-    }
+    shutdown_signal().await;
+    tracing::info!("Received shutdown signal");
 
     // Stop all workers (abort + join each)
     worker_manager.shutdown_all().await;
@@ -180,11 +172,5 @@ async fn main() {
     // Flush outbound NATS messages
     nats.flush().await.ok();
 
-    if task_failed {
-        tracing::error!("pulsoid-ingest exiting due to task failure");
-        // non-zero exit → Docker restart: unless-stopped will restart
-        std::process::exit(1);
-    }
     tracing::info!("pulsoid-ingest shut down gracefully");
 }
-
