@@ -102,7 +102,7 @@ async fn handle_single_user_ws(
         Ok(snap) => snap,
         Err(e) => {
             warn_snapshot_error("single_user initial", &e);
-            return;
+            null_snapshot(std::slice::from_ref(&target_user_id))
         }
     };
     let mut last_sent: Option<HeartRateReceived> =
@@ -206,7 +206,7 @@ async fn handle_group_ws(
         Ok(snap) => snap,
         Err(e) => {
             warn_snapshot_error("group initial", &e);
-            return;
+            null_snapshot(&user_ids)
         }
     };
     for (uid, entry) in &snap {
@@ -437,6 +437,13 @@ async fn read_snapshot(
     Ok(results)
 }
 
+fn null_snapshot(user_ids: &[String]) -> HashMap<String, Option<HeartRateReceived>> {
+    user_ids
+        .iter()
+        .map(|user_id| (user_id.clone(), None))
+        .collect()
+}
+
 fn warn_snapshot_error(context: &str, error: &RedisError) {
     tracing::warn!(
         context,
@@ -458,5 +465,40 @@ mod tests {
             }
             other => panic!("expected Close(Some(_)), got {other:?}"),
         }
+    }
+
+    #[test]
+    fn null_snapshot_contains_single_user_with_no_value() {
+        let user_ids = vec!["user-1".to_string()];
+
+        let snapshot = null_snapshot(&user_ids);
+
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot.get("user-1"), Some(&None));
+    }
+
+    #[test]
+    fn null_snapshot_contains_all_group_users_with_no_values() {
+        let user_ids = vec![
+            "user-1".to_string(),
+            "user-2".to_string(),
+            "user-3".to_string(),
+        ];
+
+        let snapshot = null_snapshot(&user_ids);
+
+        assert_eq!(snapshot.len(), user_ids.len());
+        for user_id in user_ids {
+            assert_eq!(snapshot.get(&user_id), Some(&None));
+        }
+    }
+
+    #[test]
+    fn null_snapshot_is_empty_for_empty_input() {
+        let user_ids: Vec<String> = Vec::new();
+
+        let snapshot = null_snapshot(&user_ids);
+
+        assert!(snapshot.is_empty());
     }
 }
