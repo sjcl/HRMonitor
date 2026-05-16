@@ -22,10 +22,6 @@ enum WorkerAction {
     Stop {
         revision: i32,
     },
-    VerifyDowngrade {
-        old_revision: i32,
-        candidate_revision: i32,
-    },
     Noop,
 }
 
@@ -137,19 +133,7 @@ impl WorkerManager {
         let (action, fresh_active_version) = {
             let mut state = self.state.lock().await;
             let active_version = state.get(user_id).map(|ws| ws.revision);
-            let mut action = worker_action(fresh_db_version, active_version);
-
-            if matches!(action, WorkerAction::VerifyDowngrade { .. }) {
-                let confirmed_db_version = match self.fetch_spawnable_user_revision(user_id).await {
-                    Ok(revision) => revision,
-                    Err(e) => {
-                        tracing::warn!(user_id, "apply downgrade recheck error: {e}");
-                        return;
-                    }
-                };
-                let active_version = state.get(user_id).map(|ws| ws.revision);
-                action = confirmed_worker_action(confirmed_db_version, active_version);
-            }
+            let action = worker_action(fresh_db_version, active_version);
 
             match action {
                 WorkerAction::Spawn { revision } => {
@@ -175,7 +159,6 @@ impl WorkerManager {
                     tracing::debug!(user_id, active_version, "apply: stop branch");
                     old_handle = state.remove(user_id).map(|old_worker| old_worker.handle);
                 }
-                WorkerAction::VerifyDowngrade { .. } => unreachable!(),
                 WorkerAction::Noop => {}
             }
 
@@ -200,7 +183,6 @@ impl WorkerManager {
             WorkerAction::Stop { revision } => {
                 tracing::info!(user_id, active_ver = revision, "Worker stopped");
             }
-            WorkerAction::VerifyDowngrade { .. } => unreachable!(),
             WorkerAction::Noop => {
                 log_noop(user_id, fresh_db_version, fresh_active_version);
             }
@@ -318,16 +300,21 @@ impl WorkerManager {
     }
 }
 
+/// Decide what to do with a user's worker slot from the DB revision and the
+/// in-memory worker's revision.
+///
+/// Any `db_ver != active_ver` is a `Replace`. `pulsoid_revision_seq` is
+/// monotonic, so a DB revision *lower* than the active worker's only happens
+/// after a DB restore / PITR / manual surgery. Rather than confirm such a
+/// rewind with an extra DB round-trip, we just replace: the worst case is a
+/// possibly-stale worker for at most one reconcile cycle, which the periodic
+/// reconcile (or the next `connection.changed` hint) corrects anyway.
 fn worker_action(db_version: Option<i32>, active_version: Option<i32>) -> WorkerAction {
     match (db_version, active_version) {
         (Some(db_ver), None) => WorkerAction::Spawn { revision: db_ver },
-        (Some(db_ver), Some(active_ver)) if db_ver > active_ver => WorkerAction::Replace {
+        (Some(db_ver), Some(active_ver)) if db_ver != active_ver => WorkerAction::Replace {
             old_revision: active_ver,
             new_revision: db_ver,
-        },
-        (Some(db_ver), Some(active_ver)) if db_ver < active_ver => WorkerAction::VerifyDowngrade {
-            old_revision: active_ver,
-            candidate_revision: db_ver,
         },
         (None, Some(active_ver)) => WorkerAction::Stop {
             revision: active_ver,
@@ -336,56 +323,27 @@ fn worker_action(db_version: Option<i32>, active_version: Option<i32>) -> Worker
     }
 }
 
-fn confirmed_worker_action(db_version: Option<i32>, active_version: Option<i32>) -> WorkerAction {
-    match (db_version, active_version) {
-        (Some(db_ver), Some(active_ver)) if db_ver < active_ver => WorkerAction::Replace {
-            old_revision: active_ver,
-            new_revision: db_ver,
-        },
-        _ => worker_action(db_version, active_version),
-    }
-}
-
 fn log_noop(user_id: &str, db_version: Option<i32>, active_version: Option<i32>) {
-    match (db_version, active_version) {
-        (Some(db_ver), Some(active_ver)) if db_ver == active_ver => {
-            tracing::debug!(user_id, db_ver, "apply: in-sync, no-op");
-        }
-        (Some(db_ver), Some(active_ver)) if db_ver < active_ver => {
-            tracing::debug!(
-                user_id,
-                candidate_revision = db_ver,
-                active_version = active_ver,
-                "apply: lower DB revision requires confirmation"
-            );
-        }
-        _ => {}
+    if let (Some(db_ver), Some(active_ver)) = (db_version, active_version)
+        && db_ver == active_ver
+    {
+        tracing::debug!(user_id, db_ver, "apply: in-sync, no-op");
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{WorkerAction, confirmed_worker_action, worker_action};
+    use super::{WorkerAction, worker_action};
 
     #[test]
-    fn lower_db_revision_requires_confirmation() {
+    fn lower_db_revision_replaces_active_worker() {
         // A DB revision lower than the active worker's normally never happens
         // (`pulsoid_revision_seq` is monotonic), but a DB restore / PITR /
-        // manual surgery can rewind it. Do not replace immediately because the
-        // lower DB value may be a stale pre-lock snapshot.
+        // manual surgery can rewind it. We replace immediately rather than
+        // spend a DB round-trip confirming the rewind — a one-cycle stale
+        // worker is acceptable and the next reconcile corrects it anyway.
         assert_eq!(
             worker_action(Some(7), Some(8)),
-            WorkerAction::VerifyDowngrade {
-                old_revision: 8,
-                candidate_revision: 7,
-            }
-        );
-    }
-
-    #[test]
-    fn confirmed_lower_db_revision_replaces_active_worker() {
-        assert_eq!(
-            confirmed_worker_action(Some(7), Some(8)),
             WorkerAction::Replace {
                 old_revision: 8,
                 new_revision: 7,
