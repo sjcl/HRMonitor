@@ -451,20 +451,28 @@ async fn main() {
                         biased;
                         _ = shutdown.cancelled() => return,
                         next = hr_sub.next() => match next {
-                            Some(msg) => match serde_json::from_slice::<HeartRateReceived>(&msg.payload) {
-                                Ok(update) => {
-                                    let _ = hr_tx.send(update);
+                            Some(msg) => {
+                                // Receiving any message proves the subscription
+                                // is healthy; reset the resubscribe backoff.
+                                backoff = INITIAL_BACKOFF;
+                                match serde_json::from_slice::<HeartRateReceived>(&msg.payload) {
+                                    Ok(update) => {
+                                        let _ = hr_tx.send(update);
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Failed to parse hr.received event: {e}");
+                                    }
                                 }
-                                Err(e) => {
-                                    tracing::warn!("Failed to parse hr.received event: {e}");
-                                }
-                            },
+                            }
                             None => break,
                         }
                     }
                 }
 
-                backoff = INITIAL_BACKOFF;
+                // A "subscribe succeeds → stream ends immediately" flap must
+                // not hot-loop: back off exponentially here, reset only on a
+                // received message above.
+                backoff = advance_backoff(backoff);
                 tracing::warn!(
                     "{} subscription ended; resubscribing in {:?}",
                     subjects::HR_RECEIVED,
@@ -511,7 +519,6 @@ async fn main() {
 
     if let Err(e) = serve_result {
         tracing::error!("Server error: {e}");
-        shutdown.cancel();
         std::process::exit(1);
     }
 

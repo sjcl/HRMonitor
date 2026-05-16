@@ -90,9 +90,11 @@ async fn main() {
     //
     // Wrapped in an outer reconnect loop so the task does not silently die if
     // the Subscriber stream ends (`async_nats` auto-reconnects the client but
-    // does NOT re-install existing Subscriber handles). Subscribe failures
-    // back off exponentially, while a created subscription that later ends is
-    // retried from the initial delay.
+    // does NOT re-install existing Subscriber handles). Subscribe failures and
+    // a created subscription that later ends both back off exponentially; the
+    // delay resets to the initial value once a message is received. This stops
+    // a "subscribe succeeds → stream ends immediately" flap from hot-looping
+    // (each iteration also runs a full reconcile()).
     let nats_events = nats.clone();
     let _events_task = spawn_critical_task("Connection events subscriber", async move {
         let mut backoff = INITIAL_BACKOFF;
@@ -125,6 +127,8 @@ async fn main() {
             wm_events.reconcile().await;
 
             while let Some(msg) = connection_sub.next().await {
+                // Receiving any message proves the subscription is healthy.
+                backoff = INITIAL_BACKOFF;
                 match serde_json::from_slice::<ConnectionChangeCommand>(&msg.payload) {
                     Ok(cmd) => {
                         tracing::info!(
@@ -139,7 +143,7 @@ async fn main() {
                 }
             }
 
-            backoff = INITIAL_BACKOFF;
+            backoff = advance_backoff(backoff);
             tracing::warn!(
                 "{} subscription ended; resubscribing in {:?}",
                 subjects::CONNECTION_CHANGED,
