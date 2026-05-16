@@ -7,7 +7,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 
 use common::messages::{HeartRateReceived, subjects};
-use common::pulsoid_state::{ConnectionState, WriteOutcome, classify_no_op};
+use common::pulsoid_state::ConnectionState;
 use common::redis_keys::{latest_bpm_key, latest_bpm_ttl_secs, serialize_latest_bpm};
 use common::time::unix_now_secs;
 use common::token_encryption::TokenEncryption;
@@ -188,14 +188,14 @@ pub async fn run_worker(
                 .await
                 {
                     Ok(result) if result.rows_affected() == 0 => {
-                        classify_worker_zero_row_exit(
-                            &db,
-                            &user_id,
+                        // 0 rows: stale `revision` (superseded) or the row was
+                        // flipped to sticky 'error'. Either way this worker
+                        // generation is done — no SELECT needed to tell which.
+                        tracing::info!(
+                            user_id = %user_id,
                             revision,
-                            "Stale worker detected (revision mismatch), exiting",
-                            "Refused to mark connected: row in sticky error state, exiting",
-                        )
-                        .await;
+                            "Refused to mark connected (0 rows: superseded or sticky error), exiting"
+                        );
                         return;
                     }
                     Ok(_) => {}
@@ -234,27 +234,29 @@ pub async fn run_worker(
                     }
                 }
 
-                if worker_state_write_should_exit(
-                    update_connection_state(
-                        &db,
-                        &user_id,
-                        revision,
-                        ConnectionState::Pending,
-                        Some("WebSocket disconnected, reconnecting"),
-                    )
-                    .await,
+                if persist_state_best_effort(
+                    &db,
                     &user_id,
                     revision,
-                    "Stale worker detected (revision mismatch), exiting",
-                    "WS disconnected and row is now in sticky error state, exiting",
-                    "Failed to set pending state after disconnect",
-                ) {
+                    ConnectionState::Pending,
+                    Some("WebSocket disconnected, reconnecting"),
+                )
+                .await
+                {
                     return;
                 }
             }
             Err(error_msg) => {
                 tracing::warn!(user_id = %user_id, "Failed to connect: {error_msg}");
-                if persist_pending_or_stale(&db, &user_id, revision, &error_msg).await {
+                if persist_state_best_effort(
+                    &db,
+                    &user_id,
+                    revision,
+                    ConnectionState::Pending,
+                    Some(&error_msg),
+                )
+                .await
+                {
                     return;
                 }
             }
@@ -266,27 +268,27 @@ pub async fn run_worker(
     }
 }
 
-/// Update `connection_state` for the worker's row.
+/// Best-effort write of `connection_state` for the worker's row.
 ///
-/// Sticky-error guard: if the target `state` is `'error'` the write is
-/// unconditional (within the usual `revision` check). If the target is
-/// `'pending'` or `'connected'` the WHERE clause additionally requires
-/// `connection_state != 'error'` — a row already in the terminal state can
-/// only be resurrected by a fresh re-auth (OAuth callback or manual token
-/// upload), never by worker-side state updates.
+/// Sticky-error guard: the `($1 = 'error' OR connection_state != 'error')`
+/// clause means a row already in the terminal `'error'` state is resurrected
+/// only by a fresh re-auth (OAuth callback / manual token upload), never by a
+/// worker state write. For `state = 'error'` calls the guard is disabled.
 ///
-/// When the write lands zero rows we disambiguate via [`classify_no_op`] so
-/// callers can distinguish "stale / superseded" from "refused to resurrect
-/// sticky error state". For `state = 'error'` calls the sticky branch is
-/// logically unreachable (the guard is disabled), but the helper still runs
-/// the classification to return a single, uniform `WriteOutcome`.
-async fn update_connection_state(
+/// Returns `true` if the worker should exit. A zero-row result means the row
+/// was superseded (stale `revision`), removed, or sits in sticky `'error'` —
+/// in all three cases this worker generation is finished, so we deliberately
+/// do NOT run a follow-up SELECT to tell them apart: the worker exits either
+/// way, and the loop-head re-fetch already re-derives the precise reason on
+/// the next iteration for any path that loops instead of returning. A DB
+/// error returns `false` — the worker keeps going and the loop-head retries.
+async fn persist_state_best_effort(
     db: &PgPool,
     user_id: &str,
     revision: i32,
     state: ConnectionState,
     error: Option<&str>,
-) -> Result<WriteOutcome, sqlx::Error> {
+) -> bool {
     let result = sqlx::query(
         "UPDATE pulsoid_connections
          SET connection_state = $1, state_updated_at = now(), last_error = $2
@@ -298,79 +300,41 @@ async fn update_connection_state(
     .bind(user_id)
     .bind(revision)
     .execute(db)
-    .await?;
+    .await;
 
-    if result.rows_affected() > 0 {
-        Ok(WriteOutcome::Applied)
-    } else {
-        classify_no_op(db, user_id, revision).await
+    match result {
+        Ok(r) if r.rows_affected() == 0 => {
+            tracing::info!(
+                user_id = %user_id,
+                revision,
+                state = %state,
+                "Connection state write affected 0 rows (superseded or sticky error), exiting"
+            );
+            true
+        }
+        Ok(_) => false,
+        Err(e) => {
+            tracing::warn!(
+                user_id = %user_id,
+                revision,
+                state = %state,
+                "Failed to persist connection state: {e}"
+            );
+            false
+        }
     }
 }
 
+/// Best-effort write of the terminal `'error'` state. Thin wrapper over
+/// [`persist_state_best_effort`]: every caller is already on its way out
+/// (`return` / `continue`), so the should-exit signal is irrelevant here.
 async fn persist_terminal_error_best_effort(
     db: &PgPool,
     user_id: &str,
     revision: i32,
     error: Option<&str>,
 ) {
-    if let Err(update_err) =
-        update_connection_state(db, user_id, revision, ConnectionState::Error, error).await
-    {
-        tracing::warn!(
-            user_id = %user_id,
-            revision,
-            "Failed to persist terminal error state: {update_err}"
-        );
-    }
-}
-
-async fn classify_worker_zero_row_exit(
-    db: &PgPool,
-    user_id: &str,
-    revision: i32,
-    stale_msg: &'static str,
-    sticky_msg: &'static str,
-) {
-    match classify_no_op(db, user_id, revision).await {
-        Ok(WriteOutcome::Applied) | Ok(WriteOutcome::StaleOrMissing) => {
-            tracing::info!(user_id = %user_id, revision, "{stale_msg}");
-        }
-        Ok(WriteOutcome::StickyError) => {
-            tracing::warn!(user_id = %user_id, revision, "{sticky_msg}");
-        }
-        Err(e) => {
-            tracing::warn!(
-                user_id = %user_id,
-                revision,
-                "Failed to classify zero-row update: {e}; exiting"
-            );
-        }
-    }
-}
-
-fn worker_state_write_should_exit(
-    outcome: Result<WriteOutcome, sqlx::Error>,
-    user_id: &str,
-    revision: i32,
-    stale_msg: &'static str,
-    sticky_msg: &'static str,
-    error_msg: &'static str,
-) -> bool {
-    match outcome {
-        Ok(WriteOutcome::Applied) => false,
-        Ok(WriteOutcome::StaleOrMissing) => {
-            tracing::info!(user_id = %user_id, revision, "{stale_msg}");
-            true
-        }
-        Ok(WriteOutcome::StickyError) => {
-            tracing::warn!(user_id = %user_id, revision, "{sticky_msg}");
-            true
-        }
-        Err(e) => {
-            tracing::warn!(user_id = %user_id, revision, "{error_msg}: {e}");
-            false
-        }
-    }
+    let _ = persist_state_best_effort(db, user_id, revision, ConnectionState::Error, error).await;
 }
 
 async fn handle_message(
@@ -486,35 +450,6 @@ async fn handle_message(
     }
 
     Ok(())
-}
-
-/// Update the connection to `pending` with a pre-sanitized error message.
-/// Returns `true` if the worker should exit (stale revision **or** the
-/// row has since been flipped to sticky `'error'` by api-backend), `false`
-/// otherwise. DB errors are logged and treated as "continue" to match the
-/// existing behavior. Callers remain responsible for sleeping/backing off
-/// — this helper intentionally does not touch backoff.
-async fn persist_pending_or_stale(
-    db: &PgPool,
-    user_id: &str,
-    revision: i32,
-    error_msg: &str,
-) -> bool {
-    worker_state_write_should_exit(
-        update_connection_state(
-            db,
-            user_id,
-            revision,
-            ConnectionState::Pending,
-            Some(error_msg),
-        )
-        .await,
-        user_id,
-        revision,
-        "Stale worker detected (revision mismatch), exiting",
-        "Connection error persist refused: row is in sticky error state, exiting",
-        "Failed to set pending state after connection error",
-    )
 }
 
 /// Redact any Pulsoid access tokens that may have leaked into an error
