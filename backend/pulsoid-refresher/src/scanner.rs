@@ -7,8 +7,8 @@
 //! scan pass, up to `concurrency` refreshes run in parallel using
 //! [`FuturesUnordered`]. Per-user exclusivity is guaranteed by the Postgres
 //! advisory lock inside `refresh_if_expiring` — if the same user somehow
-//! appears twice in a candidate list, the second attempt will see
-//! `SkippedLockContended` and return immediately.
+//! appears twice in a candidate list, the second attempt will skip
+//! immediately (advisory lock contended).
 //!
 //! **Shutdown semantics (drain, don't drop):** when the shutdown flag is
 //! set, the scan stops feeding new candidates into the work queue but lets
@@ -101,11 +101,8 @@ pub async fn scan_and_refresh_once(
 
     while let Some(outcome) = in_flight.next().await {
         match outcome {
-            RefreshOutcome::Refreshed { .. } => refreshed += 1,
-            RefreshOutcome::SkippedStillValid
-            | RefreshOutcome::SkippedSuperseded
-            | RefreshOutcome::SkippedStickyError
-            | RefreshOutcome::SkippedLockContended => skipped += 1,
+            RefreshOutcome::Refreshed => refreshed += 1,
+            RefreshOutcome::Skipped => skipped += 1,
             RefreshOutcome::TerminalFailure | RefreshOutcome::TransientFailure => failed += 1,
         }
 
