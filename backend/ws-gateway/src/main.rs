@@ -6,21 +6,18 @@ use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::Response;
 use axum::routing::get;
-use futures_util::{FutureExt, StreamExt, TryStreamExt};
+use futures_util::{StreamExt, TryStreamExt};
 use redis::{ExistenceCheck, SetExpiry, SetOptions};
-use std::future::Future;
-use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast as tokio_broadcast;
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use common::auth::{AuthConfig, AuthContext};
 use common::messages::{HeartRateReceived, subjects};
 use common::nats_backoff::{INITIAL_BACKOFF, advance_backoff};
 use common::redis_keys::{latest_bpm_key, latest_bpm_ttl_secs, serialize_latest_bpm};
-use common::signal::shutdown_signal;
+use common::signal::{shutdown_signal, spawn_critical_task};
 use common::time::unix_now_secs;
 
 pub struct WsState {
@@ -32,29 +29,6 @@ pub struct WsState {
     /// WebSocket connections. Derived from `AUTH_URL` at startup.
     pub allowed_ws_origin: String,
     pub shutdown: CancellationToken,
-}
-
-fn spawn_critical_task<F>(
-    name: &'static str,
-    shutdown: CancellationToken,
-    future: F,
-) -> JoinHandle<()>
-where
-    F: Future<Output = ()> + Send + 'static,
-{
-    tokio::spawn(async move {
-        match AssertUnwindSafe(future).catch_unwind().await {
-            Ok(()) if shutdown.is_cancelled() => {}
-            Ok(()) => {
-                tracing::error!("{name} returned unexpectedly; exiting");
-                std::process::exit(1);
-            }
-            Err(_) => {
-                tracing::error!("{name} panicked; exiting");
-                std::process::exit(1);
-            }
-        }
-    })
 }
 
 impl AuthContext for WsState {
@@ -417,7 +391,7 @@ async fn main() {
         let nats = nats.clone();
         let shutdown = shutdown.clone();
         let task_shutdown = shutdown.clone();
-        spawn_critical_task("NATS hr.received subscriber", task_shutdown, async move {
+        spawn_critical_task("NATS hr.received subscriber", Some(task_shutdown), async move {
             let mut backoff = INITIAL_BACKOFF;
             loop {
                 let sub_result = tokio::select! {

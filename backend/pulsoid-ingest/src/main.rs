@@ -2,36 +2,15 @@ mod models;
 mod worker;
 mod worker_manager;
 
-use futures_util::{FutureExt, StreamExt};
-use std::future::Future;
-use std::panic::AssertUnwindSafe;
+use futures_util::StreamExt;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::task::JoinHandle;
 
 use common::messages::{ConnectionChangeCommand, subjects};
 use common::nats_backoff::{INITIAL_BACKOFF, advance_backoff};
-use common::signal::shutdown_signal;
+use common::signal::{shutdown_signal, spawn_critical_task};
 use common::token_encryption::TokenEncryption;
 use worker_manager::WorkerManager;
-
-fn spawn_critical_task<F>(name: &'static str, future: F) -> JoinHandle<()>
-where
-    F: Future<Output = ()> + Send + 'static,
-{
-    tokio::spawn(async move {
-        match AssertUnwindSafe(future).catch_unwind().await {
-            Ok(()) => {
-                tracing::error!("{name} returned unexpectedly; exiting");
-                std::process::exit(1);
-            }
-            Err(_) => {
-                tracing::error!("{name} panicked; exiting");
-                std::process::exit(1);
-            }
-        }
-    })
-}
 
 #[tokio::main]
 async fn main() {
@@ -96,7 +75,7 @@ async fn main() {
     // a "subscribe succeeds → stream ends immediately" flap from hot-looping
     // (each iteration also runs a full reconcile()).
     let nats_events = nats.clone();
-    let _events_task = spawn_critical_task("Connection events subscriber", async move {
+    let _events_task = spawn_critical_task("Connection events subscriber", None, async move {
         let mut backoff = INITIAL_BACKOFF;
         loop {
             let mut connection_sub = match nats_events.subscribe(subjects::CONNECTION_CHANGED).await
@@ -154,7 +133,7 @@ async fn main() {
     });
 
     // Spawn periodic DB reconciliation (every 60 seconds)
-    let _reconcile_task = spawn_critical_task("Reconciliation task", async move {
+    let _reconcile_task = spawn_critical_task("Reconciliation task", None, async move {
         loop {
             tokio::time::sleep(Duration::from_secs(60)).await;
             wm_reconcile.reconcile().await;

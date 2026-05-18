@@ -3,7 +3,7 @@ mod handlers;
 mod models;
 mod validation;
 
-use common::signal::shutdown_signal;
+use common::signal::{shutdown_signal, spawn_critical_task};
 
 use axum::Router;
 use axum::middleware;
@@ -76,7 +76,7 @@ async fn main() {
 
     // Spawn session cleanup task (runs every hour)
     let cleanup_pool = pool;
-    let _cleanup_task = tokio::spawn(async move {
+    let _cleanup_task = spawn_critical_task("Session cleanup task", None, async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
             match sqlx::query("DELETE FROM sessions WHERE expires < now()")
