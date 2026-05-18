@@ -7,8 +7,8 @@
 //! scan pass, up to `concurrency` refreshes run in parallel using
 //! [`FuturesUnordered`]. Per-user exclusivity is guaranteed by the Postgres
 //! advisory lock inside `refresh_if_expiring` — if the same user somehow
-//! appears twice in a candidate list, the second attempt will see
-//! `SkippedLockContended` and return immediately.
+//! appears twice in a candidate list, the second attempt will skip
+//! immediately (advisory lock contended).
 //!
 //! **Shutdown semantics (drain, don't drop):** when the shutdown flag is
 //! set, the scan stops feeding new candidates into the work queue but lets
@@ -24,8 +24,8 @@ use std::time::Instant;
 
 use common::pulsoid_oauth::PulsoidOAuthConfig;
 use common::token_encryption::TokenEncryption;
-use futures::stream::FuturesUnordered;
 use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 use sqlx::PgPool;
 use tokio::sync::watch;
 
@@ -67,7 +67,10 @@ pub async fn scan_and_refresh_once(
     };
 
     if candidates.is_empty() {
-        tracing::debug!(elapsed_ms = started.elapsed().as_millis() as u64, "Scan: no candidates");
+        tracing::debug!(
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "Scan: no candidates"
+        );
         return false;
     }
 
@@ -98,11 +101,8 @@ pub async fn scan_and_refresh_once(
 
     while let Some(outcome) = in_flight.next().await {
         match outcome {
-            RefreshOutcome::Refreshed { .. } => refreshed += 1,
-            RefreshOutcome::SkippedStillValid
-            | RefreshOutcome::SkippedSuperseded
-            | RefreshOutcome::SkippedStickyError
-            | RefreshOutcome::SkippedLockContended => skipped += 1,
+            RefreshOutcome::Refreshed => refreshed += 1,
+            RefreshOutcome::Skipped => skipped += 1,
             RefreshOutcome::TerminalFailure | RefreshOutcome::TransientFailure => failed += 1,
         }
 
@@ -120,9 +120,7 @@ pub async fn scan_and_refresh_once(
         }
 
         // Feed the next candidate if we're not shutting down.
-        if !shutting_down
-            && let Some((user_id, expected_revision)) = iter.next()
-        {
+        if !shutting_down && let Some((user_id, expected_revision)) = iter.next() {
             in_flight.push(make_future(user_id, expected_revision));
         }
     }

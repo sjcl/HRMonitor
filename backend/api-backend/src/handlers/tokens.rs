@@ -1,12 +1,12 @@
-use axum::extract::State;
-use axum::response::{IntoResponse, Response};
 use axum::Extension;
 use axum::Json;
+use axum::extract::State;
+use axum::response::{IntoResponse, Response};
 use serde_json::json;
 use std::sync::Arc;
 
 use common::error::AppError;
-use common::messages::{subjects, ConnectionChangeCommand};
+use common::messages::{ConnectionChangeCommand, subjects};
 use common::pulsoid_state::ConnectionState;
 
 use common::auth::AuthenticatedUser;
@@ -53,12 +53,11 @@ pub async fn delete_pulsoid_token(
 ) -> Result<Response, AppError> {
     let user_id = &auth_user.id;
 
-    let deleted: Option<(i32,)> = sqlx::query_as(
-        "DELETE FROM pulsoid_connections WHERE user_id = $1 RETURNING revision",
-    )
-    .bind(user_id)
-    .fetch_optional(&state.db)
-    .await?;
+    let deleted: Option<(i32,)> =
+        sqlx::query_as("DELETE FROM pulsoid_connections WHERE user_id = $1 RETURNING revision")
+            .bind(user_id)
+            .fetch_optional(&state.db)
+            .await?;
 
     let revision = match deleted {
         Some((rev,)) => rev,
@@ -67,8 +66,16 @@ pub async fn delete_pulsoid_token(
 
     tracing::info!(user_id, revision, "Pulsoid connection deleted");
     let payload = ConnectionChangeCommand::payload_for(user_id).into();
-    if let Err(e) = state.nats.publish(subjects::CONNECTION_CHANGED, payload).await {
-        tracing::warn!(user_id, revision, "Failed to publish connection change hint: {e}");
+    if let Err(e) = state
+        .nats
+        .publish(subjects::CONNECTION_CHANGED, payload)
+        .await
+    {
+        tracing::warn!(
+            user_id,
+            revision,
+            "Failed to publish connection change hint: {e}"
+        );
     }
 
     Ok(Json(json!({"status": "syncing"})).into_response())
@@ -109,8 +116,16 @@ pub async fn set_manual_pulsoid_token(
 
     tracing::info!(user_id, revision, "Manual Pulsoid token saved");
     let payload = ConnectionChangeCommand::payload_for(user_id).into();
-    if let Err(e) = state.nats.publish(subjects::CONNECTION_CHANGED, payload).await {
-        tracing::warn!(user_id, revision, "Failed to publish connection change hint: {e}");
+    if let Err(e) = state
+        .nats
+        .publish(subjects::CONNECTION_CHANGED, payload)
+        .await
+    {
+        tracing::warn!(
+            user_id,
+            revision,
+            "Failed to publish connection change hint: {e}"
+        );
     }
 
     Ok(Json(json!({"status": "syncing"})).into_response())

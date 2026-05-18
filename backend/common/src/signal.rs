@@ -1,16 +1,40 @@
-pub fn log_task_exit(name: &str, result: Result<(), tokio::task::JoinError>) {
-    match result {
-        Ok(()) => tracing::error!("{name} returned unexpectedly"),
-        Err(e) if e.is_panic() => tracing::error!("{name} panicked: {e}"),
-        Err(e) if e.is_cancelled() => tracing::debug!("{name} cancelled"),
-        Err(e) => tracing::error!("{name} failed: {e}"),
-    }
+use std::future::Future;
+use std::panic::AssertUnwindSafe;
+
+use futures_util::FutureExt;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
+
+/// Spawns a task whose unexpected exit (panic or normal return) must crash the
+/// process so the container restarts. Pass `Some(token)` for tasks that return
+/// cleanly on graceful shutdown; `None` for tasks expected to run forever.
+pub fn spawn_critical_task<F>(
+    name: &'static str,
+    shutdown: Option<CancellationToken>,
+    future: F,
+) -> JoinHandle<()>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(async move {
+        match AssertUnwindSafe(future).catch_unwind().await {
+            Ok(()) if shutdown.as_ref().is_some_and(CancellationToken::is_cancelled) => {}
+            Ok(()) => {
+                tracing::error!("{name} returned unexpectedly; exiting");
+                std::process::exit(1);
+            }
+            Err(_) => {
+                tracing::error!("{name} panicked; exiting");
+                std::process::exit(1);
+            }
+        }
+    })
 }
 
 pub async fn shutdown_signal() {
     #[cfg(unix)]
     {
-        use tokio::signal::unix::{signal, SignalKind};
+        use tokio::signal::unix::{SignalKind, signal};
         let mut sigterm =
             signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");
         tokio::select! {

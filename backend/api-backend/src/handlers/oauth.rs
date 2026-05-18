@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use common::error::AppError;
-use common::messages::{subjects, ConnectionChangeCommand};
+use common::messages::{ConnectionChangeCommand, subjects};
 
 use common::auth::AuthenticatedUser;
 

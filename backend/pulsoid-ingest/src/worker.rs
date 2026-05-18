@@ -7,7 +7,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 
 use common::messages::{HeartRateReceived, subjects};
-use common::pulsoid_state::{ConnectionState, WriteOutcome, classify_no_op};
+use common::pulsoid_state::ConnectionState;
 use common::redis_keys::{latest_bpm_key, latest_bpm_ttl_secs, serialize_latest_bpm};
 use common::time::unix_now_secs;
 use common::token_encryption::TokenEncryption;
@@ -16,6 +16,7 @@ use redis::AsyncCommands;
 use crate::models::{PulsoidConnectionRow, PulsoidMessage, SOURCE_OAUTH};
 
 const PULSOID_WS_URL: &str = "wss://dev.pulsoid.net/api/v1/data/real_time";
+const HR_RECEIVED_PUBLISH_TIMEOUT: Duration = Duration::from_millis(100);
 /// Worker-side expiry floor: if `token_expires_at` is within this many
 /// seconds of `now()` the worker will NOT attempt a WS connect and will
 /// instead back off until pulsoid-refresher bumps `revision`. This
@@ -25,24 +26,6 @@ const PULSOID_WS_URL: &str = "wss://dev.pulsoid.net/api/v1/data/real_time";
 /// worker gives up on the current one.
 const REFRESH_SAFETY_MARGIN_SECS: i64 = 60;
 
-/// Aborts the wrapped `JoinHandle` when dropped. Used so that the per-worker
-/// NATS publish task (spawned at the top of `run_worker`) is cancelled on
-/// every `run_worker` exit path — normal `return`, decrypt failure, stale
-/// revision, or external `WorkerManager::replace_worker` abort. Without
-/// this, a detached spawn could outlive its parent worker and emit delayed
-/// `hr.received` events after abort.
-///
-/// Cancellation is cooperative: `abort()` takes effect at the task's next
-/// `.await` point. In practice that's sub-second (async-nats yields regularly),
-/// but it is not a hard preemption guarantee.
-struct AbortOnDrop(tokio::task::JoinHandle<()>);
-
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
-
 pub async fn run_worker(
     db: PgPool,
     nats: async_nats::Client,
@@ -51,75 +34,6 @@ pub async fn run_worker(
     user_id: String,
     revision: i32,
 ) {
-    // Decouple NATS `hr.received` publishing from the Pulsoid WS read loop.
-    // Even without retries, `publish().await` can stall briefly while
-    // async-nats is reconnecting or its write buffer is saturated; running
-    // that inline inside `handle_message` would stop draining the WS socket
-    // long enough for tungstenite to lose pongs and tear down the upstream
-    // connection every time NATS hiccuped.
-    //
-    // `watch` gives us "capacity-1, newest-wins" semantics: if multiple
-    // frames arrive while the publish task is blocked on a slow publish,
-    // only the most recent is ever delivered. This matches `hr.received`'s
-    // latest-live-state contract (api-backend just rebroadcasts; Redis
-    // already has the value). A bounded `mpsc` would be wrong here —
-    // `try_send` rejects the *newest* sender on `Full`, which would drain
-    // stale frames FIFO on recovery.
-    let (publish_tx, mut publish_rx) =
-        tokio::sync::watch::channel::<Option<HeartRateReceived>>(None);
-    let _publish_guard = {
-        let nats = nats.clone();
-        let user_id = user_id.clone();
-        AbortOnDrop(tokio::spawn(async move {
-            // Do NOT call `borrow_and_update()` here to "mark initial None as
-            // seen": a fresh `watch::Receiver` already treats the initial value
-            // as seen, and priming would race with an early producer `send`
-            // and discard the first real frame.
-            loop {
-                if publish_rx.changed().await.is_err() {
-                    // All senders dropped — worker exiting.
-                    break;
-                }
-                // Clone out of the borrow immediately; holding it across
-                // `.await` would deadlock concurrent `send` calls.
-                let update = publish_rx.borrow_and_update().clone();
-                let Some(update) = update else { continue };
-
-                let payload = match serde_json::to_vec(&update) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        // `HeartRateReceived` can't actually fail to encode,
-                        // but panicking here would break the AbortOnDrop
-                        // invariant (the task would be gone before the
-                        // producer noticed), so warn and continue instead.
-                        tracing::warn!(
-                            user_id = %user_id,
-                            "Failed to serialize hr.received: {e}"
-                        );
-                        continue;
-                    }
-                };
-
-                // Best-effort publish. `hr.received` is a live-notification
-                // hint only: history is already in the DB and the latest value
-                // is already in Redis, so dropping a frame is fine — the next
-                // Pulsoid frame (1–2 s away) will re-deliver fresh state, and
-                // api-backend's Redis self-heal covers WS clients in the
-                // meantime. Retrying would only trade freshness for a stale
-                // rebroadcast, which is the wrong tradeoff for live push.
-                if let Err(e) = nats
-                    .publish(subjects::HR_RECEIVED, payload.into())
-                    .await
-                {
-                    tracing::warn!(
-                        user_id = %user_id,
-                        "Dropped hr.received publish (best-effort, next frame will refresh live state): {e}"
-                    );
-                }
-            }
-        }))
-    };
-
     let mut backoff = Duration::from_secs(1);
     let max_backoff = Duration::from_secs(60);
 
@@ -168,21 +82,13 @@ pub async fn run_worker(
             Ok(t) => t,
             Err(e) => {
                 tracing::error!(user_id = %user_id, "Failed to decrypt access token: {e}");
-                if let Err(update_err) = update_connection_state(
+                persist_terminal_error_best_effort(
                     &db,
                     &user_id,
                     revision,
-                    ConnectionState::Error,
                     Some("Failed to decrypt access token"),
                 )
-                .await
-                {
-                    tracing::warn!(
-                        user_id = %user_id,
-                        revision,
-                        "Failed to persist terminal error state: {update_err}"
-                    );
-                }
+                .await;
                 return;
             }
         };
@@ -204,21 +110,13 @@ pub async fn run_worker(
                 // zero-row result means the row was superseded (stale
                 // revision) or concurrently removed — either way we're
                 // already about to `return`.
-                if let Err(update_err) = update_connection_state(
+                persist_terminal_error_best_effort(
                     &db,
                     &user_id,
                     revision,
-                    ConnectionState::Error,
                     conn.last_error.as_deref(),
                 )
-                .await
-                {
-                    tracing::warn!(
-                        user_id = %user_id,
-                        revision,
-                        "Failed to persist terminal error state: {update_err}"
-                    );
-                }
+                .await;
                 return;
             }
 
@@ -236,21 +134,13 @@ pub async fn run_worker(
                 }
             } else {
                 tracing::error!(user_id = %user_id, "OAuth connection missing token_expires_at");
-                if let Err(update_err) = update_connection_state(
+                persist_terminal_error_best_effort(
                     &db,
                     &user_id,
                     revision,
-                    ConnectionState::Error,
                     Some("OAuth connection missing expiry (data inconsistency)"),
                 )
-                .await
-                {
-                    tracing::warn!(
-                        user_id = %user_id,
-                        revision,
-                        "Failed to persist terminal error state: {update_err}"
-                    );
-                }
+                .await;
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(max_backoff);
                 continue;
@@ -298,31 +188,14 @@ pub async fn run_worker(
                 .await
                 {
                     Ok(result) if result.rows_affected() == 0 => {
-                        // Disambiguate: stale revision vs. sticky error
-                        // state flipped by api-backend during WS connect.
-                        match classify_no_op(&db, &user_id, revision).await {
-                            Ok(WriteOutcome::StaleOrMissing) | Ok(WriteOutcome::Applied) => {
-                                tracing::info!(
-                                    user_id = %user_id,
-                                    revision,
-                                    "Stale worker detected (revision mismatch), exiting"
-                                );
-                            }
-                            Ok(WriteOutcome::StickyError) => {
-                                tracing::warn!(
-                                    user_id = %user_id,
-                                    revision,
-                                    "Refused to mark connected: row in sticky error state, exiting"
-                                );
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    user_id = %user_id,
-                                    revision,
-                                    "Failed to classify zero-row update: {e}; exiting"
-                                );
-                            }
-                        }
+                        // 0 rows: stale `revision` (superseded) or the row was
+                        // flipped to sticky 'error'. Either way this worker
+                        // generation is done — no SELECT needed to tell which.
+                        tracing::info!(
+                            user_id = %user_id,
+                            revision,
+                            "Refused to mark connected (0 rows: superseded or sticky error), exiting"
+                        );
                         return;
                     }
                     Ok(_) => {}
@@ -343,7 +216,7 @@ pub async fn run_worker(
                     match msg {
                         Ok(tokio_tungstenite::tungstenite::Message::Text(text)) => {
                             if let Err(e) =
-                                handle_message(&db, &publish_tx, &mut redis, &user_id, &text).await
+                                handle_message(&db, &nats, &mut redis, &user_id, &text).await
                             {
                                 tracing::warn!(user_id = %user_id, "Failed to handle message: {e}");
                             }
@@ -361,7 +234,7 @@ pub async fn run_worker(
                     }
                 }
 
-                match update_connection_state(
+                if persist_state_best_effort(
                     &db,
                     &user_id,
                     revision,
@@ -370,35 +243,20 @@ pub async fn run_worker(
                 )
                 .await
                 {
-                    Ok(WriteOutcome::Applied) => {}
-                    Ok(WriteOutcome::StaleOrMissing) => {
-                        tracing::info!(
-                            user_id = %user_id,
-                            revision,
-                            "Stale worker detected (revision mismatch), exiting"
-                        );
-                        return;
-                    }
-                    Ok(WriteOutcome::StickyError) => {
-                        tracing::warn!(
-                            user_id = %user_id,
-                            revision,
-                            "WS disconnected and row is now in sticky error state, exiting"
-                        );
-                        return;
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            user_id = %user_id,
-                            revision,
-                            "Failed to set pending state after disconnect: {e}"
-                        );
-                    }
+                    return;
                 }
             }
             Err(error_msg) => {
                 tracing::warn!(user_id = %user_id, "Failed to connect: {error_msg}");
-                if persist_pending_or_stale(&db, &user_id, revision, &error_msg).await {
+                if persist_state_best_effort(
+                    &db,
+                    &user_id,
+                    revision,
+                    ConnectionState::Pending,
+                    Some(&error_msg),
+                )
+                .await
+                {
                     return;
                 }
             }
@@ -410,27 +268,27 @@ pub async fn run_worker(
     }
 }
 
-/// Update `connection_state` for the worker's row.
+/// Best-effort write of `connection_state` for the worker's row.
 ///
-/// Sticky-error guard: if the target `state` is `'error'` the write is
-/// unconditional (within the usual `revision` check). If the target is
-/// `'pending'` or `'connected'` the WHERE clause additionally requires
-/// `connection_state != 'error'` — a row already in the terminal state can
-/// only be resurrected by a fresh re-auth (OAuth callback or manual token
-/// upload), never by worker-side state updates.
+/// Sticky-error guard: the `($1 = 'error' OR connection_state != 'error')`
+/// clause means a row already in the terminal `'error'` state is resurrected
+/// only by a fresh re-auth (OAuth callback / manual token upload), never by a
+/// worker state write. For `state = 'error'` calls the guard is disabled.
 ///
-/// When the write lands zero rows we disambiguate via [`classify_no_op`] so
-/// callers can distinguish "stale / superseded" from "refused to resurrect
-/// sticky error state". For `state = 'error'` calls the sticky branch is
-/// logically unreachable (the guard is disabled), but the helper still runs
-/// the classification to return a single, uniform `WriteOutcome`.
-async fn update_connection_state(
+/// Returns `true` if the worker should exit. A zero-row result means the row
+/// was superseded (stale `revision`), removed, or sits in sticky `'error'` —
+/// in all three cases this worker generation is finished, so we deliberately
+/// do NOT run a follow-up SELECT to tell them apart: the worker exits either
+/// way, and the loop-head re-fetch already re-derives the precise reason on
+/// the next iteration for any path that loops instead of returning. A DB
+/// error returns `false` — the worker keeps going and the loop-head retries.
+async fn persist_state_best_effort(
     db: &PgPool,
     user_id: &str,
     revision: i32,
     state: ConnectionState,
     error: Option<&str>,
-) -> Result<WriteOutcome, sqlx::Error> {
+) -> bool {
     let result = sqlx::query(
         "UPDATE pulsoid_connections
          SET connection_state = $1, state_updated_at = now(), last_error = $2
@@ -442,18 +300,46 @@ async fn update_connection_state(
     .bind(user_id)
     .bind(revision)
     .execute(db)
-    .await?;
+    .await;
 
-    if result.rows_affected() > 0 {
-        Ok(WriteOutcome::Applied)
-    } else {
-        classify_no_op(db, user_id, revision).await
+    match result {
+        Ok(r) if r.rows_affected() == 0 => {
+            tracing::info!(
+                user_id = %user_id,
+                revision,
+                state = %state,
+                "Connection state write affected 0 rows (superseded or sticky error), exiting"
+            );
+            true
+        }
+        Ok(_) => false,
+        Err(e) => {
+            tracing::warn!(
+                user_id = %user_id,
+                revision,
+                state = %state,
+                "Failed to persist connection state: {e}"
+            );
+            false
+        }
     }
+}
+
+/// Best-effort write of the terminal `'error'` state. Thin wrapper over
+/// [`persist_state_best_effort`]: every caller is already on its way out
+/// (`return` / `continue`), so the should-exit signal is irrelevant here.
+async fn persist_terminal_error_best_effort(
+    db: &PgPool,
+    user_id: &str,
+    revision: i32,
+    error: Option<&str>,
+) {
+    let _ = persist_state_best_effort(db, user_id, revision, ConnectionState::Error, error).await;
 }
 
 async fn handle_message(
     db: &PgPool,
-    publish_tx: &tokio::sync::watch::Sender<Option<HeartRateReceived>>,
+    nats: &async_nats::Client,
     redis: &mut redis::aio::MultiplexedConnection,
     user_id: &str,
     text: &str,
@@ -524,67 +410,46 @@ async fn handle_message(
     // Redis recovers.
     let key = latest_bpm_key(user_id);
     let value = serialize_latest_bpm(&update);
-    if let Err(e) = redis
-        .set_ex::<_, _, ()>(&key, &value, ttl)
-        .await
-    {
-        return Err(format!("latest_bpm Redis write failed after DB insert: {e}"));
+    if let Err(e) = redis.set_ex::<_, _, ()>(&key, &value, ttl).await {
+        return Err(format!(
+            "latest_bpm Redis write failed after DB insert: {e}"
+        ));
     }
 
-    // Hand off to the per-worker publish task. This is non-blocking: `watch`
-    // overwrites any unread value, so intermediate frames collapse to the
-    // latest during a slow NATS period. NATS I/O happens off the WS read
-    // path so a stalled publish can never block tungstenite pongs. The only
-    // `Err` shape is "all receivers dropped", which in the happy path is
-    // unreachable — the receiver is owned by `run_worker`'s stack behind an
-    // AbortOnDrop guard. Logged defensively so an unexpected early exit of
-    // the publish task would not be silent.
-    if let Err(e) = publish_tx.send(Some(update)) {
-        tracing::warn!(user_id = %user_id, "hr.received publish task is gone: {e}");
+    let payload = match serde_json::to_vec(&update) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(user_id = %user_id, "Failed to serialize hr.received: {e}");
+            return Ok(());
+        }
+    };
+
+    // Best-effort publish. `hr.received` is a live-notification hint only:
+    // history is already in the DB and the latest value is already in Redis.
+    // Dropping this frame is fine; the next Pulsoid frame refreshes live state.
+    match tokio::time::timeout(
+        HR_RECEIVED_PUBLISH_TIMEOUT,
+        nats.publish(subjects::HR_RECEIVED, payload.into()),
+    )
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            tracing::warn!(
+                user_id = %user_id,
+                "Dropped hr.received publish (best-effort, next frame will refresh live state): {e}"
+            );
+        }
+        Err(_) => {
+            tracing::warn!(
+                user_id = %user_id,
+                timeout_ms = HR_RECEIVED_PUBLISH_TIMEOUT.as_millis(),
+                "Dropped hr.received publish after timeout (best-effort, next frame will refresh live state)"
+            );
+        }
     }
 
     Ok(())
-}
-
-/// Update the connection to `pending` with a pre-sanitized error message.
-/// Returns `true` if the worker should exit (stale revision **or** the
-/// row has since been flipped to sticky `'error'` by api-backend), `false`
-/// otherwise. DB errors are logged and treated as "continue" to match the
-/// existing behavior. Callers remain responsible for sleeping/backing off
-/// — this helper intentionally does not touch backoff.
-async fn persist_pending_or_stale(
-    db: &PgPool,
-    user_id: &str,
-    revision: i32,
-    error_msg: &str,
-) -> bool {
-    match update_connection_state(db, user_id, revision, ConnectionState::Pending, Some(error_msg)).await {
-        Ok(WriteOutcome::Applied) => false,
-        Ok(WriteOutcome::StaleOrMissing) => {
-            tracing::info!(
-                user_id = %user_id,
-                revision,
-                "Stale worker detected (revision mismatch), exiting"
-            );
-            true
-        }
-        Ok(WriteOutcome::StickyError) => {
-            tracing::warn!(
-                user_id = %user_id,
-                revision,
-                "Connection error persist refused: row is in sticky error state, exiting"
-            );
-            true
-        }
-        Err(e) => {
-            tracing::warn!(
-                user_id = %user_id,
-                revision,
-                "Failed to set pending state after connection error: {e}"
-            );
-            false
-        }
-    }
 }
 
 /// Redact any Pulsoid access tokens that may have leaked into an error

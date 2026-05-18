@@ -10,8 +10,8 @@ use common::visibility::values::{GROUP_DEFAULT, PRIVATE};
 use common::auth::AuthenticatedUser;
 
 use crate::AppState;
-use common::access::ViewableUserId;
 use crate::models::{HeartRateProfile, SelfUser, UpdateUserRequest, UserRow};
+use common::access::ViewableUserId;
 
 const SELECT_USER_ROW: &str = "SELECT u.id, u.display_name, u.timezone,
             a.provider_image as avatar_url,

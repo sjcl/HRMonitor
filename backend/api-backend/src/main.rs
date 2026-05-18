@@ -3,15 +3,13 @@ mod handlers;
 mod models;
 mod validation;
 
-use common::signal::{log_task_exit, shutdown_signal};
+use common::signal::{shutdown_signal, spawn_critical_task};
 
+use axum::Router;
 use axum::middleware;
 use axum::routing::get;
-use axum::Router;
-use std::future::IntoFuture;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio_util::sync::CancellationToken;
 
 use common::auth::{AuthConfig, AuthContext};
 use common::pulsoid_oauth::PulsoidOAuthConfig;
@@ -78,7 +76,7 @@ async fn main() {
 
     // Spawn session cleanup task (runs every hour)
     let cleanup_pool = pool;
-    let mut cleanup_task = tokio::spawn(async move {
+    let _cleanup_task = spawn_critical_task("Session cleanup task", None, async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
             match sqlx::query("DELETE FROM sessions WHERE expires < now()")
@@ -221,74 +219,16 @@ async fn main() {
 
     tracing::info!("Server listening on 0.0.0.0:3001");
 
-    let shutdown = CancellationToken::new();
-
-    // Detached task: flips the shutdown token when SIGTERM/SIGINT arrives.
-    tokio::spawn({
-        let token = shutdown.clone();
-        async move {
+    let serve_result = axum::serve(listener, app)
+        .with_graceful_shutdown(async {
             shutdown_signal().await;
             tracing::info!("Received shutdown signal");
-            token.cancel();
-        }
-    });
+        })
+        .await;
 
-    let serve = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown.clone().cancelled_owned())
-        .into_future();
-    tokio::pin!(serve);
-
-    let mut task_failed = false;
-    let mut serve_done = false;
-    let mut cleanup_done = false;
-
-    // Phase 1: wait for the first terminal event. `biased` ensures shutdown
-    // signal takes priority so graceful drain begins immediately.
-    tokio::select! {
-        biased;
-        _ = shutdown.cancelled() => {
-            // Normal shutdown — `serve` is already draining via with_graceful_shutdown.
-        }
-        res = &mut cleanup_task => {
-            log_task_exit("Session cleanup", res);
-            task_failed = true;
-            cleanup_done = true;
-            shutdown.cancel();
-        }
-        res = &mut serve => {
-            match res {
-                Ok(()) => tracing::error!("Server returned unexpectedly before shutdown"),
-                Err(e) => tracing::error!("Server error: {e}"),
-            }
-            task_failed = true;
-            serve_done = true;
-            shutdown.cancel();
-        }
-    }
-
-    // Phase 2: wait for remaining tasks with timeout.
-    if !serve_done {
-        match tokio::time::timeout(Duration::from_secs(5), &mut serve).await {
-            Ok(Ok(())) => tracing::info!("HTTP server shut down cleanly"),
-            Ok(Err(e)) => {
-                tracing::error!("Server error during drain: {e}");
-                task_failed = true;
-            }
-            Err(_) => tracing::warn!("Graceful shutdown timed out after 5s"),
-        }
-    }
-
-    if !cleanup_done {
-        match tokio::time::timeout(Duration::from_secs(1), &mut cleanup_task).await {
-            Ok(res) => {
-                log_task_exit("Session cleanup", res);
-            }
-            Err(_) => {
-                tracing::warn!("Session cleanup did not exit within 1s; aborting");
-                cleanup_task.abort();
-                let _ = (&mut cleanup_task).await;
-            }
-        }
+    if let Err(e) = serve_result {
+        tracing::error!("Server error: {e}");
+        std::process::exit(1);
     }
 
     match tokio::time::timeout(Duration::from_secs(1), nats.flush()).await {
@@ -297,10 +237,5 @@ async fn main() {
         Err(_) => tracing::warn!("NATS flush timed out after 1s on shutdown"),
     }
 
-    if task_failed {
-        tracing::error!("api-backend exiting due to task failure");
-        std::process::exit(1);
-    }
     tracing::info!("api-backend shut down gracefully");
 }
-

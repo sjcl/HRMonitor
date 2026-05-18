@@ -184,7 +184,8 @@ mod tests {
 
     #[test]
     fn unchunked_wins_over_chunks() {
-        let header = "authjs.session-token=full; authjs.session-token.0=foo; authjs.session-token.1=bar";
+        let header =
+            "authjs.session-token=full; authjs.session-token.0=foo; authjs.session-token.1=bar";
         let got = parse_cookie(header, NAME).unwrap();
         assert_eq!(got, "full");
         assert!(matches!(got, Cow::Borrowed(_)));

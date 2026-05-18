@@ -154,4 +154,3 @@ async fn main() {
     nats.flush().await.ok();
     tracing::info!("pulsoid-refresher shut down gracefully");
 }
-
