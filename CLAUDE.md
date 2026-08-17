@@ -7,7 +7,8 @@ Pulsoid WebSocket から心拍数データを収集し、TimescaleDB に保存�
 ```
 backend/
   common/             共有 crate (NATS メッセージ型, TokenEncryption, PulsoidOAuthConfig / DiscordOAuthConfig,
-                      jwt feature で Claims/JwtVerifier/JwtSigner, web feature で auth/access/error/origin)
+                      jwt feature で Claims/JwtVerifier/JwtSigner, web feature で auth/access/error/origin,
+                      redis-conn feature で redis_conn (ConnectionManager 構築 — 再接続/タイムアウト設定の一元管理))
   api-backend/        Rust (axum + sqlx + Redis + NATS) HTTP API + 認証 — ポート 3001
   ws-gateway/         Rust (axum ws) WebSocket 配信専用 — ポート 3002
   pulsoid-ingest/     Pulsoid WS ingest サービス (NATS)
@@ -25,6 +26,8 @@ docs/               仕様書 (API, アーキテクチャ, スキーマ, エー�
 - DB: TimescaleDB (PostgreSQL)、マイグレーションは専用 migration crate が実行
 - Redis: latest heart rate キャッシュ (`latest_bpm:{user_id}`) + リフレッシュセッション (`auth:session:v1:{sid}`)
 - heart_rate_records は TimescaleDB hypertable (recorded_at でパーティション)
+- Redis 接続は `common::redis_conn` の `ConnectionManager` (自動再接続)。**Redis 再起動でサービスの再起動は不要**。
+  失敗したコマンドは再実行せず呼び出し元に返すので、ローテーションの Lua が盲目的に再適用されることはない
 - NATS publish 専用: `pulsoid.connection.changed` (OAuth callback / manual token PUT/DELETE 時)
 - OAuth 初回認可 (code 交換) と manual token PUT は api-backend が担当。token refresh は pulsoid-refresher が所有
 - WebSocket 配信には関与しない (ws-gateway に分離)

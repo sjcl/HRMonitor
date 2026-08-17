@@ -20,9 +20,18 @@ axum = { version = "0.8.8", optional = true }
 jsonwebtoken = { version = "11.0.0", default-features = false, features = ["rust_crypto"], optional = true }
 ed25519-dalek = { version = "2.2", optional = true }
 url = { version = "2.5", optional = true }
+redis = { version = "1.5", features = [
+    "tokio-comp",
+    "aio",
+    "connection-manager",
+], optional = true }
 
 [features]
 oauth = ["dep:reqwest", "dep:urlencoding"]
+
+# Shared Redis connection construction (`redis_conn`). Enabled by every service
+# that talks to Redis; keeps the reconnect/timeout contract defined once.
+redis-conn = ["dep:redis"]
 signal = ["dep:tokio", "dep:futures-util", "dep:tokio-util"]
 # `web` implies `jwt`: request authentication *is* JWT verification now.
 web = ["dep:axum", "dep:url", "jwt"]

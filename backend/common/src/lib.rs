@@ -9,6 +9,8 @@ pub mod oauth_error;
 #[cfg(feature = "oauth")]
 pub mod pulsoid_oauth;
 pub mod pulsoid_state;
+#[cfg(feature = "redis-conn")]
+pub mod redis_conn;
 pub mod redis_keys;
 #[cfg(feature = "signal")]
 pub mod signal;

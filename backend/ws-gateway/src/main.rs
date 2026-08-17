@@ -21,7 +21,7 @@ use common::time::unix_now_secs;
 
 pub struct WsState {
     pub db: sqlx::PgPool,
-    pub redis: redis::aio::MultiplexedConnection,
+    pub redis: redis::aio::ConnectionManager,
     pub hr_broadcast: tokio_broadcast::Sender<HeartRateReceived>,
     pub auth_config: AuthConfig,
     /// Verify-only. ws-gateway enables `common`'s `jwt` feature but not
@@ -66,7 +66,7 @@ type WarmUpRow = (String, i32, i64, i64);
 /// is best-effort.
 async fn flush_chunk(
     chunk: &mut Vec<WarmUpRow>,
-    redis_conn: &mut redis::aio::MultiplexedConnection,
+    redis_conn: &mut redis::aio::ConnectionManager,
     now: i64,
     warmed: &mut u64,
     nx_skipped: &mut u64,
@@ -154,7 +154,7 @@ async fn flush_chunk(
 /// buffered tail once so already-fetched work isn't discarded.
 async fn warm_latest_bpm_cache(
     pool: sqlx::PgPool,
-    mut redis_conn: redis::aio::MultiplexedConnection,
+    mut redis_conn: redis::aio::ConnectionManager,
     shutdown: CancellationToken,
 ) {
     // SQL prefilter: drop rows already past the 6h horizon at query time so the
@@ -248,13 +248,10 @@ async fn main() {
         .await
         .expect("Failed to initialize database");
 
-    let redis_client = redis::Client::open(redis_url).expect("Invalid REDIS_URL");
-    let redis_conn = redis_client
-        .get_multiplexed_async_connection()
-        .await
-        .expect("Failed to connect to Redis");
-
-    tracing::info!("Connected to Redis");
+    // Lazy: does not dial out, so Redis being down cannot stop this service from
+    // starting, and the manager reconnects on its own afterwards. The only
+    // failure left is a malformed URL.
+    let redis_conn = common::redis_conn::connect_lazy(&redis_url).expect("Invalid REDIS_URL");
 
     let shutdown = CancellationToken::new();
 
@@ -265,16 +262,25 @@ async fn main() {
     // a null initial snapshot for inactive users; the WS handler's 10s
     // self_heal_interval converts that to an Update once warm-up lands.
     //
-    // The task opens its own MultiplexedConnection so its 500-command
-    // pipelines cannot queue in front of WS read_snapshot() MGETs on the
-    // connection stored in WsState. Acquisition happens inside the task:
-    // warm-up is best-effort, so a failure here must not block startup.
+    // The task builds its own connection so its 500-command pipelines cannot
+    // queue in front of WS read_snapshot() MGETs on the connection stored in
+    // WsState.
+    //
+    // This must stay a separate `connect_lazy` call and must NOT become
+    // `state.redis.clone()`: clones of a ConnectionManager share one multiplexed
+    // connection, so cloning would put the warm-up pipelines back onto the same
+    // socket as read_snapshot() and silently undo this isolation. A second call
+    // is what gives us a second socket.
     let _warm_up_task = tokio::spawn({
         let pool = pool.clone();
-        let redis_client = redis_client.clone();
+        let redis_url = redis_url.clone();
         let shutdown = shutdown.clone();
         async move {
-            let conn = match redis_client.get_multiplexed_async_connection().await {
+            // Cannot fail on Redis being down (lazy), only on a malformed URL —
+            // which the primary connection above would already have panicked on.
+            // Kept as a warn-and-return anyway: warm-up is best-effort and must
+            // never take the service down.
+            let conn = match common::redis_conn::connect_lazy(&redis_url) {
                 Ok(c) => c,
                 Err(e) => {
                     tracing::warn!(
@@ -423,6 +429,11 @@ async fn main() {
             common::origin::require_origin_always::<WsState>,
         ));
 
+    // Deliberately static: liveness, not readiness. Redis goes through
+    // `ConnectionManager`, which reconnects by itself after a restart or a blip
+    // (see `common::redis_conn`). Checking Redis here would mark the container
+    // unhealthy during precisely the window it is already recovering in, which is
+    // worse than reporting nothing.
     let public_routes = Router::new().route("/healthz", get(|| async { "ok" }));
 
     let app = Router::new()

@@ -40,7 +40,12 @@ fn rotation_key(sid: &str) -> String {
     format!("auth:rotation:v1:{sid}")
 }
 
-async fn connect() -> Option<redis::aio::MultiplexedConnection> {
+/// Eager, unlike production.
+///
+/// The services build their managers lazily so they start with Redis down, but
+/// here an unreachable Redis must surface immediately as the panic below rather
+/// than as a confusing failure inside whichever assertion runs first.
+async fn connect() -> Option<redis::aio::ConnectionManager> {
     let url = match std::env::var("REDIS_URL") {
         Ok(u) if !u.trim().is_empty() => u,
         _ => {
@@ -61,10 +66,15 @@ async fn connect() -> Option<redis::aio::MultiplexedConnection> {
         }
     };
     match redis::Client::open(url.as_str()) {
-        Ok(c) => match c.get_multiplexed_async_connection().await {
-            Ok(conn) => Some(conn),
-            Err(e) => panic!("REDIS_URL is set but unreachable: {e}"),
-        },
+        Ok(c) => {
+            // Same timeout/retry contract the services run with, so these tests
+            // exercise the configuration that is actually deployed.
+            let config = common::redis_conn::manager_config();
+            match redis::aio::ConnectionManager::new_with_config(c, config).await {
+                Ok(conn) => Some(conn),
+                Err(e) => panic!("REDIS_URL is set but unreachable: {e}"),
+            }
+        }
         Err(e) => panic!("REDIS_URL is not a valid Redis URL: {e}"),
     }
 }
@@ -79,7 +89,7 @@ macro_rules! with_redis {
     };
 }
 
-async fn store(conn: &mut redis::aio::MultiplexedConnection, sid: &str, s: &RefreshSession) {
+async fn store(conn: &mut redis::aio::ConnectionManager, sid: &str, s: &RefreshSession) {
     let payload = serde_json::to_string(s).unwrap();
     let _: () = redis::cmd("SET")
         .arg(session_key(sid))
@@ -91,14 +101,14 @@ async fn store(conn: &mut redis::aio::MultiplexedConnection, sid: &str, s: &Refr
         .unwrap();
 }
 
-async fn load(conn: &mut redis::aio::MultiplexedConnection, sid: &str) -> Option<RefreshSession> {
+async fn load(conn: &mut redis::aio::ConnectionManager, sid: &str) -> Option<RefreshSession> {
     let raw: Option<String> = conn.get(session_key(sid)).await.unwrap();
     raw.map(|r| serde_json::from_str(&r).unwrap())
 }
 
 /// One rotation attempt, exactly as the handler performs it.
 async fn rotate(
-    conn: &mut redis::aio::MultiplexedConnection,
+    conn: &mut redis::aio::ConnectionManager,
     k: &SessionKeys,
     sid: &str,
     presented_secret: &str,
@@ -126,7 +136,7 @@ async fn rotate(
 /// One revocation attempt, exactly as the logout handler performs it when no
 /// valid access token is present.
 async fn revoke(
-    conn: &mut redis::aio::MultiplexedConnection,
+    conn: &mut redis::aio::ConnectionManager,
     k: &SessionKeys,
     sid: &str,
     presented_secret: &str,
@@ -143,7 +153,7 @@ async fn revoke(
 
 /// Fresh session plus the secret that currently opens it.
 async fn seed(
-    conn: &mut redis::aio::MultiplexedConnection,
+    conn: &mut redis::aio::ConnectionManager,
     k: &SessionKeys,
     sid: &str,
     now: i64,
@@ -630,5 +640,95 @@ async fn the_revoke_script_agrees_with_the_rust_reference_implementation() {
             let _: () = conn.del(session_key(&sid)).await.unwrap();
             let _: () = conn.del(rotation_key(&sid)).await.unwrap();
         }
+    });
+}
+
+/// The reason every service holds a `ConnectionManager` instead of a
+/// `MultiplexedConnection`.
+///
+/// A `MultiplexedConnection` never recovers from a dropped socket, so a Redis
+/// restart used to break refresh and logout until the *process* was restarted —
+/// while `/healthz` kept reporting `"ok"`. `/healthz` still does not check Redis,
+/// which is only defensible because the manager heals itself. This test is that
+/// guarantee.
+///
+/// `CLIENT KILL` stands in for a Redis restart: it drops the exact socket the
+/// manager is using, which is the part that actually breaks. It needs no
+/// container control, so it runs in CI against the ordinary service Redis.
+#[tokio::test]
+async fn the_manager_recovers_from_a_dropped_connection_without_being_recreated() {
+    with_redis!(conn, {
+        // The id of the connection the manager is really using.
+        let id: i64 = redis::cmd("CLIENT")
+            .arg("ID")
+            .query_async(&mut conn)
+            .await
+            .expect("CLIENT ID must work on a healthy connection");
+
+        // Killed from a separate connection, so the kill itself cannot be what
+        // repairs `conn`.
+        let mut killer = connect().await.unwrap();
+        let killed: i64 = redis::cmd("CLIENT")
+            .arg("KILL")
+            .arg("ID")
+            .arg(id)
+            .query_async(&mut killer)
+            .await
+            .expect("CLIENT KILL must be permitted");
+        assert_eq!(
+            killed, 1,
+            "expected to kill exactly the manager's connection"
+        );
+
+        // Deliberately no assertion on the first command after the kill: the
+        // manager does not retry the command that discovers the broken socket, so
+        // that one is allowed to fail. What must hold is that `conn` — the same
+        // handle, never rebuilt — starts working again on its own. Creating a new
+        // Client or ConnectionManager anywhere below would make this test prove
+        // nothing.
+        let mut recovered = false;
+        let mut last_err = None;
+        for _ in 0..20 {
+            match redis::cmd("PING").query_async::<String>(&mut conn).await {
+                Ok(_) => {
+                    recovered = true;
+                    break;
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            }
+        }
+        assert!(
+            recovered,
+            "the manager did not reconnect within 2s of losing its connection; \
+             last error: {last_err:?}"
+        );
+
+        // PING proves the socket is back, but a real restart also empties the
+        // script cache, which `CLIENT KILL` alone does not. Flush it explicitly so
+        // the rotation below runs the path a restarted Redis would force:
+        // EVALSHA -> NOSCRIPT -> reload -> retry, which `Script::invoke_async`
+        // handles internally. Safe to do globally — any concurrent test's rotation
+        // recovers the same way.
+        let _: () = redis::cmd("SCRIPT")
+            .arg("FLUSH")
+            .query_async(&mut killer)
+            .await
+            .expect("SCRIPT FLUSH must be permitted");
+
+        let (k, sid) = (keys(), unique_sid());
+        let secret = seed(&mut conn, &k, &sid, NOW).await;
+        let (reply, _) = rotate(&mut conn, &k, &sid, &secret, NOW).await;
+        assert_eq!(
+            reply.outcome,
+            RotationOutcome::Rotated,
+            "rotation must work again after the reconnect, including reloading the \
+             script the flush dropped"
+        );
+
+        let _: () = conn.del(session_key(&sid)).await.unwrap();
+        let _: () = conn.del(rotation_key(&sid)).await.unwrap();
     });
 }

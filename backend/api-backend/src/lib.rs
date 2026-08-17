@@ -30,7 +30,7 @@ use crate::sessions::SessionKeys;
 
 pub struct AppState {
     pub db: sqlx::PgPool,
-    pub redis: redis::aio::MultiplexedConnection,
+    pub redis: redis::aio::ConnectionManager,
     pub nats: async_nats::Client,
     pub auth_config: AuthConfig,
     pub jwt_verifier: JwtVerifier,
@@ -107,12 +107,10 @@ pub async fn run() {
     tracing::info!("Connected to NATS at {nats_url}");
 
     let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".into());
-    let redis = redis::Client::open(redis_url.as_str())
-        .expect("Invalid REDIS_URL")
-        .get_multiplexed_async_connection()
-        .await
-        .expect("Failed to connect to Redis");
-    tracing::info!("Connected to Redis at {redis_url}");
+    // Lazy: does not dial out, so Redis being down cannot stop this service from
+    // starting, and the manager reconnects on its own afterwards. The only
+    // failure left is a malformed URL.
+    let redis = common::redis_conn::connect_lazy(&redis_url).expect("Invalid REDIS_URL");
 
     let pulsoid_oauth = PulsoidOAuthConfig::from_env_full();
     let discord_oauth = DiscordOAuthConfig::from_env();
@@ -178,6 +176,11 @@ pub async fn run() {
 
     // Public routes (no auth required)
     let public_routes = Router::new()
+        // Deliberately static: liveness, not readiness. Redis goes through
+        // `ConnectionManager`, which reconnects by itself after a restart or a
+        // blip (see `common::redis_conn`). Checking Redis here would mark the
+        // container unhealthy during precisely the window it is already
+        // recovering in, which is worse than reporting nothing.
         .route("/healthz", get(|| async { "ok" }))
         // GET, so exempt from the Origin check by design: Discord redirects the
         // browser here as a top-level navigation with no Origin header. CSRF is

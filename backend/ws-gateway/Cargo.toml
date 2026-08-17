@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-common = { path = "../common", features = ["web", "signal"] }
+common = { path = "../common", features = ["web", "signal", "redis-conn"] }
 axum = { version = "0.8.8", features = ["ws"] }
 tokio = { version = "1.51.1", features = ["full"] }
 sqlx = { version = "0.8.6", features = ["runtime-tokio", "postgres"] }
@@ -14,7 +14,7 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 async-nats = "0.49.0"
 futures-util = "0.3.32"
-redis = { version = "1.1.0", features = ["tokio-comp", "aio"] }
+redis = { version = "1.5", features = ["tokio-comp", "aio", "connection-manager"] }
 tokio-util = "0.7.18"
 url = "2.5.4"
 

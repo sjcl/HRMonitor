@@ -29,7 +29,7 @@ const REFRESH_SAFETY_MARGIN_SECS: i64 = 60;
 pub async fn run_worker(
     db: PgPool,
     nats: async_nats::Client,
-    mut redis: redis::aio::MultiplexedConnection,
+    mut redis: redis::aio::ConnectionManager,
     encryption: Arc<TokenEncryption>,
     user_id: String,
     revision: i32,
@@ -340,7 +340,7 @@ async fn persist_terminal_error_best_effort(
 async fn handle_message(
     db: &PgPool,
     nats: &async_nats::Client,
-    redis: &mut redis::aio::MultiplexedConnection,
+    redis: &mut redis::aio::ConnectionManager,
     user_id: &str,
     text: &str,
 ) -> Result<(), String> {
