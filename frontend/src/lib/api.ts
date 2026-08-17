@@ -1,4 +1,11 @@
-import { ApiError, fetchJson, jsonBody } from "./http";
+import {
+  ApiError,
+  TransientError,
+  ensureFreshToken,
+  fetchJson,
+  jsonBody,
+  redirectToLogin,
+} from "./http";
 
 // Re-exported: components catch ApiError to render 403/404 states.
 export { ApiError, TransientError } from "./http";
@@ -79,7 +86,29 @@ export async function getPulsoidToken(): Promise<PulsoidTokenStatus | null> {
   }
 }
 
-export function createPulsoidConnect(returnTo?: string) {
+/**
+ * The Pulsoid connect ticket's lifetime (`connect_requests.expires_at`, set to
+ * `now() + INTERVAL '5 minutes'` in the backend) plus 30 seconds of clock skew.
+ */
+const OAUTH_HANDOFF_MIN_TOKEN_SECS = 5 * 60 + 30;
+
+/**
+ * Mint the ticket that hands the browser off to Pulsoid's consent screen.
+ *
+ * The redirect and the callback the user comes back to are both behind
+ * `require_auth`, and while the user is away the SPA is not running — so the
+ * usual 401-then-refresh recovery in {@link fetchJson} cannot happen. Starting
+ * the trip with a nearly expired access token therefore ends in a bare 401 on
+ * return. Guarantee the token outlives the ticket before leaving.
+ */
+export async function createPulsoidConnect(returnTo?: string) {
+  const fresh = await ensureFreshToken(OAUTH_HANDOFF_MIN_TOKEN_SECS);
+  if (fresh.status === "unauthenticated") {
+    redirectToLogin();
+    throw new ApiError(401, "Unauthorized");
+  }
+  if (fresh.status === "unavailable") throw new TransientError();
+
   return fetchJson<{ request_id: string }>(
     "/api/oauth/pulsoid/connect",
     jsonBody("POST", { return_to: returnTo ?? "/settings" }),
