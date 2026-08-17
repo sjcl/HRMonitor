@@ -121,7 +121,9 @@ docker compose up --build
   - リフレッシュは毎回ローテーション。直前世代には 10 秒の grace 窓があり、勝者の secret を AEAD 封印して
     Redis に置くことで「回転成功・レスポンス消失」からも復旧できる
   - grace を過ぎた旧世代の提示のみ再利用検知として失効。未知の secret は失効させない (sid は秘密ではないため DoS になる)
-  - ログアウトは有効な JWT を要求しない。Redis 削除に失敗したら 503 を返し Cookie を残す
+  - ログアウトは有効な JWT を要求しないが、`sid` を名乗るだけでは失効させない。有効な JWT が無い場合は
+    リフレッシュ secret の HMAC 照合を経てから Lua (`REVOKE_SCRIPT`) で原子的に失効させる (同じ DoS 対策)。
+    Redis 削除に失敗したら 503 を返し Cookie を残す
   - **認可** (グループ所属・心拍公開範囲) は従来どおりリクエストごとに DB を参照する
   - users (1:N) accounts のリレーション。`accounts (provider, provider_account_id)` で既存ユーザーを引き当てる
   - `sessions` テーブルは未使用のまま残置 (削除は別 PR)

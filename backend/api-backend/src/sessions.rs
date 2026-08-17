@@ -166,6 +166,81 @@ else
 end
 "#;
 
+/// What a presented refresh token means for a revocation request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RevokeOutcome {
+    /// The secret belonged to this session; both keys are gone.
+    Revoked,
+    /// No such session — already logged out, or never existed.
+    NotFound,
+    /// A secret matching neither generation. Nothing was touched.
+    ///
+    /// Same reasoning as [`RotationOutcome::UnknownHash`]: `sid` is not secret,
+    /// so deleting on any bad secret would let anyone who learns a `sid` force
+    /// that user to log out.
+    HashMismatch,
+}
+
+/// Reference implementation of the revocation decision.
+///
+/// Mirrors [`REVOKE_SCRIPT`] the way [`decide_rotation`] mirrors
+/// [`ROTATE_SCRIPT`], so every branch is unit-testable without Redis.
+pub fn decide_revocation(session: &RefreshSession, presented_hash: &str) -> RevokeOutcome {
+    let matches_previous = session
+        .previous_hash
+        .as_deref()
+        .is_some_and(|prev| constant_time_eq(prev, presented_hash));
+
+    if constant_time_eq(&session.current_hash, presented_hash) || matches_previous {
+        RevokeOutcome::Revoked
+    } else {
+        RevokeOutcome::HashMismatch
+    }
+}
+
+/// Atomic, authenticated revocation.
+///
+/// Logout must not delete a session just because the caller named it: `sid`
+/// travels in the access JWT and is not secret. This checks the presented
+/// secret's HMAC against the stored generations and deletes in the same script,
+/// so the check cannot be won by a concurrent rotation.
+///
+/// `previous_hash` is accepted regardless of the grace deadline. Revocation is
+/// the fail-safe direction, and refusing here would strand a tab that logged
+/// out moments after a rotation. A post-grace replay would be treated as reuse
+/// on the refresh path — which also revokes — so the outcomes agree.
+///
+/// `exp` is not consulted: deleting an already-expired session is harmless.
+///
+/// Lua's `==` is not constant-time, but this matches the existing comparison in
+/// [`ROTATE_SCRIPT`]; timing differences on an HMAC digest comparison are not
+/// exploitable across a network.
+///
+/// 0 = revoked, 1 = not_found, 2 = hash_mismatch
+pub const REVOKE_SCRIPT: &str = r#"
+-- KEYS[1] = auth:session:v1:{sid}
+-- KEYS[2] = auth:rotation:v1:{sid}
+-- ARGV[1] = presented_hash
+local raw = redis.call('GET', KEYS[1])
+if not raw then return 1 end
+local sess = cjson.decode(raw)
+if sess.current_hash == ARGV[1] or sess.previous_hash == ARGV[1] then
+  redis.call('DEL', KEYS[1])
+  redis.call('DEL', KEYS[2])
+  return 0
+end
+return 2
+"#;
+
+pub fn revoke_status_to_outcome(status: i64) -> Option<RevokeOutcome> {
+    Some(match status {
+        0 => RevokeOutcome::Revoked,
+        1 => RevokeOutcome::NotFound,
+        2 => RevokeOutcome::HashMismatch,
+        _ => return None,
+    })
+}
+
 /// Decoded reply from [`ROTATE_SCRIPT`].
 #[derive(Debug, Clone)]
 pub struct RotationReply {
@@ -540,6 +615,56 @@ mod tests {
         );
     }
 
+    // --- decide_revocation ------------------------------------------------
+
+    #[test]
+    fn current_secret_revokes() {
+        assert_eq!(decide_revocation(&session(), "cur"), RevokeOutcome::Revoked);
+    }
+
+    #[test]
+    fn superseded_secret_revokes_inside_and_outside_the_grace_window() {
+        // Revocation is the fail-safe direction, so unlike rotation the grace
+        // deadline does not gate it.
+        let inside = rotated_session();
+        assert_eq!(decide_revocation(&inside, "cur"), RevokeOutcome::Revoked);
+
+        let elapsed = RefreshSession {
+            previous_expires_at: Some(NOW - 1),
+            ..rotated_session()
+        };
+        assert_eq!(decide_revocation(&elapsed, "cur"), RevokeOutcome::Revoked);
+    }
+
+    #[test]
+    fn new_secret_still_revokes_after_a_rotation() {
+        assert_eq!(
+            decide_revocation(&rotated_session(), "new"),
+            RevokeOutcome::Revoked
+        );
+    }
+
+    #[test]
+    fn unknown_secret_does_not_revoke_on_logout() {
+        // The whole point: `sid` is not secret, so naming a session must not be
+        // enough to end it.
+        assert_eq!(
+            decide_revocation(&session(), "garbage"),
+            RevokeOutcome::HashMismatch
+        );
+        assert_eq!(
+            decide_revocation(&rotated_session(), "garbage"),
+            RevokeOutcome::HashMismatch
+        );
+    }
+
+    #[test]
+    fn a_session_without_a_previous_generation_only_matches_current() {
+        let s = session();
+        assert!(s.previous_hash.is_none());
+        assert_eq!(decide_revocation(&s, ""), RevokeOutcome::HashMismatch);
+    }
+
     // --- token material ---------------------------------------------------
 
     #[test]
@@ -677,5 +802,16 @@ mod tests {
         assert_eq!(status_to_outcome(4), Some(RotationOutcome::NotFound));
         assert_eq!(status_to_outcome(5), Some(RotationOutcome::UnknownHash));
         assert_eq!(status_to_outcome(99), None);
+    }
+
+    #[test]
+    fn revoke_status_codes_map_to_outcomes() {
+        assert_eq!(revoke_status_to_outcome(0), Some(RevokeOutcome::Revoked));
+        assert_eq!(revoke_status_to_outcome(1), Some(RevokeOutcome::NotFound));
+        assert_eq!(
+            revoke_status_to_outcome(2),
+            Some(RevokeOutcome::HashMismatch)
+        );
+        assert_eq!(revoke_status_to_outcome(99), None);
     }
 }

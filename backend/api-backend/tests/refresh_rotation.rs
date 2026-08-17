@@ -11,7 +11,8 @@
 //! so the suite is safe to run in parallel and against a shared instance.
 
 use api_backend::sessions::{
-    self, RefreshSession, RotationOutcome, RotationReply, SessionKeys, decide_rotation, new_session,
+    self, RefreshSession, RevokeOutcome, RotationOutcome, RotationReply, SessionKeys,
+    decide_revocation, decide_rotation, new_session,
 };
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -120,6 +121,24 @@ async fn rotate(
         RotationReply::from_parts(parts).expect("reply must decode"),
         next,
     )
+}
+
+/// One revocation attempt, exactly as the logout handler performs it when no
+/// valid access token is present.
+async fn revoke(
+    conn: &mut redis::aio::MultiplexedConnection,
+    k: &SessionKeys,
+    sid: &str,
+    presented_secret: &str,
+) -> RevokeOutcome {
+    let status: i64 = redis::Script::new(sessions::REVOKE_SCRIPT)
+        .key(session_key(sid))
+        .key(rotation_key(sid))
+        .arg(k.hash_secret(presented_secret))
+        .invoke_async(conn)
+        .await
+        .expect("revoke script must not error");
+    sessions::revoke_status_to_outcome(status).expect("status must decode")
 }
 
 /// Fresh session plus the secret that currently opens it.
@@ -394,16 +413,94 @@ async fn logout_makes_the_refresh_token_unusable() {
         let (k, sid) = (keys(), unique_sid());
         let secret = seed(&mut conn, &k, &sid, NOW).await;
 
-        // What the logout handler does.
-        let _: () = redis::pipe()
-            .del(session_key(&sid))
-            .del(rotation_key(&sid))
-            .query_async(&mut conn)
-            .await
-            .unwrap();
+        assert_eq!(
+            revoke(&mut conn, &k, &sid, &secret).await,
+            RevokeOutcome::Revoked
+        );
 
         let (reply, _) = rotate(&mut conn, &k, &sid, &secret, NOW).await;
         assert_eq!(reply.outcome, RotationOutcome::NotFound);
+    });
+}
+
+/// Regression test: naming a session must not be enough to end it.
+///
+/// `sid` rides in the access JWT and is not secret, so a logout that deleted on
+/// `sid` alone let anyone who learned one force that user offline.
+#[tokio::test]
+async fn revoking_with_a_bogus_secret_leaves_the_session_alive() {
+    with_redis!(conn, {
+        let (k, sid) = (keys(), unique_sid());
+        let secret = seed(&mut conn, &k, &sid, NOW).await;
+
+        assert_eq!(
+            revoke(&mut conn, &k, &sid, "garbage").await,
+            RevokeOutcome::HashMismatch
+        );
+
+        // The victim's session is untouched and still rotates normally.
+        assert!(load(&mut conn, &sid).await.is_some());
+        let (reply, _) = rotate(&mut conn, &k, &sid, &secret, NOW).await;
+        assert_eq!(reply.outcome, RotationOutcome::Rotated);
+
+        let _: () = conn.del(session_key(&sid)).await.unwrap();
+        let _: () = conn.del(rotation_key(&sid)).await.unwrap();
+    });
+}
+
+#[tokio::test]
+async fn revoking_with_the_current_secret_removes_both_keys() {
+    with_redis!(conn, {
+        let (k, sid) = (keys(), unique_sid());
+        let first = seed(&mut conn, &k, &sid, NOW).await;
+
+        // Rotate first so the recovery key exists and there is something to
+        // leave behind if the script only deleted one of them.
+        let (reply, next) = rotate(&mut conn, &k, &sid, &first, NOW).await;
+        assert_eq!(reply.outcome, RotationOutcome::Rotated);
+        let sealed: Option<String> = conn.get(rotation_key(&sid)).await.unwrap();
+        assert!(sealed.is_some(), "rotation must have left a sealed secret");
+
+        assert_eq!(
+            revoke(&mut conn, &k, &sid, &next.secret).await,
+            RevokeOutcome::Revoked
+        );
+
+        let session: Option<String> = conn.get(session_key(&sid)).await.unwrap();
+        let recovery: Option<String> = conn.get(rotation_key(&sid)).await.unwrap();
+        assert_eq!(session, None);
+        assert_eq!(recovery, None);
+    });
+}
+
+#[tokio::test]
+async fn revoking_a_missing_session_reports_not_found() {
+    with_redis!(conn, {
+        let (k, sid) = (keys(), unique_sid());
+        assert_eq!(
+            revoke(&mut conn, &k, &sid, "anything").await,
+            RevokeOutcome::NotFound
+        );
+    });
+}
+
+/// The superseded generation still revokes, grace window or not: a tab that
+/// logs out just after a rotation must not be stranded.
+#[tokio::test]
+async fn the_superseded_secret_revokes_after_the_grace_window() {
+    with_redis!(conn, {
+        let (k, sid) = (keys(), unique_sid());
+        let first = seed(&mut conn, &k, &sid, NOW).await;
+        let (reply, _) = rotate(&mut conn, &k, &sid, &first, NOW).await;
+        assert_eq!(reply.outcome, RotationOutcome::Rotated);
+
+        // Nothing in the script consults the clock, so a long-elapsed grace
+        // window makes no difference here.
+        assert_eq!(
+            revoke(&mut conn, &k, &sid, &first).await,
+            RevokeOutcome::Revoked
+        );
+        assert!(load(&mut conn, &sid).await.is_none());
     });
 }
 
@@ -480,6 +577,54 @@ async fn the_lua_script_agrees_with_the_rust_reference_implementation() {
             assert_eq!(
                 reply.outcome, expected,
                 "{label}: Lua and decide_rotation must agree"
+            );
+
+            let _: () = conn.del(session_key(&sid)).await.unwrap();
+            let _: () = conn.del(rotation_key(&sid)).await.unwrap();
+        }
+    });
+}
+
+#[tokio::test]
+async fn the_revoke_script_agrees_with_the_rust_reference_implementation() {
+    // Same reasoning as above: `decide_revocation` is what the unit tests
+    // exercise, so it has to match what Redis actually runs.
+    with_redis!(conn, {
+        let k = keys();
+
+        for (label, presented) in [
+            ("current", "current"),
+            ("previous", "previous"),
+            ("unknown", "bogus"),
+        ] {
+            let sid = unique_sid();
+            let first = sessions::generate_token(&k, &sid);
+            store(
+                &mut conn,
+                &sid,
+                &new_session("user-1", first.hash.clone(), NOW),
+            )
+            .await;
+
+            let secret = match presented {
+                "previous" => {
+                    let (_, next) = rotate(&mut conn, &k, &sid, &first.secret, NOW).await;
+                    drop(next);
+                    first.secret.clone()
+                }
+                "bogus" => "definitely-not-valid".to_string(),
+                _ => first.secret.clone(),
+            };
+
+            let expected = {
+                let stored = load(&mut conn, &sid).await.unwrap();
+                decide_revocation(&stored, &k.hash_secret(&secret))
+            };
+            let outcome = revoke(&mut conn, &k, &sid, &secret).await;
+
+            assert_eq!(
+                outcome, expected,
+                "{label}: Lua and decide_revocation must agree"
             );
 
             let _: () = conn.del(session_key(&sid)).await.unwrap();

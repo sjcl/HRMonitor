@@ -609,12 +609,27 @@ fn issue_access_only_response(state: &AppState, user_id: &str, sid: &str, now: i
 
 /// Revoke the session and clear cookies.
 ///
-/// Deliberately *not* behind `require_auth`: an expired access token is the
-/// normal state of a tab that has been idle, and refusing to log it out would
+/// Deliberately *not* behind `require_auth`: an idle tab's access token has
+/// normally expired, and `JwtVerifier` rejects it, so requiring one would
 /// strand a live refresh session in Redis while the user believes they are out.
 ///
-/// The session id is taken from the access token when it still verifies, and
-/// from the refresh cookie otherwise.
+/// That leaves two independent proofs of holding the session, and revocation
+/// requires one of them:
+///
+/// 1. A currently valid access token — signature-checked, and its `sid` claim
+///    is then authority enough to delete outright.
+/// 2. The refresh cookie, whose secret is HMAC-checked against the stored
+///    generations *inside* [`sessions::REVOKE_SCRIPT`], so the check and the
+///    delete cannot be split by a concurrent rotation.
+///
+/// The `sid` alone is explicitly **not** a proof: it rides in the access JWT
+/// and is not secret, so honouring it would let anyone who learns a `sid` force
+/// that user offline — the same DoS that [`sessions::RotationOutcome::UnknownHash`]
+/// refuses to allow on the refresh path.
+///
+/// Every non-error path answers 204 and clears cookies, whether or not anything
+/// was deleted: a caller must not be able to probe which sessions exist, and a
+/// browser should drop its cookies regardless.
 pub async fn logout(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     let cfg = &state.auth_config;
     let cookie_header = headers
@@ -622,46 +637,64 @@ pub async fn logout(State(state): State<Arc<AppState>>, headers: HeaderMap) -> R
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    // An expired token still names its session; we only need `sid`, and the
-    // signature having been valid at issue time is enough to trust that field.
     let sid_from_jwt = access_token_from_cookies(cookie_header, cfg)
         .and_then(|t| state.jwt_verifier.verify(&t).ok().map(|c| c.sid));
 
     let refresh = common::auth::cookie_value(cookie_header, &cfg.refresh_cookie_name);
-    let sid_from_refresh = refresh
-        .as_deref()
-        .and_then(split_cookie)
-        .map(|(sid, _)| sid.to_string());
+    let refresh_parts = refresh.as_deref().and_then(split_cookie);
 
-    let sid = sid_from_jwt.or(sid_from_refresh);
-
-    let mut resp = StatusCode::NO_CONTENT.into_response();
-
-    if let Some(sid) = sid {
-        let mut redis = state.redis.clone();
-        let deleted: Result<(), _> = redis::pipe()
-            .del(refresh_session_key(&sid))
-            .del(rotation_recovery_key(&sid))
-            .query_async(&mut redis)
-            .await;
-
-        if let Err(e) = deleted {
-            // Reporting success here would be a lie with consequences: the
-            // refresh token stays live for up to 30 days. Keep the auth cookies
-            // so the client can retry; the OAuth cookie is short-lived and
-            // irrelevant, so it goes either way.
-            tracing::error!("Logout failed to revoke session: {e}");
-            let mut resp = (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({"error": "Session store unavailable"})),
-            )
-                .into_response();
-            append_cookie(&mut resp, cookies::clear(cfg, CookieKind::OAuth));
-            no_store(&mut resp);
-            return resp;
+    let mut redis = state.redis.clone();
+    let revoked: Result<(), redis::RedisError> = match (&sid_from_jwt, refresh_parts) {
+        (Some(sid), _) => {
+            redis::pipe()
+                .del(refresh_session_key(sid))
+                .del(rotation_recovery_key(sid))
+                .query_async(&mut redis)
+                .await
         }
+        (None, Some((sid, secret))) => {
+            let presented_hash = state.session_keys.hash_secret(secret);
+            let status: Result<i64, _> = redis::Script::new(sessions::REVOKE_SCRIPT)
+                .key(refresh_session_key(sid))
+                .key(rotation_recovery_key(sid))
+                .arg(&presented_hash)
+                .invoke_async(&mut redis)
+                .await;
+            match status {
+                // `debug`, not `warn`: `sid` is public, so anyone could
+                // generate this line at will.
+                Ok(status) => {
+                    if !matches!(
+                        sessions::revoke_status_to_outcome(status),
+                        Some(sessions::RevokeOutcome::Revoked)
+                    ) {
+                        tracing::debug!(sid, status, "Logout presented no valid refresh secret");
+                    }
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            }
+        }
+        (None, None) => Ok(()),
+    };
+
+    if let Err(e) = revoked {
+        // Reporting success here would be a lie with consequences: the
+        // refresh token stays live for up to 30 days. Keep the auth cookies
+        // so the client can retry; the OAuth cookie is short-lived and
+        // irrelevant, so it goes either way.
+        tracing::error!("Logout failed to revoke session: {e}");
+        let mut resp = (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "Session store unavailable"})),
+        )
+            .into_response();
+        append_cookie(&mut resp, cookies::clear(cfg, CookieKind::OAuth));
+        no_store(&mut resp);
+        return resp;
     }
 
+    let mut resp = StatusCode::NO_CONTENT.into_response();
     clear_all_cookies(&mut resp, cfg);
     no_store(&mut resp);
     resp
