@@ -41,8 +41,15 @@ export interface HeartRateRecord {
 
 // --- API functions ---
 
+/**
+ * Also the "am I signed in?" probe, so a 401 must come back as an error for
+ * the caller to interpret — never as a navigation. `/login` renders this very
+ * query, and redirecting from here would reload that page forever.
+ */
 export function getSelfUser() {
-  return fetchJson<SelfUser>(`/api/users/me`);
+  return fetchJson<SelfUser>(`/api/users/me`, undefined, {
+    redirectOn401: false,
+  });
 }
 
 export function getHeartRateProfile(userId: string) {

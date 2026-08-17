@@ -5,6 +5,7 @@ import {
   __resetRefreshStateForTests,
   ensureFreshToken,
   fetchJson,
+  redirectToLogin,
   refreshSession,
 } from "./http";
 
@@ -23,18 +24,22 @@ function res(
 
 let assign: ReturnType<typeof vi.fn>;
 
-beforeEach(() => {
-  __resetRefreshStateForTests();
-  assign = vi.fn();
+function stubLocation(pathname: string, search = "") {
   Object.defineProperty(window, "location", {
     configurable: true,
     value: {
       assign,
-      pathname: "/me",
-      search: "",
-      href: "http://localhost:3000/me",
+      pathname,
+      search,
+      href: `http://localhost:3000${pathname}${search}`,
     },
   });
+}
+
+beforeEach(() => {
+  __resetRefreshStateForTests();
+  assign = vi.fn();
+  stubLocation("/me");
 });
 
 afterEach(() => {
@@ -121,6 +126,35 @@ describe("fetchJson", () => {
     expect(assign).toHaveBeenCalled();
   });
 
+  it("reports a dead session as an error, not a navigation, when asked to", async () => {
+    // The "am I signed in?" probe: 401 is an answer. Only ProtectedRoute gets
+    // to decide that it means "go to /login".
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(res(401))
+      .mockResolvedValueOnce(res(401)); // refresh says the session is gone
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      fetchJson("/api/users/me", undefined, { redirectOn401: false }),
+    ).rejects.toMatchObject({ status: 401 });
+    expect(assign).not.toHaveBeenCalled();
+  });
+
+  it("does not navigate on a post-refresh 401 either when asked not to", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(res(401))
+      .mockResolvedValueOnce(res(204)) // refresh succeeds
+      .mockResolvedValueOnce(res(401)); // still 401 afterwards
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      fetchJson("/api/users/me", undefined, { redirectOn401: false }),
+    ).rejects.toBeInstanceOf(ApiError);
+    expect(assign).not.toHaveBeenCalled();
+  });
+
   it("surfaces non-401 errors without attempting a refresh", async () => {
     const fetchMock = vi.fn().mockResolvedValue(res(403, { error: "Not allowed" }, false));
     vi.stubGlobal("fetch", fetchMock);
@@ -130,6 +164,36 @@ describe("fetchJson", () => {
       message: "Not allowed",
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("redirectToLogin", () => {
+  it("preserves the current location as return_to", () => {
+    stubLocation("/users/u1", "?period=1h");
+    redirectToLogin();
+    expect(assign).toHaveBeenCalledWith("/login?return_to=%2Fusers%2Fu1%3Fperiod%3D1h");
+  });
+
+  it("does nothing on the login page", () => {
+    // Assigning here is a full reload, which re-runs the page's own session
+    // query and lands back in this function: a loop the user cannot escape.
+    stubLocation("/login");
+    redirectToLogin();
+    expect(assign).not.toHaveBeenCalled();
+  });
+
+  it("does nothing on the login page with a query string", () => {
+    // The recursion this prevents: return_to=%2Flogin%3Ferror%3Ddenied, growing
+    // on every pass.
+    stubLocation("/login", "?error=denied");
+    redirectToLogin();
+    expect(assign).not.toHaveBeenCalled();
+  });
+
+  it("navigates only once for a burst of failures", () => {
+    redirectToLogin();
+    redirectToLogin();
+    expect(assign).toHaveBeenCalledTimes(1);
   });
 });
 

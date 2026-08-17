@@ -85,15 +85,16 @@ export function __resetRefreshStateForTests(): void {
  * Send the user to the login page, preserving where they were.
  *
  * Guarded so that several simultaneous failures cannot each trigger a
- * navigation.
+ * navigation. Also a no-op on /login itself: assigning there is a full reload,
+ * which re-initialises this module and clears `redirecting`, so a 401 on the
+ * login page would otherwise reload forever.
  */
 export function redirectToLogin(): void {
+  if (window.location.pathname === "/login") return;
   if (redirecting) return;
   redirecting = true;
   const here = window.location.pathname + window.location.search;
-  const target =
-    here === "/login" ? "/login" : `/login?return_to=${encodeURIComponent(here)}`;
-  window.location.assign(target);
+  window.location.assign(`/login?return_to=${encodeURIComponent(here)}`);
 }
 
 async function parseError(res: Response): Promise<ApiError> {
@@ -107,14 +108,23 @@ async function parseError(res: Response): Promise<ApiError> {
  * Retries at most once. A second 401 after a successful refresh means
  * something other than expiry is wrong, and looping would just hammer the
  * server.
+ *
+ * `redirectOn401: false` is for the call that *asks* whether the user is
+ * signed in: there, a 401 is an answer rather than a failure, and navigating
+ * would take the decision away from `ProtectedRoute`.
  */
-export async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
+export async function fetchJson<T>(
+  url: string,
+  init?: RequestInit,
+  opts?: { redirectOn401?: boolean },
+): Promise<T> {
+  const redirect = opts?.redirectOn401 !== false;
   let res = await fetch(url, init);
 
   if (res.status === 401) {
     const result = await refreshSession();
     if (result.status === "unauthenticated") {
-      redirectToLogin();
+      if (redirect) redirectToLogin();
       throw new ApiError(401, "Unauthorized");
     }
     if (result.status === "unavailable") {
@@ -124,7 +134,7 @@ export async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> 
     }
     res = await fetch(url, init);
     if (res.status === 401) {
-      redirectToLogin();
+      if (redirect) redirectToLogin();
       throw new ApiError(401, "Unauthorized");
     }
   }

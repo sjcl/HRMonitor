@@ -81,6 +81,9 @@ describe("route protection", () => {
     );
 
     expect(await screen.findByTestId("redirected")).toBeInTheDocument();
+    // The query itself must not navigate: asking "am I signed in?" and being
+    // told "no" is an answer, and the route gate owns what to do about it.
+    expect(assign).not.toHaveBeenCalled();
   });
 
   it("shows a retry state rather than logging out during an outage", async () => {
