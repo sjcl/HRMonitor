@@ -84,6 +84,13 @@ export function useCurrentUser() {
     // "logged out", which would bounce the user to /login.
     retry: (count, error) => error instanceof TransientError && count < 3,
     staleTime: 60_000,
+    // Those three retries take about seven seconds; an outage lasts longer.
+    // Once the query has settled into an error the UI would otherwise sit on
+    // "retrying..." forever, so keep knocking — but only while it is broken,
+    // which leaves the healthy path at zero extra requests.
+    refetchInterval: (query) => (query.state.status === "error" ? 30_000 : false),
+    // Same reasoning: coming back to the tab is a good moment to try again.
+    refetchOnWindowFocus: (query) => query.state.status === "error",
   });
 }
 

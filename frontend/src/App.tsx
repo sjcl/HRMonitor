@@ -20,8 +20,9 @@ import { useEffect } from "react";
  * visibility from the database — nothing here is a security boundary, and it
  * must not be mistaken for one.
  */
-function ProtectedRoute() {
-  const { data: user, isPending, isError } = useCurrentUser();
+export function ProtectedRoute() {
+  const { data: user, isPending, isError, isFetching, refetch } =
+    useCurrentUser();
 
   useEffect(() => {
     if (!isPending && !isError && user === null) redirectToLogin();
@@ -37,11 +38,25 @@ function ProtectedRoute() {
 
   if (isError) {
     // Distinct from "logged out": the session store is unreachable, and the
-    // retry is already in flight. Sending the user to /login here would turn a
-    // brief outage into a forced re-login.
+    // query keeps polling in the background. Sending the user to /login here
+    // would turn a brief outage into a forced re-login. The wording follows
+    // what is actually happening — claiming "retrying..." between polls is how
+    // this screen used to look stuck.
     return (
-      <div className="p-8 text-center text-gray-500" role="alert">
-        サーバーに接続できません。再試行しています...
+      <div className="space-y-3 p-8 text-center text-gray-500" role="alert">
+        <p>
+          {isFetching
+            ? "サーバーに接続できません。再試行しています..."
+            : "サーバーに接続できません。"}
+        </p>
+        <button
+          type="button"
+          onClick={() => void refetch()}
+          disabled={isFetching}
+          className="rounded bg-gray-800 px-4 py-2 text-sm text-gray-300 hover:bg-gray-700 disabled:opacity-50"
+        >
+          再試行
+        </button>
       </div>
     );
   }
