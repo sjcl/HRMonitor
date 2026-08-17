@@ -1,5 +1,3 @@
-"use client";
-
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   getGroups,
@@ -9,15 +7,15 @@ import {
   formatGroupDisplayName,
 } from "@/lib/groups-api";
 import { useState, useEffect, useCallback } from "react";
-import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { Link } from "react-router";
+import { useNavigate } from "react-router";
 import { UserAvatar } from "@/components/user-avatar";
 
 type ModalStep = null | "choose" | "group" | "personal-pending" | "personal-result";
 
 export function GroupsListView() {
   const queryClient = useQueryClient();
-  const router = useRouter();
+  const navigate = useNavigate();
   const [modalStep, setModalStep] = useState<ModalStep>(null);
   const [newName, setNewName] = useState("");
   const [newPolicy, setNewPolicy] = useState("group");
@@ -42,9 +40,9 @@ export function GroupsListView() {
     setCreatedGroupId(null);
     if (groupId) {
       queryClient.invalidateQueries({ queryKey: ["groups"] });
-      router.push(`/groups/${groupId}`);
+      navigate(`/groups/${groupId}`);
     }
-  }, [createdGroupId, queryClient, router]);
+  }, [createdGroupId, queryClient, navigate]);
 
   useEffect(() => {
     if (!modalStep) return;
@@ -91,7 +89,7 @@ export function GroupsListView() {
       setModalStep(null);
       setNewName("");
       setNewPolicy("group");
-      router.push(`/groups/${group.id}`);
+      navigate(`/groups/${group.id}`);
     },
   });
 
@@ -303,7 +301,7 @@ export function GroupsListView() {
         const renderCard = (group: typeof groups[number]) => (
           <Link
             key={group.id}
-            href={`/groups/${group.id}`}
+            to={`/groups/${group.id}`}
             className="bg-gray-900 border border-gray-700 rounded-lg p-4 hover:border-gray-500 transition-colors block"
           >
             <div className="flex items-center gap-4">

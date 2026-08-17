@@ -1,3 +1,15 @@
+import {
+  ApiError,
+  TransientError,
+  ensureFreshToken,
+  fetchJson,
+  jsonBody,
+  redirectToLogin,
+} from "./http";
+
+// Re-exported: components catch ApiError to render 403/404 states.
+export { ApiError, TransientError } from "./http";
+
 // --- Types ---
 
 export type HeartRateVisibility = "group_default" | "private";
@@ -36,29 +48,15 @@ export interface HeartRateRecord {
 
 // --- API functions ---
 
-export class ApiError extends Error {
-  constructor(public status: number, message: string) {
-    super(message);
-    this.name = "ApiError";
-  }
-}
-
-async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, init);
-  if (res.status === 401) {
-    window.location.href = "/login";
-    throw new ApiError(401, "Unauthorized");
-  }
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new ApiError(res.status, body.error || `HTTP ${res.status}`);
-  }
-  if (res.status === 204) return undefined as T;
-  return res.json();
-}
-
+/**
+ * Also the "am I signed in?" probe, so a 401 must come back as an error for
+ * the caller to interpret — never as a navigation. `/login` renders this very
+ * query, and redirecting from here would reload that page forever.
+ */
 export function getSelfUser() {
-  return fetchJson<SelfUser>(`/api/users/me`);
+  return fetchJson<SelfUser>(`/api/users/me`, undefined, {
+    redirectOn401: false,
+  });
 }
 
 export function getHeartRateProfile(userId: string) {
@@ -70,37 +68,58 @@ export function updateUser(data: {
   timezone?: string;
   heart_rate_visibility?: HeartRateVisibility;
 }) {
-  return fetchJson<SelfUser>(`/api/users/me`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(data),
-  });
+  return fetchJson<SelfUser>(`/api/users/me`, jsonBody("PATCH", data));
 }
 
+/**
+ * `null` when the user has no Pulsoid connection.
+ *
+ * Previously a bare `fetch`, which meant this one call skipped the 401/refresh
+ * path entirely; it now goes through the shared client like everything else.
+ */
 export async function getPulsoidToken(): Promise<PulsoidTokenStatus | null> {
-  const res = await fetch(`/api/users/me/pulsoid-token`);
-  if (res.status === 404) return null;
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `HTTP ${res.status}`);
+  try {
+    return await fetchJson<PulsoidTokenStatus>(`/api/users/me/pulsoid-token`);
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 404) return null;
+    throw e;
   }
-  return res.json();
 }
 
-export function createPulsoidConnect(returnTo?: string) {
-  return fetchJson<{ request_id: string }>("/api/oauth/pulsoid/connect", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ return_to: returnTo ?? "/settings" }),
-  });
+/**
+ * The Pulsoid connect ticket's lifetime (`connect_requests.expires_at`, set to
+ * `now() + INTERVAL '5 minutes'` in the backend) plus 30 seconds of clock skew.
+ */
+const OAUTH_HANDOFF_MIN_TOKEN_SECS = 5 * 60 + 30;
+
+/**
+ * Mint the ticket that hands the browser off to Pulsoid's consent screen.
+ *
+ * The redirect and the callback the user comes back to are both behind
+ * `require_auth`, and while the user is away the SPA is not running — so the
+ * usual 401-then-refresh recovery in {@link fetchJson} cannot happen. Starting
+ * the trip with a nearly expired access token therefore ends in a bare 401 on
+ * return. Guarantee the token outlives the ticket before leaving.
+ */
+export async function createPulsoidConnect(returnTo?: string) {
+  const fresh = await ensureFreshToken(OAUTH_HANDOFF_MIN_TOKEN_SECS);
+  if (fresh.status === "unauthenticated") {
+    redirectToLogin();
+    throw new ApiError(401, "Unauthorized");
+  }
+  if (fresh.status === "unavailable") throw new TransientError();
+
+  return fetchJson<{ request_id: string }>(
+    "/api/oauth/pulsoid/connect",
+    jsonBody("POST", { return_to: returnTo ?? "/settings" }),
+  );
 }
 
 export function setManualPulsoidToken(accessToken: string) {
-  return fetchJson<TokenMutationResult>(`/api/users/me/pulsoid-token`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ access_token: accessToken }),
-  });
+  return fetchJson<TokenMutationResult>(
+    `/api/users/me/pulsoid-token`,
+    jsonBody("PUT", { access_token: accessToken }),
+  );
 }
 
 export function deletePulsoidToken() {

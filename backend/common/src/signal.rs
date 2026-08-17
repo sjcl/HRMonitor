@@ -18,7 +18,10 @@ where
 {
     tokio::spawn(async move {
         match AssertUnwindSafe(future).catch_unwind().await {
-            Ok(()) if shutdown.as_ref().is_some_and(CancellationToken::is_cancelled) => {}
+            Ok(())
+                if shutdown
+                    .as_ref()
+                    .is_some_and(CancellationToken::is_cancelled) => {}
             Ok(()) => {
                 tracing::error!("{name} returned unexpectedly; exiting");
                 std::process::exit(1);

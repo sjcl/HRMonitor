@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod groups;
 pub mod heart_rates;
 pub mod oauth;

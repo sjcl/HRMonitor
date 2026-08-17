@@ -1,8 +1,16 @@
+#[cfg(feature = "oauth")]
+pub mod discord_oauth;
+#[cfg(feature = "jwt")]
+pub mod jwt;
 pub mod messages;
 pub mod nats_backoff;
 #[cfg(feature = "oauth")]
+pub mod oauth_error;
+#[cfg(feature = "oauth")]
 pub mod pulsoid_oauth;
 pub mod pulsoid_state;
+#[cfg(feature = "redis-conn")]
+pub mod redis_conn;
 pub mod redis_keys;
 #[cfg(feature = "signal")]
 pub mod signal;
@@ -15,5 +23,7 @@ pub mod access;
 pub mod auth;
 #[cfg(feature = "web")]
 pub mod error;
+#[cfg(feature = "web")]
+pub mod origin;
 #[cfg(feature = "web")]
 pub mod visibility;

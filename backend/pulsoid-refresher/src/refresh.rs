@@ -320,7 +320,9 @@ async fn refresh_inner(
                 OAuthError::TokenEndpoint(err) => {
                     err.status() == 401 || err.has_oauth_error("invalid_grant")
                 }
-                OAuthError::Request(_) => false,
+                // Network failures and malformed-but-successful responses are
+                // both worth retrying; only an explicit rejection is terminal.
+                OAuthError::Request(_) | OAuthError::UnexpectedResponse(_) => false,
             };
             write_error_state(
                 db,

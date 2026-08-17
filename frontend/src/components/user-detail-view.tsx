@@ -1,5 +1,3 @@
-"use client";
-
 import { useQuery } from "@tanstack/react-query";
 import { ApiError, getHeartRateProfile } from "@/lib/api";
 import { HeartRateChart } from "@/components/heart-rate-chart";

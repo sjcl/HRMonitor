@@ -8,36 +8,142 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::error::AppError;
+use crate::jwt::{Claims, JwtVerifier};
 
-#[derive(Debug, Clone)]
+/// Cookie names and attributes.
+///
+/// Production uses the `__Host-` prefix, which browsers only honour when the
+/// cookie is `Secure`, has `Path=/`, and has no `Domain` — exactly the shape we
+/// want, and one the browser itself enforces.
+///
+/// That prefix is unusable over plain HTTP, so local development needs
+/// different names. See [`AuthConfig::resolve`] for how the two modes are kept
+/// from bleeding into each other.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthConfig {
-    pub cookie_name: String,
-    pub cookie_name_secure: String,
+    pub access_cookie_name: String,
+    pub refresh_cookie_name: String,
+    /// Short-lived cookie binding an in-flight OAuth `state` to this browser.
+    pub oauth_cookie_name: String,
+    pub cookie_secure: bool,
+    /// Always `None`. Present so that the "no Domain attribute" rule is visible
+    /// at the type level rather than being an unwritten assumption.
+    pub cookie_domain: Option<String>,
 }
 
-impl Default for AuthConfig {
-    fn default() -> Self {
-        Self {
-            cookie_name: "authjs.session-token".into(),
-            cookie_name_secure: "__Secure-authjs.session-token".into(),
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CookieConfigError {
+    /// `AUTH_INSECURE_DEV_COOKIES` was set for an origin that is not loopback.
+    InsecureCookiesNotAllowed(String),
+}
+
+impl std::fmt::Display for CookieConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CookieConfigError::InsecureCookiesNotAllowed(origin) => write!(
+                f,
+                "AUTH_INSECURE_DEV_COOKIES=1 is only permitted when PUBLIC_ORIGIN is \
+                 http://localhost, http://127.0.0.1 or http://[::1] (got {origin:?})"
+            ),
         }
     }
 }
 
+impl std::error::Error for CookieConfigError {}
+
+impl AuthConfig {
+    fn secure() -> Self {
+        Self {
+            access_cookie_name: "__Host-hrmonitor_session".into(),
+            refresh_cookie_name: "__Host-hrmonitor_refresh".into(),
+            oauth_cookie_name: "__Host-hrmonitor_oauth".into(),
+            cookie_secure: true,
+            cookie_domain: None,
+        }
+    }
+
+    fn insecure_dev() -> Self {
+        Self {
+            access_cookie_name: "hrmonitor_session_dev".into(),
+            refresh_cookie_name: "hrmonitor_refresh_dev".into(),
+            oauth_cookie_name: "hrmonitor_oauth_dev".into(),
+            cookie_secure: false,
+            cookie_domain: None,
+        }
+    }
+
+    /// Decide cookie naming from an explicit opt-in plus the public origin.
+    ///
+    /// Deliberately *not* keyed on `cfg!(debug_assertions)`: every Dockerfile in
+    /// this repo builds `--release`, including the one the development compose
+    /// file uses, so a debug-gated dev mode would make local development
+    /// impossible to start.
+    ///
+    /// Instead the insecure mode requires both an explicit, hard-to-set-by-
+    /// accident environment variable *and* a loopback origin. Pointing a real
+    /// deployment at it fails to start rather than quietly issuing cookies
+    /// without `Secure`.
+    ///
+    /// Changing the cookie *names* alongside the `Secure` flag also makes it
+    /// structurally impossible to emit a `__Host-` cookie without `Secure` —
+    /// which browsers silently discard, a confusing failure this avoids.
+    pub fn resolve(
+        insecure_dev: bool,
+        public_origin: &url::Url,
+    ) -> Result<Self, CookieConfigError> {
+        if !insecure_dev {
+            return Ok(Self::secure());
+        }
+        let host = public_origin.host_str().unwrap_or("");
+        let loopback = matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]");
+        if public_origin.scheme() == "http" && loopback {
+            Ok(Self::insecure_dev())
+        } else {
+            Err(CookieConfigError::InsecureCookiesNotAllowed(
+                public_origin.to_string(),
+            ))
+        }
+    }
+
+    /// Panics on an unsafe combination — see [`AuthConfig::resolve`].
+    pub fn from_env(public_origin: &url::Url) -> Self {
+        let insecure_dev = std::env::var("AUTH_INSECURE_DEV_COOKIES").as_deref() == Ok("1");
+        match Self::resolve(insecure_dev, public_origin) {
+            Ok(cfg) => {
+                if insecure_dev {
+                    tracing::warn!(
+                        "AUTH_INSECURE_DEV_COOKIES=1: issuing non-Secure development \
+                         cookies. Never use this outside local development."
+                    );
+                }
+                cfg
+            }
+            Err(e) => panic!("{e}"),
+        }
+    }
+}
+
+/// The authenticated caller.
+///
+/// Only the id: everything else (display name, avatar, timezone, visibility) is
+/// read fresh from Postgres by the handlers that need it, so nothing
+/// user-visible can go stale for the 30 minutes an access token stays valid.
 #[derive(Debug, Clone)]
 pub struct AuthenticatedUser {
     pub id: String,
-    pub display_name: Option<String>,
 }
 
-/// Abstracts the bits of application state that `common::auth` / `common::access`
-/// need: the database pool and the auth cookie configuration. Each downstream
-/// crate (api-backend, ws-gateway) implements this for its local `AppState` /
-/// `WsState` so the generic middleware and extractors can share an
-/// implementation without depending on a specific state struct.
+/// Abstracts the bits of application state that `common::auth` /
+/// `common::access` need. Each downstream crate (api-backend, ws-gateway)
+/// implements this for its local `AppState` / `WsState` so the generic
+/// middleware and extractors can share an implementation without depending on
+/// a specific state struct.
 pub trait AuthContext: Send + Sync + 'static {
+    /// Still required: *authorisation* (group membership, heart-rate
+    /// visibility) must reflect the current database, not a token snapshot.
     fn db(&self) -> &sqlx::PgPool;
     fn auth_config(&self) -> &AuthConfig;
+    fn jwt_verifier(&self) -> &JwtVerifier;
 }
 
 impl<T: AuthContext> AuthContext for Arc<T> {
@@ -47,8 +153,49 @@ impl<T: AuthContext> AuthContext for Arc<T> {
     fn auth_config(&self) -> &AuthConfig {
         self.as_ref().auth_config()
     }
+    fn jwt_verifier(&self) -> &JwtVerifier {
+        self.as_ref().jwt_verifier()
+    }
 }
 
+/// Read a named cookie out of a `Cookie` header.
+///
+/// Exposed so the auth handlers can read the refresh and OAuth cookies with
+/// exactly the same parser that authenticates requests.
+pub fn cookie_value<'a>(cookie_header: &'a str, name: &str) -> Option<Cow<'a, str>> {
+    parse_cookie(cookie_header, name)
+}
+
+/// Pull the raw access token out of a `Cookie` header.
+pub fn access_token_from_cookies<'a>(
+    cookie_header: &'a str,
+    cfg: &AuthConfig,
+) -> Option<Cow<'a, str>> {
+    parse_cookie(cookie_header, &cfg.access_cookie_name)
+}
+
+/// Read and verify the access token from a request's headers.
+///
+/// Exposed separately from [`require_auth`] because `/api/auth/logout` and
+/// `/api/auth/session` must inspect a possibly-expired token without being
+/// rejected by middleware.
+pub fn verify_request_token<T: AuthContext>(
+    state: &T,
+    headers: &axum::http::HeaderMap,
+) -> Option<Claims> {
+    let cookie_header = headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let token = access_token_from_cookies(cookie_header, state.auth_config())?;
+    state.jwt_verifier().verify(&token).ok()
+}
+
+/// Authenticates a request from the access-token cookie.
+///
+/// This is a pure signature check — no database query, no Redis lookup. The
+/// verified [`Claims`] are inserted alongside [`AuthenticatedUser`] so handlers
+/// such as logout can reach `sid` without re-parsing the cookie.
 pub async fn require_auth<T: AuthContext>(
     State(state): State<Arc<T>>,
     mut req: Request,
@@ -56,39 +203,29 @@ pub async fn require_auth<T: AuthContext>(
 ) -> Result<Response, StatusCode> {
     let cookie_header = req
         .headers()
-        .get("cookie")
+        .get(axum::http::header::COOKIE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    let auth_config = state.auth_config();
-    let session_token = parse_cookie(cookie_header, &auth_config.cookie_name)
-        .or_else(|| parse_cookie(cookie_header, &auth_config.cookie_name_secure));
-
-    let token = match session_token {
-        Some(t) => t,
-        None => return Err(StatusCode::UNAUTHORIZED),
+    let Some(token) = access_token_from_cookies(cookie_header, state.auth_config()) else {
+        return Err(StatusCode::UNAUTHORIZED);
     };
 
-    let user: Option<(String, Option<String>)> = sqlx::query_as(
-        "SELECT u.id, u.display_name FROM sessions s
-         JOIN users u ON s.user_id = u.id
-         WHERE s.session_token = $1 AND s.expires > now()",
-    )
-    .bind(token.as_ref())
-    .fetch_optional(state.db())
-    .await
-    .map_err(|e| {
-        tracing::error!("Auth session lookup failed: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    match user {
-        Some((id, display_name)) => {
-            req.extensions_mut()
-                .insert(AuthenticatedUser { id, display_name });
+    match state.jwt_verifier().verify(&token) {
+        Ok(claims) => {
+            req.extensions_mut().insert(AuthenticatedUser {
+                id: claims.sub.clone(),
+            });
+            req.extensions_mut().insert(claims);
             Ok(next.run(req).await)
         }
-        None => Err(StatusCode::UNAUTHORIZED),
+        Err(e) => {
+            // Expired tokens are the common, expected case (the SPA refreshes
+            // and retries), so this is debug, not warn — and never logs the
+            // token itself.
+            tracing::debug!(reason = %e, "Rejecting request: invalid access token");
+            Err(StatusCode::UNAUTHORIZED)
+        }
     }
 }
 
@@ -118,12 +255,14 @@ impl<S: Send + Sync> FromRequestParts<S> for UserIdParam {
 
 /// Parses a cookie value out of a `Cookie` header.
 ///
-/// Handles Auth.js v5 chunked cookies: when a session cookie exceeds ~3936
-/// bytes Auth.js splits it into `<name>.0`, `<name>.1`, ... and omits the
-/// unchunked form. An exact-name match always takes precedence; chunks are
-/// reassembled only when indices form a contiguous `0..n` sequence, so a
-/// partial/gapped set falls through to `None` rather than synthesising a
-/// token the server never issued.
+/// The chunk-reassembly logic dates from Auth.js v5, which split session
+/// cookies larger than ~3936 bytes into `<name>.0`, `<name>.1`, ... Our own
+/// tokens are far below that limit so the chunked path never fires in practice,
+/// but it is harmless, well tested, and keeps the parser tolerant of any
+/// leftover cookies from before the migration. An exact-name match always takes
+/// precedence; chunks are reassembled only when indices form a contiguous
+/// `0..n` sequence, so a partial set falls through to `None` rather than
+/// synthesising a token the server never issued.
 fn parse_cookie<'a>(header: &'a str, name: &str) -> Option<Cow<'a, str>> {
     let mut chunks: Option<BTreeMap<usize, &'a str>> = None;
 
@@ -154,14 +293,14 @@ fn parse_cookie<'a>(header: &'a str, name: &str) -> Option<Cow<'a, str>> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_cookie;
+    use super::{AuthConfig, CookieConfigError, parse_cookie};
     use std::borrow::Cow;
 
-    const NAME: &str = "authjs.session-token";
+    const NAME: &str = "__Host-hrmonitor_session";
 
     #[test]
     fn returns_borrowed_for_unchunked_match() {
-        let header = "other=x; authjs.session-token=abc; foo=bar";
+        let header = "other=x; __Host-hrmonitor_session=abc; foo=bar";
         let got = parse_cookie(header, NAME).unwrap();
         assert_eq!(got, "abc");
         assert!(matches!(got, Cow::Borrowed(_)));
@@ -169,7 +308,7 @@ mod tests {
 
     #[test]
     fn reassembles_ordered_chunks() {
-        let header = "authjs.session-token.0=ab; authjs.session-token.1=cd";
+        let header = "__Host-hrmonitor_session.0=ab; __Host-hrmonitor_session.1=cd";
         let got = parse_cookie(header, NAME).unwrap();
         assert_eq!(got, "abcd");
         assert!(matches!(got, Cow::Owned(_)));
@@ -177,15 +316,15 @@ mod tests {
 
     #[test]
     fn reassembles_out_of_order_chunks() {
-        let header = "authjs.session-token.1=cd; authjs.session-token.0=ab";
+        let header = "__Host-hrmonitor_session.1=cd; __Host-hrmonitor_session.0=ab";
         let got = parse_cookie(header, NAME).unwrap();
         assert_eq!(got, "abcd");
     }
 
     #[test]
     fn unchunked_wins_over_chunks() {
-        let header =
-            "authjs.session-token=full; authjs.session-token.0=foo; authjs.session-token.1=bar";
+        let header = "__Host-hrmonitor_session=full; __Host-hrmonitor_session.0=foo; \
+                      __Host-hrmonitor_session.1=bar";
         let got = parse_cookie(header, NAME).unwrap();
         assert_eq!(got, "full");
         assert!(matches!(got, Cow::Borrowed(_)));
@@ -199,25 +338,100 @@ mod tests {
 
     #[test]
     fn rejects_chunks_not_starting_at_zero() {
-        let header = "authjs.session-token.1=cd; authjs.session-token.2=ef";
+        let header = "__Host-hrmonitor_session.1=cd; __Host-hrmonitor_session.2=ef";
         assert!(parse_cookie(header, NAME).is_none());
     }
 
     #[test]
     fn rejects_chunks_with_gap() {
-        let header = "authjs.session-token.0=ab; authjs.session-token.2=ef";
+        let header = "__Host-hrmonitor_session.0=ab; __Host-hrmonitor_session.2=ef";
         assert!(parse_cookie(header, NAME).is_none());
     }
 
     #[test]
     fn rejects_prefix_false_positive() {
-        let header = "authjs.session-token-extra=foo";
+        let header = "__Host-hrmonitor_session-extra=foo";
         assert!(parse_cookie(header, NAME).is_none());
     }
 
     #[test]
     fn rejects_non_numeric_suffix() {
-        let header = "authjs.session-token.sig=foo";
+        let header = "__Host-hrmonitor_session.sig=foo";
         assert!(parse_cookie(header, NAME).is_none());
+    }
+
+    #[test]
+    fn does_not_confuse_the_refresh_cookie_with_the_access_cookie() {
+        // The two names share a long prefix; a sloppy match would swap them.
+        let header = "__Host-hrmonitor_refresh=refresh-value";
+        assert!(parse_cookie(header, NAME).is_none());
+        assert_eq!(
+            parse_cookie(header, "__Host-hrmonitor_refresh").unwrap(),
+            "refresh-value"
+        );
+    }
+
+    // --- cookie mode resolution -------------------------------------------
+
+    fn origin(s: &str) -> url::Url {
+        url::Url::parse(s).unwrap()
+    }
+
+    #[test]
+    fn defaults_to_secure_host_prefixed_cookies() {
+        let cfg = AuthConfig::resolve(false, &origin("https://hr.example.com")).unwrap();
+        assert_eq!(cfg.access_cookie_name, "__Host-hrmonitor_session");
+        assert_eq!(cfg.refresh_cookie_name, "__Host-hrmonitor_refresh");
+        assert_eq!(cfg.oauth_cookie_name, "__Host-hrmonitor_oauth");
+        assert!(cfg.cookie_secure);
+        assert_eq!(cfg.cookie_domain, None);
+    }
+
+    #[test]
+    fn secure_mode_even_for_a_loopback_origin_without_the_opt_in() {
+        let cfg = AuthConfig::resolve(false, &origin("http://localhost:3000")).unwrap();
+        assert!(cfg.cookie_secure);
+        assert_eq!(cfg.access_cookie_name, "__Host-hrmonitor_session");
+    }
+
+    #[test]
+    fn allows_insecure_dev_cookies_on_loopback() {
+        for o in [
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://[::1]:3000",
+        ] {
+            let cfg = AuthConfig::resolve(true, &origin(o)).unwrap();
+            assert!(!cfg.cookie_secure, "{o}");
+            assert_eq!(cfg.access_cookie_name, "hrmonitor_session_dev");
+            assert_eq!(cfg.refresh_cookie_name, "hrmonitor_refresh_dev");
+            assert_eq!(cfg.oauth_cookie_name, "hrmonitor_oauth_dev");
+            assert_eq!(cfg.cookie_domain, None);
+        }
+    }
+
+    #[test]
+    fn refuses_insecure_dev_cookies_for_a_real_deployment() {
+        // The whole point: an accidental opt-in in production must not start.
+        for o in [
+            "http://hr.example.com",
+            "https://hr.example.com",
+            "http://192.168.1.10:3000",
+            "http://localhost.evil.example",
+        ] {
+            assert!(
+                matches!(
+                    AuthConfig::resolve(true, &origin(o)),
+                    Err(CookieConfigError::InsecureCookiesNotAllowed(_))
+                ),
+                "{o} must not get insecure cookies"
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_insecure_dev_cookies_over_https_loopback() {
+        // https + __Host- works fine; there is no reason to downgrade.
+        assert!(AuthConfig::resolve(true, &origin("https://localhost:3000")).is_err());
     }
 }

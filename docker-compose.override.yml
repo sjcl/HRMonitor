@@ -1,4 +1,17 @@
+# Development overrides, applied automatically by `docker compose up`.
+# Production runs with `-f docker-compose.yml` so none of this is picked up.
 services:
   nginx:
     ports:
       - "3000:80"
+
+  # Plain HTTP on localhost cannot carry __Host- cookies, which require Secure.
+  # Both services refuse this flag unless PUBLIC_ORIGIN is a loopback address,
+  # so it cannot silently weaken a real deployment.
+  backend:
+    environment:
+      - AUTH_INSECURE_DEV_COOKIES=1
+
+  ws-gateway:
+    environment:
+      - AUTH_INSECURE_DEV_COOKIES=1

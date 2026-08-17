@@ -1,16 +1,16 @@
-"use client";
-
+import { Link } from "react-router";
 import { UserMenu } from "@/components/user-menu";
+import type { SelfUser } from "@/lib/api";
 
-export function Navbar() {
+export function Navbar({ user }: { user: SelfUser }) {
   return (
-    <nav className="border-b border-gray-800 px-6 py-4 flex items-center justify-between">
+    <nav className="flex items-center justify-between border-b border-gray-800 px-6 py-4">
       <div className="flex items-center gap-6">
-        <a href="/me" className="text-xl font-bold">
+        <Link to="/me" className="text-xl font-bold">
           HR Monitor
-        </a>
+        </Link>
       </div>
-      <UserMenu />
+      <UserMenu user={user} />
     </nav>
   );
 }

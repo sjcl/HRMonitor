@@ -1,0 +1,13 @@
+# The nginx image builds from the repository root (it needs both frontend/ and
+# nginx/), so keep the context small and avoid shipping host build output into
+# the builder stage.
+.git
+.github
+.idea
+.claude
+**/node_modules
+**/dist
+**/target
+.env
+*.md
+docs

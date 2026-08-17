@@ -1,6 +1,12 @@
-"use client";
-
 import { useEffect, useRef, useState, useCallback } from "react";
+import { ensureFreshToken, redirectToLogin } from "./http";
+
+/**
+ * Close code the gateway sends when the access token backing this socket has
+ * expired. Distinct from 1001 (server shutting down) so the client knows to
+ * refresh before reconnecting rather than simply backing off.
+ */
+export const CLOSE_TOKEN_EXPIRED = 4401;
 
 export interface LatestHeartRate {
   user_id: string;
@@ -28,14 +34,24 @@ function buildWsUrl(path: string): string {
 
 type SessionStatus = "authenticated" | "unauthenticated" | "error";
 
+/**
+ * Make sure the access token is valid before opening a socket.
+ *
+ * A WebSocket upgrade rejected with 401 gives the browser nothing to inspect —
+ * `onerror` fires with no status and no body — so an expired token would look
+ * exactly like an unreachable server and be retried forever. Checking over
+ * plain HTTP first turns that into a decision we can act on.
+ */
 async function checkSession(): Promise<SessionStatus> {
-  try {
-    const res = await fetch("/api/auth/session");
-    if (!res.ok) return "error";
-    const data = await res.json();
-    return data?.user ? "authenticated" : "unauthenticated";
-  } catch {
-    return "error";
+  const result = await ensureFreshToken();
+  switch (result.status) {
+    case "refreshed":
+      return "authenticated";
+    case "unauthenticated":
+      return "unauthenticated";
+    default:
+      // Backend trouble, not a logout: back off and retry.
+      return "error";
   }
 }
 
@@ -91,7 +107,7 @@ function useWsConnection({
       const sessionStatus = await checkSession();
       if (cancelled) return;
       if (sessionStatus === "unauthenticated") {
-        window.location.href = "/login";
+        redirectToLogin();
         return;
       }
       if (sessionStatus === "error") {
@@ -125,9 +141,14 @@ function useWsConnection({
         }
       };
 
-      ws.onclose = () => {
+      ws.onclose = (event) => {
         if (ws !== wsRef.current) return;
         wsRef.current = null;
+        if (event.code === CLOSE_TOKEN_EXPIRED) {
+          // Expected every 30 minutes. `connect()` refreshes before
+          // reconnecting, and the backoff is reset so the gap is imperceptible.
+          backoffRef.current = 1000;
+        }
         scheduleReconnect();
       };
 

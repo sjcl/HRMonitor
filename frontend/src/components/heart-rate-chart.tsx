@@ -1,9 +1,7 @@
-"use client";
-
 import { useState, useEffect, useRef, useMemo } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { getHeartRates, getMinuteStats } from "@/lib/api";
-import { LatestHeartRate } from "@/lib/ws";
+import type { LatestHeartRate } from "@/lib/ws";
 import {
   ComposedChart,
   Area,

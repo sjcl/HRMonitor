@@ -45,7 +45,7 @@ struct WorkerState {
 pub struct WorkerManager {
     db: PgPool,
     nats: async_nats::Client,
-    redis: redis::aio::MultiplexedConnection,
+    redis: redis::aio::ConnectionManager,
     encryption: Arc<TokenEncryption>,
     state: Mutex<HashMap<String, WorkerState>>,
 }
@@ -54,7 +54,7 @@ impl WorkerManager {
     pub fn new(
         db: PgPool,
         nats: async_nats::Client,
-        redis: redis::aio::MultiplexedConnection,
+        redis: redis::aio::ConnectionManager,
         encryption: Arc<TokenEncryption>,
     ) -> Arc<Self> {
         Arc::new(Self {
