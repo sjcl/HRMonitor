@@ -37,7 +37,7 @@ url = "2.5"
 # transitively, so this pins an existing build rather than adding one; the
 # alternative was hmac 0.13.0-rc, which is not something to run on an auth path.
 hmac = "0.12"
-sha2_hmac = { package = "sha2", version = "0.10" }
+sha2_hmac = { package = "sha2", version = "0.11" }
 
 [dev-dependencies]
 rand = "0.10"
