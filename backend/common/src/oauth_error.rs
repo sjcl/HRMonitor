@@ -78,6 +78,12 @@ impl From<reqwest::Error> for OAuthError {
 pub(crate) fn build_client() -> Client {
     Client::builder()
         .timeout(std::time::Duration::from_secs(30))
+        // OAuth クライアントは redirect を追跡しない: client secret を含む form body や
+        // Bearer token を意図しないホストへ再送させないための SSRF 対策。3xx は
+        // `is_success()` が false になるので既存の TokenEndpoint 経路に落ちる。
+        .redirect(reqwest::redirect::Policy::none())
+        // 平文 HTTP へのダウングレードを禁止 (エンドポイントは全て https 定数)。
+        .https_only(true)
         .build()
         .expect("Failed to build HTTP client")
 }
