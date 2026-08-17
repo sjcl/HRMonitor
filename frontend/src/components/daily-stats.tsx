@@ -1,5 +1,3 @@
-"use client";
-
 import { useState, useMemo, memo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { getDailyStats, getMinuteStatsByDate } from "@/lib/api";

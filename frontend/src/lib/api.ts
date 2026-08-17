@@ -1,3 +1,8 @@
+import { ApiError, fetchJson, jsonBody } from "./http";
+
+// Re-exported: components catch ApiError to render 403/404 states.
+export { ApiError, TransientError } from "./http";
+
 // --- Types ---
 
 export type HeartRateVisibility = "group_default" | "private";
@@ -36,27 +41,6 @@ export interface HeartRateRecord {
 
 // --- API functions ---
 
-export class ApiError extends Error {
-  constructor(public status: number, message: string) {
-    super(message);
-    this.name = "ApiError";
-  }
-}
-
-async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, init);
-  if (res.status === 401) {
-    window.location.href = "/login";
-    throw new ApiError(401, "Unauthorized");
-  }
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new ApiError(res.status, body.error || `HTTP ${res.status}`);
-  }
-  if (res.status === 204) return undefined as T;
-  return res.json();
-}
-
 export function getSelfUser() {
   return fetchJson<SelfUser>(`/api/users/me`);
 }
@@ -70,37 +54,36 @@ export function updateUser(data: {
   timezone?: string;
   heart_rate_visibility?: HeartRateVisibility;
 }) {
-  return fetchJson<SelfUser>(`/api/users/me`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(data),
-  });
+  return fetchJson<SelfUser>(`/api/users/me`, jsonBody("PATCH", data));
 }
 
+/**
+ * `null` when the user has no Pulsoid connection.
+ *
+ * Previously a bare `fetch`, which meant this one call skipped the 401/refresh
+ * path entirely; it now goes through the shared client like everything else.
+ */
 export async function getPulsoidToken(): Promise<PulsoidTokenStatus | null> {
-  const res = await fetch(`/api/users/me/pulsoid-token`);
-  if (res.status === 404) return null;
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `HTTP ${res.status}`);
+  try {
+    return await fetchJson<PulsoidTokenStatus>(`/api/users/me/pulsoid-token`);
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 404) return null;
+    throw e;
   }
-  return res.json();
 }
 
 export function createPulsoidConnect(returnTo?: string) {
-  return fetchJson<{ request_id: string }>("/api/oauth/pulsoid/connect", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ return_to: returnTo ?? "/settings" }),
-  });
+  return fetchJson<{ request_id: string }>(
+    "/api/oauth/pulsoid/connect",
+    jsonBody("POST", { return_to: returnTo ?? "/settings" }),
+  );
 }
 
 export function setManualPulsoidToken(accessToken: string) {
-  return fetchJson<TokenMutationResult>(`/api/users/me/pulsoid-token`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ access_token: accessToken }),
-  });
+  return fetchJson<TokenMutationResult>(
+    `/api/users/me/pulsoid-token`,
+    jsonBody("PUT", { access_token: accessToken }),
+  );
 }
 
 export function deletePulsoidToken() {

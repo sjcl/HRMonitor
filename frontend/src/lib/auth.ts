@@ -1,234 +1,99 @@
-import NextAuth from "next-auth";
-import Discord from "next-auth/providers/discord";
-import type { DiscordProfile } from "@auth/core/providers/discord";
-import { cookies } from "next/headers";
-import { Pool } from "pg";
-import type {
-  Adapter,
-  AdapterUser,
-  AdapterAccount,
-  AdapterSession,
-} from "@auth/core/adapters";
+/**
+ * Client-side view of authentication.
+ *
+ * There is no session object in the browser and no token in storage: the
+ * access and refresh tokens are HttpOnly cookies that JavaScript cannot read.
+ * "Am I logged in?" is therefore answered by asking the API — which is also
+ * the only answer worth trusting, since the server enforces authorisation
+ * regardless of what the UI believes.
+ */
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { ApiError, TransientError, redirectToLogin } from "./http";
+import { getSelfUser, type SelfUser } from "./api";
 
-function extractDiscordProfile(profile: DiscordProfile) {
-  const avatarUrl = profile.avatar
-    ? `https://cdn.discordapp.com/avatars/${profile.id}/${profile.avatar}.webp`
-    : null;
-  const name = profile.global_name ?? profile.username ?? null;
-  return { avatarUrl, name };
+export const CURRENT_USER_KEY = ["current-user"] as const;
+
+/**
+ * Begin Discord login.
+ *
+ * A full navigation rather than a fetch: the endpoint answers with a redirect
+ * to Discord, and the browser has to follow it. `tz` seeds the new user's
+ * timezone — it replaces the short-lived `browser_tz` cookie the Auth.js
+ * adapter used to read, and is validated server-side before it reaches the
+ * database.
+ */
+export function startDiscordLogin(returnTo?: string): void {
+  const params = new URLSearchParams();
+  if (returnTo) params.set("return_to", returnTo);
+  try {
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (tz) params.set("tz", tz);
+  } catch {
+    // Timezone detection is a nicety; the server defaults to UTC.
+  }
+  const query = params.toString();
+  window.location.assign(`/api/auth/login/discord${query ? `?${query}` : ""}`);
 }
 
-function toAdapterUser(row: Record<string, unknown>): AdapterUser {
-  return {
-    id: row.id as string,
-    name: (row.display_name as string) ?? null,
-    email: (row.primary_email as string) ?? "",
-    emailVerified: null,
-    image: (row.provider_image as string) ?? null,
-  };
+/** Thrown when logout could not revoke the session and should be retried. */
+export class LogoutUnavailableError extends Error {
+  constructor() {
+    super("ログアウトできませんでした。時間をおいて再試行してください。");
+    this.name = "LogoutUnavailableError";
+  }
 }
 
-function pgAdapter(): Adapter {
-  return {
-    async createUser(user) {
-      const cookieStore = await cookies();
-      const tz = cookieStore.get("browser_tz")?.value ?? null;
+/**
+ * End the session.
+ *
+ * A 503 means the server could not actually revoke the refresh session, so the
+ * user is *not* logged out however the UI looks. Surfacing that as an error —
+ * rather than clearing local state and navigating away — is the difference
+ * between a failed logout the user can retry and one they never learn about
+ * while their refresh token stays live for another 30 days.
+ */
+export async function logout(): Promise<void> {
+  let res: Response;
+  try {
+    res = await fetch("/api/auth/logout", {
+      method: "POST",
+      headers: { "X-Requested-With": "hrmonitor" },
+    });
+  } catch {
+    throw new LogoutUnavailableError();
+  }
+  // 401 means there was nothing to revoke, which is a successful logout.
+  if (!res.ok && res.status !== 401) throw new LogoutUnavailableError();
+}
 
-      let timezone = "UTC";
-      if (tz) {
-        try {
-          Intl.DateTimeFormat("en-US", { timeZone: tz });
-          timezone = tz;
-        } catch {
-          // invalid timezone cookie → UTC fallback
-        }
+/** The signed-in user, or `null` when not authenticated. */
+export function useCurrentUser() {
+  return useQuery<SelfUser | null>({
+    queryKey: CURRENT_USER_KEY,
+    queryFn: async () => {
+      try {
+        return await getSelfUser();
+      } catch (e) {
+        // `fetchJson` has already tried to refresh; a 401 here is final.
+        if (e instanceof ApiError && e.status === 401) return null;
+        throw e;
       }
-
-      const result = await pool.query(
-        `INSERT INTO users (display_name, primary_email, timezone)
-         VALUES ($1, $2, $3)
-         RETURNING id, display_name, primary_email`,
-        [user.name ?? "User", user.email ?? null, timezone]
-      );
-      return toAdapterUser(result.rows[0]);
     },
-
-    async getUser(id) {
-      const result = await pool.query(
-        `SELECT u.id, u.display_name, u.primary_email, a.provider_image
-         FROM users u
-         LEFT JOIN accounts a ON a.user_id = u.id AND a.provider = 'discord'
-         WHERE u.id = $1`,
-        [id]
-      );
-      return result.rows[0] ? toAdapterUser(result.rows[0]) : null;
-    },
-
-    async getUserByEmail(_email) {
-      // Email-based linking is not used for OAuth. Always return null.
-      return null;
-    },
-
-    async getUserByAccount({ provider, providerAccountId }) {
-      const result = await pool.query(
-        `SELECT u.id, u.display_name, u.primary_email, a.provider_image
-         FROM users u
-         JOIN accounts a ON a.user_id = u.id
-         WHERE a.provider = $1 AND a.provider_account_id = $2`,
-        [provider, providerAccountId]
-      );
-      return result.rows[0] ? toAdapterUser(result.rows[0]) : null;
-    },
-
-    async updateUser(user) {
-      const result = await pool.query(
-        `UPDATE users SET
-          display_name = COALESCE($1, display_name),
-          primary_email = COALESCE($2, primary_email),
-          updated_at = now()
-         WHERE id = $3
-         RETURNING id, display_name, primary_email`,
-        [user.name, user.email, user.id]
-      );
-      return toAdapterUser(result.rows[0]);
-    },
-
-    async linkAccount(account: AdapterAccount) {
-      await pool.query(
-        `INSERT INTO accounts (
-          user_id, provider, provider_account_id, account_type,
-          access_token, refresh_token, expires_at, token_type, scope, id_token
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-        [
-          account.userId,
-          account.provider,
-          account.providerAccountId,
-          account.type,
-          account.access_token ?? null,
-          account.refresh_token ?? null,
-          account.expires_at ?? null,
-          account.token_type ?? null,
-          account.scope ?? null,
-          account.id_token ?? null,
-        ]
-      );
-    },
-
-    async createSession(session) {
-      await pool.query(
-        `INSERT INTO sessions (session_token, user_id, expires)
-         VALUES ($1, $2, $3)`,
-        [session.sessionToken, session.userId, session.expires]
-      );
-      return session as AdapterSession;
-    },
-
-    async getSessionAndUser(sessionToken) {
-      const result = await pool.query(
-        `SELECT
-          s.session_token, s.user_id, s.expires,
-          u.id, u.display_name, u.primary_email,
-          a.provider_image
-         FROM sessions s
-         JOIN users u ON s.user_id = u.id
-         LEFT JOIN accounts a ON a.user_id = u.id AND a.provider = 'discord'
-         WHERE s.session_token = $1 AND s.expires > now()`,
-        [sessionToken]
-      );
-      if (!result.rows[0]) return null;
-      const row = result.rows[0];
-      return {
-        session: {
-          sessionToken: row.session_token as string,
-          userId: row.user_id as string,
-          expires: new Date(row.expires as string),
-        },
-        user: toAdapterUser(row),
-      };
-    },
-
-    async updateSession(session) {
-      const result = await pool.query(
-        `UPDATE sessions SET expires = COALESCE($1, expires)
-         WHERE session_token = $2
-         RETURNING session_token, user_id, expires`,
-        [session.expires, session.sessionToken]
-      );
-      if (!result.rows[0]) return null;
-      const row = result.rows[0];
-      return {
-        sessionToken: row.session_token as string,
-        userId: row.user_id as string,
-        expires: new Date(row.expires as string),
-      };
-    },
-
-    async deleteSession(sessionToken) {
-      await pool.query(
-        "DELETE FROM sessions WHERE session_token = $1",
-        [sessionToken]
-      );
-    },
-  };
+    // A transient backend problem should retry rather than resolve to
+    // "logged out", which would bounce the user to /login.
+    retry: (count, error) => error instanceof TransientError && count < 3,
+    staleTime: 60_000,
+  });
 }
 
-export const { handlers, auth, signIn, signOut } = NextAuth({
-  adapter: pgAdapter(),
-  providers: [
-    Discord({
-      authorization: { params: { scope: "identify" } },
-      checks: ["state", "pkce"],
-    }),
-  ],
-  session: { strategy: "database" },
-  events: {
-    // First login: signIn callback runs BEFORE linkAccount, so the UPDATE
-    // in signIn hits 0 rows. This event fires AFTER linkAccount, ensuring
-    // provider_name/provider_image are populated on initial account creation.
-    async linkAccount({ account, profile }) {
-      if (account.provider !== "discord" || !profile) return;
-      const discordProfile = profile as DiscordProfile;
-      const p = extractDiscordProfile(discordProfile);
-      await pool.query(
-        `UPDATE accounts SET
-          provider_name  = $1,
-          provider_image = $2,
-          updated_at     = now()
-         WHERE provider = $3 AND provider_account_id = $4`,
-        [p.name, p.avatarUrl, account.provider, account.providerAccountId]
-      );
+export function useLogout() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: logout,
+    onSuccess: () => {
+      queryClient.clear();
+      redirectToLogin();
     },
-  },
-  callbacks: {
-    // Returning logins: account already exists, so this UPDATE succeeds and
-    // picks up any Discord profile changes (avatar, display name) since last login.
-    async signIn({ account, profile }) {
-      if (!account || !profile || account.provider !== "discord") return true;
-
-      const discordProfile = profile as DiscordProfile;
-      const p = extractDiscordProfile(discordProfile);
-
-      await pool.query(
-        `UPDATE accounts SET
-          provider_name  = $1,
-          provider_image = $2,
-          updated_at     = now()
-         WHERE provider = $3 AND provider_account_id = $4`,
-        [p.name, p.avatarUrl, account.provider, account.providerAccountId]
-      );
-
-      return true;
-    },
-    async session({ session, user }) {
-      session.user.id = user.id;
-      session.user.image = user.image;
-      return session;
-    },
-  },
-  pages: {
-    signIn: "/login",
-  },
-  trustHost: true,
-});
+  });
+}

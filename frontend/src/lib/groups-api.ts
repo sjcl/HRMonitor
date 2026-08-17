@@ -1,4 +1,4 @@
-import { ApiError } from "./api";
+import { fetchJson, jsonBody } from "./http";
 
 // --- Types ---
 
@@ -100,20 +100,6 @@ export function formatGroupDisplayName(
 
 // --- API functions ---
 
-async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, init);
-  if (res.status === 401) {
-    window.location.href = "/login";
-    throw new ApiError(401, "Unauthorized");
-  }
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new ApiError(res.status, body.error || `HTTP ${res.status}`);
-  }
-  if (res.status === 204) return undefined as T;
-  return res.json();
-}
-
 export function getGroups() {
   return fetchJson<GroupListItem[]>("/api/groups");
 }
@@ -122,11 +108,7 @@ export function createGroup(data: {
   name?: string;
   invite_policy?: string;
 }) {
-  return fetchJson<GroupDetail>("/api/groups", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(data),
-  });
+  return fetchJson<GroupDetail>("/api/groups", jsonBody("POST", data));
 }
 
 export function getGroup(id: string) {
@@ -137,11 +119,7 @@ export function updateGroup(
   id: string,
   data: { name?: string; invite_policy?: string },
 ) {
-  return fetchJson<GroupDetail>(`/api/groups/${id}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(data),
-  });
+  return fetchJson<GroupDetail>(`/api/groups/${id}`, jsonBody("PATCH", data));
 }
 
 export function deleteGroup(id: string) {
@@ -149,17 +127,11 @@ export function deleteGroup(id: string) {
 }
 
 export function updateMyMembership(groupId: string, sharing: boolean) {
-  return fetchJson<void>(`/api/groups/${groupId}/members/me`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ sharing }),
-  });
+  return fetchJson<void>(`/api/groups/${groupId}/members/me`, jsonBody("PATCH", { sharing }));
 }
 
 export function leaveGroup(groupId: string) {
-  return fetchJson<void>(`/api/groups/${groupId}/members/me`, {
-    method: "DELETE",
-  });
+  return fetchJson<void>(`/api/groups/${groupId}/members/me`, { method: "DELETE" });
 }
 
 export function createInvite(
@@ -170,11 +142,7 @@ export function createInvite(
     target_user_id?: string;
   },
 ) {
-  return fetchJson<CreateInviteResponse>(`/api/groups/${groupId}/invites`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(data),
-  });
+  return fetchJson<CreateInviteResponse>(`/api/groups/${groupId}/invites`, jsonBody("POST", data));
 }
 
 export function listInvites(groupId: string) {
@@ -182,9 +150,7 @@ export function listInvites(groupId: string) {
 }
 
 export function revokeInvite(groupId: string, inviteId: string) {
-  return fetchJson<void>(`/api/groups/${groupId}/invites/${inviteId}`, {
-    method: "DELETE",
-  });
+  return fetchJson<void>(`/api/groups/${groupId}/invites/${inviteId}`, { method: "DELETE" });
 }
 
 export function getInviteInfo(token: string) {
@@ -192,11 +158,7 @@ export function getInviteInfo(token: string) {
 }
 
 export function acceptInvite(token: string, sharing: boolean = true) {
-  return fetchJson<AcceptInviteResponse>(`/api/invites/${token}/accept`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ sharing }),
-  });
+  return fetchJson<AcceptInviteResponse>(`/api/invites/${token}/accept`, jsonBody("POST", { sharing }));
 }
 
 export function getGroupHeartRates(groupId: string, period: string) {

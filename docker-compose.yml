@@ -17,10 +17,23 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  # Redis now holds refresh sessions as well as the latest-BPM cache, so it is
+  # no longer purely disposable: losing it logs every user out. AOF with
+  # per-second fsync keeps sessions across restarts and redeploys, at the cost
+  # of at most ~1s of writes.
   redis:
     image: redis:8.8.0-alpine
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes:
+      - redis-data:/data
     expose:
       - "6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
     restart: unless-stopped
 
   nats:
@@ -46,8 +59,22 @@ services:
       dockerfile: api-backend/Dockerfile
     environment:
       - DATABASE_URL=postgres://hrmonitor:hrmonitor@timescaledb:5432/hrmonitor
+      - REDIS_URL=redis://redis:6379
       - NATS_URL=nats://nats:4222
       - RUST_LOG=api_backend=info
+      - PUBLIC_ORIGIN=${PUBLIC_ORIGIN:?PUBLIC_ORIGIN must be set}
+      # Ed25519 signing key. Only this service holds the private half.
+      - JWT_ISSUER=${JWT_ISSUER:?JWT_ISSUER must be set}
+      - JWT_AUDIENCE=${JWT_AUDIENCE:?JWT_AUDIENCE must be set}
+      - JWT_ACTIVE_KID=${JWT_ACTIVE_KID:?JWT_ACTIVE_KID must be set}
+      - JWT_PRIVATE_KEY=${JWT_PRIVATE_KEY:?JWT_PRIVATE_KEY must be set}
+      - JWT_PUBLIC_KEYS=${JWT_PUBLIC_KEYS:?JWT_PUBLIC_KEYS must be set}
+      # Never rotate on a live deployment: every refresh session is keyed by it.
+      - REFRESH_TOKEN_HMAC_KEY=${REFRESH_TOKEN_HMAC_KEY:?REFRESH_TOKEN_HMAC_KEY must be set}
+      - REFRESH_SEAL_KEY=${REFRESH_SEAL_KEY:?REFRESH_SEAL_KEY must be set}
+      - DISCORD_CLIENT_ID=${DISCORD_CLIENT_ID:?DISCORD_CLIENT_ID must be set}
+      - DISCORD_CLIENT_SECRET=${DISCORD_CLIENT_SECRET:?DISCORD_CLIENT_SECRET must be set}
+      - DISCORD_REDIRECT_URI=${DISCORD_REDIRECT_URI:?DISCORD_REDIRECT_URI must be set}
       - PULSOID_CLIENT_ID=${PULSOID_CLIENT_ID}
       - PULSOID_CLIENT_SECRET=${PULSOID_CLIENT_SECRET}
       - PULSOID_REDIRECT_URI=${PULSOID_REDIRECT_URI}
@@ -57,6 +84,8 @@ services:
     depends_on:
       timescaledb:
         condition: service_healthy
+      redis:
+        condition: service_started
       nats:
         condition: service_started
       migration:
@@ -78,7 +107,12 @@ services:
       - REDIS_URL=redis://redis:6379
       - NATS_URL=nats://nats:4222
       - RUST_LOG=ws_gateway=info
-      - AUTH_URL=${AUTH_URL:?AUTH_URL must be set}
+      - PUBLIC_ORIGIN=${PUBLIC_ORIGIN:?PUBLIC_ORIGIN must be set}
+      # Public keys only: ws-gateway is built without common's `jwt-issue`
+      # feature, so it has no code that can read a private key.
+      - JWT_ISSUER=${JWT_ISSUER:?JWT_ISSUER must be set}
+      - JWT_AUDIENCE=${JWT_AUDIENCE:?JWT_AUDIENCE must be set}
+      - JWT_PUBLIC_KEYS=${JWT_PUBLIC_KEYS:?JWT_PUBLIC_KEYS must be set}
     expose:
       - "3002"
     depends_on:
@@ -144,42 +178,17 @@ services:
     restart: unless-stopped
     stop_grace_period: 45s
 
-  frontend:
-    build:
-      context: ./frontend
-      args:
-        REACT_PROFILING: ${REACT_PROFILING:-false}
-    environment:
-      - DATABASE_URL=postgres://hrmonitor:hrmonitor@timescaledb:5432/hrmonitor
-      - AUTH_SECRET=${AUTH_SECRET}
-      - AUTH_DISCORD_ID=${DISCORD_CLIENT_ID}
-      - AUTH_DISCORD_SECRET=${DISCORD_CLIENT_SECRET}
-      - AUTH_URL=${AUTH_URL:?AUTH_URL must be set}
-      - AUTH_TRUST_HOST=true
-      - HOSTNAME=0.0.0.0
-    expose:
-      - "3000"
-    volumes:
-      - static-assets:/static-export
-    depends_on:
-      - timescaledb
-      - backend
-    healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:3000/api/healthz"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
-      start_period: 15s
-    restart: unless-stopped
-
+  # Builds the SPA and serves it, and is the only public entry point.
+  # Deliberately not gated on `service_healthy` for its upstreams: the edge
+  # should come up regardless and absorb brief backend outages itself (see the
+  # 503 + Retry-After handling for /api/ws/).
   nginx:
-    build: ./nginx
+    build:
+      context: .
+      dockerfile: nginx/Dockerfile
     expose:
       - "80"
-    volumes:
-      - static-assets:/usr/share/nginx/static:ro
     depends_on:
-      - frontend
       - backend
       - ws-gateway
     restart: unless-stopped
@@ -197,4 +206,4 @@ services:
 
 volumes:
   ts-data:
-  static-assets:
+  redis-data:

@@ -1,7 +1,4 @@
-"use client";
-
-import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { Link, useLocation } from "react-router";
 
 const items = [
   { href: "/me", label: "自分", icon: <HeartIcon /> },
@@ -9,7 +6,7 @@ const items = [
 ] as const;
 
 export function SubNav() {
-  const pathname = usePathname();
+  const pathname = useLocation().pathname;
 
   return (
     <div className="flex gap-6 border-b border-gray-800 mb-6">
@@ -18,7 +15,7 @@ export function SubNav() {
         return (
           <Link
             key={item.href}
-            href={item.href}
+            to={item.href}
             className={`inline-flex items-center gap-2 px-1 pb-3 pt-1 text-sm font-medium border-b-2 -mb-px transition-colors ${
               active
                 ? "border-red-500 text-gray-100"

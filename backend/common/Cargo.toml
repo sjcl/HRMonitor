@@ -17,8 +17,22 @@ tokio-util = { version = "0.7.18", optional = true }
 reqwest = { version = "0.13.2", features = ["json", "form"], optional = true }
 urlencoding = { version = "2.1.3", optional = true }
 axum = { version = "0.8.8", optional = true }
+jsonwebtoken = { version = "11.0.0", default-features = false, features = ["rust_crypto"], optional = true }
+ed25519-dalek = { version = "2.2", optional = true }
+url = { version = "2.5", optional = true }
 
 [features]
 oauth = ["dep:reqwest", "dep:urlencoding"]
 signal = ["dep:tokio", "dep:futures-util", "dep:tokio-util"]
-web = ["dep:axum"]
+# `web` implies `jwt`: request authentication *is* JWT verification now.
+web = ["dep:axum", "dep:url", "jwt"]
+
+# Access-token verification only. Enabled by every service that authenticates
+# requests (api-backend, ws-gateway).
+jwt = ["dep:jsonwebtoken"]
+
+# Access-token *issuing*. Deliberately separate from `jwt` so that `JwtSigner`
+# and every line of code that reads `JWT_PRIVATE_KEY` is not even compiled into
+# binaries that only need to verify (ws-gateway). This is a compile-time
+# guarantee, not a convention.
+jwt-issue = ["jwt", "dep:ed25519-dalek"]

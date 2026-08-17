@@ -1,10 +1,7 @@
 mod ws;
 
 use axum::Router;
-use axum::extract::{Request, State};
-use axum::http::StatusCode;
-use axum::middleware::{self, Next};
-use axum::response::Response;
+use axum::middleware;
 use axum::routing::get;
 use futures_util::{StreamExt, TryStreamExt};
 use redis::{ExistenceCheck, SetExpiry, SetOptions};
@@ -14,8 +11,10 @@ use tokio::sync::broadcast as tokio_broadcast;
 use tokio_util::sync::CancellationToken;
 
 use common::auth::{AuthConfig, AuthContext};
+use common::jwt::JwtVerifier;
 use common::messages::{HeartRateReceived, subjects};
 use common::nats_backoff::{INITIAL_BACKOFF, advance_backoff};
+use common::origin::OriginContext;
 use common::redis_keys::{latest_bpm_key, latest_bpm_ttl_secs, serialize_latest_bpm};
 use common::signal::{shutdown_signal, spawn_critical_task};
 use common::time::unix_now_secs;
@@ -25,8 +24,12 @@ pub struct WsState {
     pub redis: redis::aio::MultiplexedConnection,
     pub hr_broadcast: tokio_broadcast::Sender<HeartRateReceived>,
     pub auth_config: AuthConfig,
+    /// Verify-only. ws-gateway enables `common`'s `jwt` feature but not
+    /// `jwt-issue`, so no signing key or code that reads one exists in this
+    /// binary at all.
+    pub jwt_verifier: JwtVerifier,
     /// Canonical browser origin (`scheme://host[:port]`) allowed to open
-    /// WebSocket connections. Derived from `AUTH_URL` at startup.
+    /// WebSocket connections. Derived from `PUBLIC_ORIGIN` at startup.
     pub allowed_ws_origin: String,
     pub shutdown: CancellationToken,
 }
@@ -38,73 +41,14 @@ impl AuthContext for WsState {
     fn auth_config(&self) -> &AuthConfig {
         &self.auth_config
     }
-}
-
-/// Parses `AUTH_URL` into a canonical browser origin (`scheme://host[:port]`).
-/// Fails closed: in release builds a missing `AUTH_URL` panics at startup so
-/// misconfiguration cannot silently reopen cross-site WS access.
-fn load_allowed_ws_origin() -> String {
-    let raw = std::env::var("AUTH_URL").ok();
-    let raw = match raw.as_deref() {
-        Some(s) if !s.is_empty() => s,
-        _ => {
-            if cfg!(debug_assertions) {
-                tracing::warn!(
-                    "AUTH_URL is not set; defaulting allowed WS origin to \
-                     http://localhost:3000 (debug build only — release builds panic)"
-                );
-                return canonical_ws_origin("http://localhost:3000");
-            } else {
-                panic!(
-                    "AUTH_URL must be set in release builds. It is used to \
-                     validate the Origin header on /api/ws/* handshakes."
-                );
-            }
-        }
-    };
-
-    canonical_ws_origin(raw)
-}
-
-fn canonical_ws_origin(raw: &str) -> String {
-    let parsed = url::Url::parse(raw)
-        .unwrap_or_else(|e| panic!("AUTH_URL is not a valid URL ({raw:?}): {e}"));
-    let origin = parsed.origin();
-    if !origin.is_tuple() {
-        panic!("AUTH_URL has no host or has an opaque origin ({raw:?})");
-    }
-    origin.ascii_serialization()
-}
-
-/// Returns `Ok(())` if the request may proceed, `Err(reason)` if the upgrade
-/// must be rejected with 403. The reason is a static string used for logging.
-/// Missing and non-UTF-8/invalid Origin headers are collapsed into the same
-/// `None` case at the caller and rejected here (fail-closed).
-fn check_ws_origin(header: Option<&str>, allowed: &str) -> Result<(), &'static str> {
-    match header {
-        None => Err("missing or invalid Origin header"),
-        Some(o) if o == allowed => Ok(()),
-        Some(_) => Err("disallowed Origin"),
+    fn jwt_verifier(&self) -> &JwtVerifier {
+        &self.jwt_verifier
     }
 }
 
-/// Rejects WebSocket upgrade requests whose `Origin` header is missing,
-/// invalid (non-UTF-8), or does not exactly match the configured public origin.
-pub async fn require_ws_origin(
-    State(state): State<Arc<WsState>>,
-    req: Request,
-    next: Next,
-) -> Result<Response, StatusCode> {
-    let origin = req
-        .headers()
-        .get(axum::http::header::ORIGIN)
-        .and_then(|v| v.to_str().ok());
-    match check_ws_origin(origin, &state.allowed_ws_origin) {
-        Ok(()) => Ok(next.run(req).await),
-        Err(reason) => {
-            tracing::warn!(origin = ?origin, reason, "Rejecting WS upgrade");
-            Err(StatusCode::FORBIDDEN)
-        }
+impl OriginContext for WsState {
+    fn allowed_origin(&self) -> &str {
+        &self.allowed_ws_origin
     }
 }
 
@@ -353,15 +297,15 @@ async fn main() {
 
     let (hr_tx, _) = tokio_broadcast::channel::<HeartRateReceived>(4096);
 
-    let auth_config = AuthConfig::default();
+    let allowed_ws_origin = common::origin::load_allowed_origin();
+    let public_origin = url::Url::parse(&allowed_ws_origin).expect("canonical origin must parse");
+    let auth_config = AuthConfig::from_env(&public_origin);
+    let jwt_verifier = JwtVerifier::from_env();
     tracing::info!(
-        cookie_name = %auth_config.cookie_name,
-        cookie_name_secure = %auth_config.cookie_name_secure,
-        "Auth config loaded"
+        allowed_ws_origin = %allowed_ws_origin,
+        access_cookie = %auth_config.access_cookie_name,
+        "Auth config and WS origin allowlist loaded"
     );
-
-    let allowed_ws_origin = load_allowed_ws_origin();
-    tracing::info!(allowed_ws_origin = %allowed_ws_origin, "WS origin allowlist loaded");
 
     // Detached task: flips the shutdown token when SIGTERM/SIGINT arrives.
     // Dropped with the tokio runtime at end of main.
@@ -379,6 +323,7 @@ async fn main() {
         redis: redis_conn.clone(),
         hr_broadcast: hr_tx.clone(),
         auth_config,
+        jwt_verifier,
         allowed_ws_origin,
         shutdown: shutdown.clone(),
     });
@@ -391,74 +336,78 @@ async fn main() {
         let nats = nats.clone();
         let shutdown = shutdown.clone();
         let task_shutdown = shutdown.clone();
-        spawn_critical_task("NATS hr.received subscriber", Some(task_shutdown), async move {
-            let mut backoff = INITIAL_BACKOFF;
-            loop {
-                let sub_result = tokio::select! {
-                    biased;
-                    _ = shutdown.cancelled() => return,
-                    r = nats.subscribe(subjects::HR_RECEIVED) => r,
-                };
-                let mut hr_sub = match sub_result {
-                    Ok(s) => {
-                        tracing::info!("Subscribed to {}", subjects::HR_RECEIVED);
-                        s
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "Failed to subscribe to {}: {e}; retrying in {:?}",
-                            subjects::HR_RECEIVED,
-                            backoff
-                        );
+        spawn_critical_task(
+            "NATS hr.received subscriber",
+            Some(task_shutdown),
+            async move {
+                let mut backoff = INITIAL_BACKOFF;
+                loop {
+                    let sub_result = tokio::select! {
+                        biased;
+                        _ = shutdown.cancelled() => return,
+                        r = nats.subscribe(subjects::HR_RECEIVED) => r,
+                    };
+                    let mut hr_sub = match sub_result {
+                        Ok(s) => {
+                            tracing::info!("Subscribed to {}", subjects::HR_RECEIVED);
+                            s
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to subscribe to {}: {e}; retrying in {:?}",
+                                subjects::HR_RECEIVED,
+                                backoff
+                            );
+                            tokio::select! {
+                                biased;
+                                _ = shutdown.cancelled() => return,
+                                _ = tokio::time::sleep(backoff) => {}
+                            }
+                            backoff = advance_backoff(backoff);
+                            continue;
+                        }
+                    };
+
+                    loop {
                         tokio::select! {
                             biased;
                             _ = shutdown.cancelled() => return,
-                            _ = tokio::time::sleep(backoff) => {}
+                            next = hr_sub.next() => match next {
+                                Some(msg) => {
+                                    // Receiving any message proves the subscription
+                                    // is healthy; reset the resubscribe backoff.
+                                    backoff = INITIAL_BACKOFF;
+                                    match serde_json::from_slice::<HeartRateReceived>(&msg.payload) {
+                                        Ok(update) => {
+                                            let _ = hr_tx.send(update);
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!("Failed to parse hr.received event: {e}");
+                                        }
+                                    }
+                                }
+                                None => break,
+                            }
                         }
-                        backoff = advance_backoff(backoff);
-                        continue;
                     }
-                };
 
-                loop {
+                    // A "subscribe succeeds → stream ends immediately" flap must
+                    // not hot-loop: back off exponentially here, reset only on a
+                    // received message above.
+                    backoff = advance_backoff(backoff);
+                    tracing::warn!(
+                        "{} subscription ended; resubscribing in {:?}",
+                        subjects::HR_RECEIVED,
+                        backoff
+                    );
                     tokio::select! {
                         biased;
                         _ = shutdown.cancelled() => return,
-                        next = hr_sub.next() => match next {
-                            Some(msg) => {
-                                // Receiving any message proves the subscription
-                                // is healthy; reset the resubscribe backoff.
-                                backoff = INITIAL_BACKOFF;
-                                match serde_json::from_slice::<HeartRateReceived>(&msg.payload) {
-                                    Ok(update) => {
-                                        let _ = hr_tx.send(update);
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!("Failed to parse hr.received event: {e}");
-                                    }
-                                }
-                            }
-                            None => break,
-                        }
+                        _ = tokio::time::sleep(backoff) => {}
                     }
                 }
-
-                // A "subscribe succeeds → stream ends immediately" flap must
-                // not hot-loop: back off exponentially here, reset only on a
-                // received message above.
-                backoff = advance_backoff(backoff);
-                tracing::warn!(
-                    "{} subscription ended; resubscribing in {:?}",
-                    subjects::HR_RECEIVED,
-                    backoff
-                );
-                tokio::select! {
-                    biased;
-                    _ = shutdown.cancelled() => return,
-                    _ = tokio::time::sleep(backoff) => {}
-                }
-            }
-        })
+            },
+        )
     };
 
     let ws_routes = Router::new()
@@ -471,7 +420,7 @@ async fn main() {
         ))
         .layer(middleware::from_fn_with_state(
             state.clone(),
-            require_ws_origin,
+            common::origin::require_origin_always::<WsState>,
         ));
 
     let public_routes = Router::new().route("/healthz", get(|| async { "ok" }));
@@ -510,80 +459,4 @@ async fn main() {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{canonical_ws_origin, check_ws_origin};
-
-    #[test]
-    fn rejects_missing_origin() {
-        assert!(check_ws_origin(None, "http://localhost:3000").is_err());
-    }
-
-    #[test]
-    fn accepts_exact_match() {
-        assert_eq!(
-            check_ws_origin(Some("http://localhost:3000"), "http://localhost:3000"),
-            Ok(())
-        );
-    }
-
-    #[test]
-    fn rejects_mismatched_origin() {
-        assert!(check_ws_origin(Some("http://evil.example"), "http://localhost:3000").is_err());
-    }
-
-    #[test]
-    fn preserves_non_default_port() {
-        assert_eq!(
-            canonical_ws_origin("http://localhost:3000"),
-            "http://localhost:3000"
-        );
-        assert_eq!(
-            canonical_ws_origin("https://example.com:8443"),
-            "https://example.com:8443"
-        );
-    }
-
-    #[test]
-    fn strips_default_http_port() {
-        assert_eq!(
-            canonical_ws_origin("http://example.com:80"),
-            "http://example.com"
-        );
-    }
-
-    #[test]
-    fn strips_default_https_port() {
-        assert_eq!(
-            canonical_ws_origin("https://example.com:443"),
-            "https://example.com"
-        );
-    }
-
-    #[test]
-    fn no_port_unchanged() {
-        assert_eq!(
-            canonical_ws_origin("https://example.com"),
-            "https://example.com"
-        );
-    }
-
-    #[test]
-    fn drops_path_and_query() {
-        assert_eq!(
-            canonical_ws_origin("https://example.com/path?x=1"),
-            "https://example.com"
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "has no host or has an opaque origin")]
-    fn rejects_opaque_origin() {
-        canonical_ws_origin("file:///etc/passwd");
-    }
-
-    #[test]
-    #[should_panic(expected = "is not a valid URL")]
-    fn rejects_parse_error() {
-        canonical_ws_origin("not a url");
-    }
-}
+mod tests {}

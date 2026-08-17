@@ -1,13 +1,12 @@
-"use client";
-
 import { useState, useRef, useEffect } from "react";
-import { useSession, signOut } from "next-auth/react";
+import { useLogout } from "@/lib/auth";
+import type { SelfUser } from "@/lib/api";
 import { UserAvatar } from "@/components/user-avatar";
-import Link from "next/link";
+import { Link } from "react-router";
 
-export function UserMenu() {
-  const { data: session } = useSession();
+export function UserMenu({ user }: { user: SelfUser }) {
   const [open, setOpen] = useState(false);
+  const logout = useLogout();
   const menuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -21,16 +20,14 @@ export function UserMenu() {
     return () => document.removeEventListener("mousedown", handleClick);
   }, [open]);
 
-  if (!session?.user) return null;
-
   return (
     <div className="relative" ref={menuRef}>
       <button
         onClick={() => setOpen((v) => !v)}
         className="flex items-center gap-2 hover:opacity-80 transition-opacity"
       >
-        <UserAvatar src={session.user.image} name={session.user.name ?? ""} size="sm" />
-        <span className="text-sm text-gray-400">{session.user.name}</span>
+        <UserAvatar src={user.avatar_url} name={user.display_name} size="sm" />
+        <span className="text-sm text-gray-400">{user.display_name}</span>
         <svg
           className={`w-4 h-4 text-gray-400 transition-transform ${open ? "rotate-180" : ""}`}
           fill="none"
@@ -44,8 +41,7 @@ export function UserMenu() {
 
       {open && (
         <div className="absolute right-0 mt-2 w-48 bg-gray-900 border border-gray-700 rounded-lg shadow-lg py-1 z-50">
-          <Link
-            href="/settings"
+          <Link to="/settings"
             onClick={() => setOpen(false)}
             className="block px-4 py-2 text-sm text-gray-300 hover:bg-gray-800"
           >
@@ -53,11 +49,19 @@ export function UserMenu() {
           </Link>
           <div className="border-t border-gray-700 my-1" />
           <button
-            onClick={() => signOut({ redirectTo: "/login" })}
-            className="block w-full text-left px-4 py-2 text-sm text-gray-300 hover:bg-gray-800"
+            onClick={() => logout.mutate()}
+            disabled={logout.isPending}
+            className="block w-full px-4 py-2 text-left text-sm text-gray-300 hover:bg-gray-800 disabled:opacity-50"
           >
-            Sign out
+            {logout.isPending ? "Signing out..." : "Sign out"}
           </button>
+          {logout.isError && (
+            /* The server could not revoke the session, so the user is still
+               signed in however this menu looks. Say so and let them retry. */
+            <p role="alert" className="px-4 py-2 text-xs text-red-400">
+              ログアウトできませんでした。再試行してください。
+            </p>
+          )}
         </div>
       )}
     </div>

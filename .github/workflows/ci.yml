@@ -8,24 +8,46 @@ on:
 
 jobs:
   backend:
-    name: Backend (Rust) build & test
+    name: Backend (Rust) lint, build & test
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: backend
+    services:
+      # The refresh-rotation tests exercise the Lua script's atomicity, its
+      # EXAT-based TTL, and concurrent-refresh behaviour. None of that can be
+      # covered without a real Redis, and those tests fail rather than skip
+      # when CI is set but REDIS_URL is not.
+      redis:
+        image: redis:8.8.0-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      REDIS_URL: redis://127.0.0.1:6379
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: backend
+      - name: cargo fmt
+        run: cargo fmt --all --check
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: cargo build
         run: cargo build --locked --all-targets
       - name: cargo test
         run: cargo test --locked
 
   frontend:
-    name: Frontend (Next.js) build
+    name: Frontend (Vite SPA) lint, test & build
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -39,5 +61,48 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - name: npm ci
         run: npm ci
-      - name: next build
+      - name: eslint
+        run: npm run lint
+      - name: vitest
+        run: npm run test
+      - name: build
         run: npm run build
+
+  compose:
+    name: docker compose config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # Placeholder values only: this validates that the compose files parse
+      # and that every referenced variable is declared, not that any secret is
+      # real.
+      - name: Write a placeholder .env
+        run: |
+          cat > .env <<'EOF'
+          CLOUDFLARE_TUNNEL_TOKEN=placeholder
+          PUBLIC_ORIGIN=http://localhost:3000
+          JWT_ISSUER=http://localhost:3000
+          JWT_AUDIENCE=hrmonitor-web
+          JWT_ACTIVE_KID=k1
+          JWT_PRIVATE_KEY=placeholder
+          JWT_PUBLIC_KEYS={"keys":[]}
+          REFRESH_TOKEN_HMAC_KEY=placeholder
+          REFRESH_SEAL_KEY=placeholder
+          DISCORD_CLIENT_ID=placeholder
+          DISCORD_CLIENT_SECRET=placeholder
+          DISCORD_REDIRECT_URI=http://localhost:3000/api/auth/callback/discord
+          PULSOID_CLIENT_ID=placeholder
+          PULSOID_CLIENT_SECRET=placeholder
+          PULSOID_REDIRECT_URI=http://localhost:3000/api/oauth/pulsoid/callback
+          TOKEN_ENCRYPTION_KEY=placeholder
+          EOF
+      - name: validate (dev, with override)
+        run: docker compose config --quiet
+      - name: validate (prod, no override)
+        run: docker compose -f docker-compose.yml config --quiet
+      - name: assert production runs no Node.js service
+        run: |
+          if docker compose -f docker-compose.yml config --services | grep -qx frontend; then
+            echo "A 'frontend' service still exists; production must not run Node.js." >&2
+            exit 1
+          fi

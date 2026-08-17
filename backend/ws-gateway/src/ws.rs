@@ -16,8 +16,10 @@ use common::access::ViewableUserId;
 use common::access::{ensure_active_member, ensure_can_view_user};
 use common::auth::AuthenticatedUser;
 use common::error::AppError;
+use common::jwt::Claims;
 use common::messages::HeartRateReceived;
 use common::redis_keys::latest_bpm_key;
+use common::time::unix_now_secs;
 use common::visibility::values::PRIVATE;
 
 /// Close frame sent by every WS handler when the shutdown token fires.
@@ -27,6 +29,29 @@ pub(crate) fn shutdown_close_frame() -> Message {
         code: close_code::AWAY,
         reason: Utf8Bytes::from_static("server shutting down"),
     }))
+}
+
+/// Application close code meaning "your access token expired".
+///
+/// In the 4000-4999 private range, and distinct from the shutdown code so the
+/// SPA can tell "refresh and reconnect" apart from "the server went away".
+pub(crate) const CLOSE_TOKEN_EXPIRED: u16 = 4401;
+
+pub(crate) fn token_expired_close_frame() -> Message {
+    Message::Close(Some(CloseFrame {
+        code: CLOSE_TOKEN_EXPIRED,
+        reason: Utf8Bytes::from_static("access token expired"),
+    }))
+}
+
+/// How long this connection may stay open on its current token.
+///
+/// A WebSocket is authenticated once, at the upgrade; without this the socket
+/// would outlive its credential indefinitely. Saturates at zero so an
+/// already-expired token closes immediately rather than wrapping into a long
+/// wait.
+pub(crate) fn time_until_expiry(exp: i64, now: i64) -> Duration {
+    Duration::from_secs(exp.saturating_sub(now).max(0) as u64)
 }
 
 #[derive(Serialize)]
@@ -48,9 +73,11 @@ pub async fn my_heart_rate_ws(
     ws: WebSocketUpgrade,
     State(state): State<Arc<WsState>>,
     Extension(auth_user): Extension<AuthenticatedUser>,
+    Extension(claims): Extension<Claims>,
 ) -> impl IntoResponse {
     let user_id = auth_user.id.clone();
-    ws.on_upgrade(move |socket| handle_single_user_ws(socket, state, user_id, None))
+    let token_exp = claims.exp;
+    ws.on_upgrade(move |socket| handle_single_user_ws(socket, state, user_id, None, token_exp))
 }
 
 // ---------------------------------------------------------------------------
@@ -62,13 +89,17 @@ pub async fn user_heart_rate_ws(
     ViewableUserId(target_id): ViewableUserId,
     State(state): State<Arc<WsState>>,
     Extension(auth_user): Extension<AuthenticatedUser>,
+    Extension(claims): Extension<Claims>,
 ) -> Result<impl IntoResponse, AppError> {
     let reauth = if auth_user.id == target_id {
         None
     } else {
         Some(auth_user)
     };
-    Ok(ws.on_upgrade(move |socket| handle_single_user_ws(socket, state, target_id, reauth)))
+    let token_exp = claims.exp;
+    Ok(ws.on_upgrade(move |socket| {
+        handle_single_user_ws(socket, state, target_id, reauth, token_exp)
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -80,9 +111,11 @@ pub async fn group_heart_rate_ws(
     Path(group_id): Path<String>,
     State(state): State<Arc<WsState>>,
     Extension(auth_user): Extension<AuthenticatedUser>,
+    Extension(claims): Extension<Claims>,
 ) -> Result<impl IntoResponse, AppError> {
     ensure_active_member(&state.db, &group_id, &auth_user.id).await?;
-    Ok(ws.on_upgrade(move |socket| handle_group_ws(socket, state, auth_user, group_id)))
+    let token_exp = claims.exp;
+    Ok(ws.on_upgrade(move |socket| handle_group_ws(socket, state, auth_user, group_id, token_exp)))
 }
 
 // ---------------------------------------------------------------------------
@@ -94,6 +127,7 @@ async fn handle_single_user_ws(
     state: Arc<WsState>,
     target_user_id: String,
     reauth: Option<AuthenticatedUser>, // None = self, skip reauth
+    token_exp: i64,
 ) {
     let (mut sender, mut receiver) = socket.split();
     let mut broadcast_rx = state.hr_broadcast.subscribe();
@@ -115,11 +149,21 @@ async fn handle_single_user_ws(
     let (mut reauth_interval, mut self_heal_interval, mut ping_interval) =
         make_ws_intervals().await;
 
+    // The upgrade authenticated this socket once; close it when that token
+    // would have expired so a long-lived connection cannot outlive its
+    // credential. The SPA refreshes and reconnects on 4401.
+    let token_deadline = tokio::time::sleep(time_until_expiry(token_exp, unix_now_secs()));
+    tokio::pin!(token_deadline);
+
     loop {
         tokio::select! {
             biased;
             _ = state.shutdown.cancelled() => {
                 let _ = sender.send(shutdown_close_frame()).await;
+                break;
+            }
+            _ = &mut token_deadline => {
+                let _ = sender.send(token_expired_close_frame()).await;
                 break;
             }
             should_disconnect = poll_receiver_or_ping(
@@ -189,6 +233,7 @@ async fn handle_group_ws(
     state: Arc<WsState>,
     auth_user: AuthenticatedUser,
     group_id: String,
+    token_exp: i64,
 ) {
     let (mut sender, mut receiver) = socket.split();
     let mut broadcast_rx = state.hr_broadcast.subscribe();
@@ -222,11 +267,21 @@ async fn handle_group_ws(
     let (mut reauth_interval, mut self_heal_interval, mut ping_interval) =
         make_ws_intervals().await;
 
+    // The upgrade authenticated this socket once; close it when that token
+    // would have expired so a long-lived connection cannot outlive its
+    // credential. The SPA refreshes and reconnects on 4401.
+    let token_deadline = tokio::time::sleep(time_until_expiry(token_exp, unix_now_secs()));
+    tokio::pin!(token_deadline);
+
     loop {
         tokio::select! {
             biased;
             _ = state.shutdown.cancelled() => {
                 let _ = sender.send(shutdown_close_frame()).await;
+                break;
+            }
+            _ = &mut token_deadline => {
+                let _ = sender.send(token_expired_close_frame()).await;
                 break;
             }
             should_disconnect = poll_receiver_or_ping(
@@ -465,6 +520,41 @@ mod tests {
             }
             other => panic!("expected Close(Some(_)), got {other:?}"),
         }
+    }
+
+    #[test]
+    fn token_expired_close_frame_uses_the_private_4401_code() {
+        // The SPA keys "refresh and reconnect" off this exact code, so it must
+        // stay distinct from the 1001 shutdown close.
+        match token_expired_close_frame() {
+            Message::Close(Some(cf)) => {
+                assert_eq!(cf.code, CLOSE_TOKEN_EXPIRED);
+                assert_eq!(cf.code, 4401);
+                assert_eq!(&*cf.reason, "access token expired");
+            }
+            other => panic!("expected Close(Some(_)), got {other:?}"),
+        }
+        assert_ne!(CLOSE_TOKEN_EXPIRED, close_code::AWAY);
+    }
+
+    #[test]
+    fn expiry_deadline_is_the_remaining_token_lifetime() {
+        let now = 1_800_000_000;
+        assert_eq!(
+            time_until_expiry(now + 1800, now),
+            Duration::from_secs(1800)
+        );
+        assert_eq!(time_until_expiry(now + 1, now), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn an_already_expired_token_closes_immediately() {
+        // Must not wrap around into a very long wait.
+        let now = 1_800_000_000;
+        assert_eq!(time_until_expiry(now, now), Duration::ZERO);
+        assert_eq!(time_until_expiry(now - 60, now), Duration::ZERO);
+        assert_eq!(time_until_expiry(0, now), Duration::ZERO);
+        assert_eq!(time_until_expiry(i64::MIN, now), Duration::ZERO);
     }
 
     #[test]
