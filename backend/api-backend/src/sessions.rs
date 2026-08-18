@@ -23,9 +23,10 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
-use sha2_hmac::Sha256;
+use sha2::Sha256;
+use subtle::ConstantTimeEq;
 
 use common::redis_keys::{REFRESH_GRACE_SECS, REFRESH_SESSION_TTL_SECS};
 
@@ -339,7 +340,7 @@ impl SessionKeys {
         let mut mac =
             HmacSha256::new_from_slice(&self.hmac_key).expect("HMAC-SHA256 accepts any key length");
         mac.update(secret.as_bytes());
-        hex_encode(&mac.finalize().into_bytes())
+        hex::encode(mac.finalize().into_bytes())
     }
 
     /// Seal a secret so it can be recovered during the grace window.
@@ -477,26 +478,18 @@ pub fn grace_secs() -> i64 {
     REFRESH_GRACE_SECS
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    bytes.iter().fold(String::new(), |mut s, b| {
-        let _ = write!(s, "{b:02x}");
-        s
-    })
-}
-
 /// Compare two hex digests without leaking their contents through timing.
 pub fn hashes_match(a: &str, b: &str) -> bool {
     constant_time_eq(a, b)
 }
 
-/// Length-independent, short-circuit-free comparison for hex digests.
+/// Short-circuit-free comparison for hex digests.
+///
+/// Only the length is compared in the ordinary way: digest lengths are fixed and
+/// public, so leaking a mismatch there says nothing the caller did not know.
 fn constant_time_eq(a: &str, b: &str) -> bool {
     let (a, b) = (a.as_bytes(), b.as_bytes());
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    a.len() == b.len() && a.ct_eq(b).into()
 }
 
 #[cfg(test)]
