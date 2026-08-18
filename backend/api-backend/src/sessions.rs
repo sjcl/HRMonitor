@@ -349,13 +349,13 @@ impl SessionKeys {
     /// ciphertext lifted from another session (or an earlier rotation of the
     /// same one) fails to open rather than yielding the wrong token.
     pub fn seal_secret(&self, sid: &str, current_hash: &str, secret: &str) -> String {
-        use aes_gcm::aead::{Aead, KeyInit, Payload};
-        use aes_gcm::{Aes256Gcm, Key, Nonce};
+        use aes_gcm::Aes256Gcm;
+        use aes_gcm::aead::{Aead, KeyInit, Nonce, Payload};
 
-        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&self.seal_key));
+        let cipher = Aes256Gcm::new((&self.seal_key).into());
         let mut nonce_bytes = [0u8; 12];
         rand::fill(&mut nonce_bytes);
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let nonce: &Nonce<Aes256Gcm> = (&nonce_bytes).into();
 
         let aad = seal_aad(sid, current_hash);
         let ciphertext = cipher
@@ -380,8 +380,8 @@ impl SessionKeys {
     /// keeps a mis-sealed value from ever being handed back to a browser as a
     /// live credential.
     pub fn open_secret(&self, sid: &str, current_hash: &str, sealed: &str) -> Option<String> {
-        use aes_gcm::aead::{Aead, KeyInit, Payload};
-        use aes_gcm::{Aes256Gcm, Key, Nonce};
+        use aes_gcm::Aes256Gcm;
+        use aes_gcm::aead::{Aead, KeyInit, Nonce, Payload};
 
         let raw = URL_SAFE_NO_PAD.decode(sealed).ok()?;
         if raw.len() < 12 {
@@ -389,11 +389,11 @@ impl SessionKeys {
         }
         let (nonce_bytes, ciphertext) = raw.split_at(12);
 
-        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&self.seal_key));
+        let cipher = Aes256Gcm::new((&self.seal_key).into());
         let aad = seal_aad(sid, current_hash);
         let plaintext = cipher
             .decrypt(
-                Nonce::from_slice(nonce_bytes),
+                &Nonce::<Aes256Gcm>::try_from(nonce_bytes).ok()?,
                 Payload {
                     msg: ciphertext,
                     aad: aad.as_bytes(),
