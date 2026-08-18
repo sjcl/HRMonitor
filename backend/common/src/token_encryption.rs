@@ -1,5 +1,5 @@
-use aes_gcm::aead::{Aead, OsRng};
-use aes_gcm::{AeadCore, Aes256Gcm, KeyInit};
+use aes_gcm::aead::{Aead, Generate, Nonce};
+use aes_gcm::{Aes256Gcm, KeyInit};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use std::collections::HashMap;
@@ -55,7 +55,7 @@ impl TokenEncryption {
             .expect("current_version key must exist");
 
         let cipher = Aes256Gcm::new(key.into());
-        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        let nonce = Nonce::<Aes256Gcm>::generate();
         let ciphertext = cipher
             .encrypt(&nonce, plaintext.as_bytes())
             .expect("encryption must not fail");
@@ -79,11 +79,12 @@ impl TokenEncryption {
             .ok_or(DecryptError::UnknownKeyVersion(key_version))?;
 
         let (nonce_bytes, ciphertext) = data.split_at(NONCE_LEN);
-        let nonce = aes_gcm::Nonce::from_slice(nonce_bytes);
+        let nonce =
+            Nonce::<Aes256Gcm>::try_from(nonce_bytes).map_err(|_| DecryptError::InvalidData)?;
         let cipher = Aes256Gcm::new(key.into());
 
         let plaintext = cipher
-            .decrypt(nonce, ciphertext)
+            .decrypt(&nonce, ciphertext)
             .map_err(|_| DecryptError::DecryptionFailed)?;
 
         String::from_utf8(plaintext).map_err(|_| DecryptError::InvalidUtf8)
