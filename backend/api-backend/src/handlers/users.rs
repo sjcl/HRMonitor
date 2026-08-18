@@ -13,11 +13,12 @@ use crate::AppState;
 use crate::models::{HeartRateProfile, SelfUser, UpdateUserRequest, UserRow};
 use common::access::ViewableUserId;
 
-const SELECT_USER_ROW: &str = "SELECT u.id, u.display_name, u.timezone,
+const SELECT_USER_BY_ID: &str = "SELECT u.id, u.display_name, u.timezone,
             a.provider_image as avatar_url,
             u.heart_rate_visibility
      FROM users u
-     LEFT JOIN accounts a ON a.user_id = u.id AND a.provider = 'discord'";
+     LEFT JOIN accounts a ON a.user_id = u.id AND a.provider = 'discord'
+     WHERE u.id = $1";
 
 const VALID_VISIBILITIES: &[&str] = &[GROUP_DEFAULT, PRIVATE];
 
@@ -25,8 +26,7 @@ pub async fn get_self_user(
     State(state): State<Arc<AppState>>,
     Extension(auth_user): Extension<AuthenticatedUser>,
 ) -> Result<Json<SelfUser>, AppError> {
-    let query = format!("{SELECT_USER_ROW} WHERE u.id = $1");
-    let row: UserRow = sqlx::query_as(&query)
+    let row: UserRow = sqlx::query_as(SELECT_USER_BY_ID)
         .bind(&auth_user.id)
         .fetch_optional(&state.db)
         .await?
@@ -39,8 +39,7 @@ pub async fn get_heart_rate_profile(
     State(state): State<Arc<AppState>>,
     ViewableUserId(id): ViewableUserId,
 ) -> Result<Json<HeartRateProfile>, AppError> {
-    let query = format!("{SELECT_USER_ROW} WHERE u.id = $1");
-    let row: UserRow = sqlx::query_as(&query)
+    let row: UserRow = sqlx::query_as(SELECT_USER_BY_ID)
         .bind(&id)
         .fetch_optional(&state.db)
         .await?
@@ -93,8 +92,7 @@ pub async fn update_user(
         return Err(AppError::NotFound("User not found".into()));
     }
 
-    let query = format!("{SELECT_USER_ROW} WHERE u.id = $1");
-    let row: UserRow = sqlx::query_as(&query)
+    let row: UserRow = sqlx::query_as(SELECT_USER_BY_ID)
         .bind(&id)
         .fetch_one(&state.db)
         .await?;

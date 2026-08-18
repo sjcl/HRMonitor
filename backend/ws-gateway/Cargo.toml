@@ -7,7 +7,7 @@ edition = "2024"
 common = { path = "../common", features = ["web", "signal", "redis-conn"] }
 axum = { version = "0.8.8", features = ["ws"] }
 tokio = { version = "1.51.1", features = ["full"] }
-sqlx = { version = "0.8.6", features = ["runtime-tokio", "postgres"] }
+sqlx = { version = "0.9.0", features = ["runtime-tokio", "postgres"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 tracing = "0.1.44"
