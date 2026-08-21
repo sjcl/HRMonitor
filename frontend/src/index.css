@@ -1,1 +1,21 @@
 @import "tailwindcss";
+
+/* Document-level dark surface.
+ *
+ * Components carry their own bg-gray-800/900 cards, but nothing paints the
+ * page behind them — that used to live on the Next.js root layout's <body>
+ * and was dropped in the Vite migration. Set it here rather than on
+ * index.html so the single CSS entry stays the one place the base palette
+ * is defined. html is painted too, so overscroll does not flash white. */
+@layer base {
+  html {
+    color-scheme: dark;
+    background-color: var(--color-gray-950);
+  }
+
+  body {
+    min-height: 100vh;
+    background-color: var(--color-gray-950);
+    color: var(--color-gray-100);
+  }
+}
