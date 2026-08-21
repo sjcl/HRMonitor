@@ -22,7 +22,7 @@ services:
   # per-second fsync keeps sessions across restarts and redeploys, at the cost
   # of at most ~1s of writes.
   redis:
-    image: redis:8.10.0-alpine
+    image: redis:8.10.1-alpine
     command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
     volumes:
       - redis-data:/data

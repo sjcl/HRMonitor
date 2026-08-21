@@ -19,7 +19,7 @@ jobs:
       # covered without a real Redis, and those tests fail rather than skip
       # when CI is set but REDIS_URL is not.
       redis:
-        image: redis:8.10.0-alpine
+        image: redis:8.10.1-alpine
         ports:
           - 6379:6379
         options: >-
