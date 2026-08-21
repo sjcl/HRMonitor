@@ -47,6 +47,8 @@ docs/               仕様書 (API, アーキテクチャ, スキーマ, エー�
 - Pulsoid WS ワーカー: ユーザーごとに1つ spawned、指数バックオフでリトライ
 - 心拍データ: DB 書き込み → NATS `hr.received` publish
 - OAuth token 期限は passive に検知: 期限に近い行への WS 接続を見送り、pulsoid-refresher が `revision` を bump したら自然に世代交代
+- 接続中は 30 秒ごとに WS Ping を送信。Text/Binary/Ping/Pong を 90 秒間まったく受信しなければ半開き接続とみなし、
+  既存の再接続経路 (pending + backoff) へ合流する (terminal error にはしない)
 - 定期 DB reconciliation (60秒) で connection.changed ロストを補完
 - ユーザー:Pulsoidトークンは 1:1 (pulsoid_connections テーブル)
 
