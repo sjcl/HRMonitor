@@ -167,6 +167,8 @@ Pulsoid WS → pulsoid-ingest → TimescaleDB 保存
                               ws-gateway → tokio broadcast → 各 WS クライアント
 ```
 
+pulsoid-ingest の Pulsoid WS ワーカーは接続中、30 秒ごとに WebSocket Ping を送る。Text / Binary / Ping / Pong を 90 秒間ひとつも受信しなければ transport がサイレントに停止したとみなし、接続を捨てて既存の再接続経路 (状態を `pending` に戻してバックオフ後に再接続) へ合流する。これは terminal な `error` ではないので再認可は不要。Pong が返らないこと単独では切断しない — 心拍 Text が流れていれば接続は維持され、逆にセンサーが offline でも Pong が届く限り維持される。
+
 ws-gateway は起動時に直近 6 時間の心拍から Redis を `SET NX EX` で warm-up する (`NX` なので pulsoid-ingest の書き込みを上書きしない)。
 
 WebSocket はアップグレード時に一度だけ認証されるため、トークンの `exp` に達したら close code **4401** で切断する。SPA はリフレッシュしてから再接続する。一方、他人のデータやグループを見る接続は 30 秒ごとに DB へ再認可を問い合わせる。

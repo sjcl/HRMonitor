@@ -1,10 +1,14 @@
-use futures_util::StreamExt;
+use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use sqlx::PgPool;
+use std::fmt::Display;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::time::{Instant, MissedTickBehavior, interval_at};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
+use tokio_tungstenite::tungstenite::{Bytes, Message, Utf8Bytes};
 
 use common::messages::{HeartRateReceived, subjects};
 use common::pulsoid_state::ConnectionState;
@@ -26,10 +30,30 @@ const HR_RECEIVED_PUBLISH_TIMEOUT: Duration = Duration::from_millis(100);
 /// worker gives up on the current one.
 const REFRESH_SAFETY_MARGIN_SECS: i64 = 60;
 
+/// How often the worker sends a WebSocket Ping control frame while a
+/// connection is up. Pulsoid does not document Ping/Pong support, but any
+/// RFC 6455 compliant endpoint must answer a Ping with a Pong. A missing
+/// Pong on its own is NEVER treated as a dead connection — see
+/// [`IDLE_TIMEOUT`].
+const PING_INTERVAL: Duration = Duration::from_secs(30);
+
+/// If no Text, Binary, Ping or Pong frame arrives for this long, the
+/// transport is considered silently dead and the session is torn down so the
+/// existing reconnect path runs. Three times [`PING_INTERVAL`], so two
+/// consecutive lost Pings are not enough to trigger a reconnect. This
+/// measures *transport* silence, not heart-rate silence: a session that only
+/// receives Pongs (sensor offline, socket healthy) is deliberately kept.
+const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// Upper bound on a single Ping send. On a half-open connection a write can
+/// block forever once the send buffer fills; without this bound the watchdog
+/// would stall inside its own keepalive.
+const PING_SEND_TIMEOUT: Duration = Duration::from_secs(10);
+
 pub async fn run_worker(
     db: PgPool,
     nats: async_nats::Client,
-    mut redis: redis::aio::ConnectionManager,
+    redis: redis::aio::ConnectionManager,
     encryption: Arc<TokenEncryption>,
     user_id: String,
     revision: i32,
@@ -210,27 +234,48 @@ pub async fn run_worker(
 
                 tracing::info!(user_id = %user_id, "Connected to Pulsoid WebSocket");
 
-                let (_, mut read) = ws_stream.split();
+                let (mut write, mut read) = ws_stream.split();
+                // One handle clone per WebSocket session (not per frame): the
+                // session loop needs to own what it writes to, while the
+                // reconnect loop keeps using the originals.
+                let mut handler = IngestTextHandler {
+                    db: db.clone(),
+                    nats: nats.clone(),
+                    redis: redis.clone(),
+                    user_id: user_id.clone(),
+                };
 
-                while let Some(msg) = read.next().await {
-                    match msg {
-                        Ok(tokio_tungstenite::tungstenite::Message::Text(text)) => {
-                            if let Err(e) =
-                                handle_message(&db, &nats, &mut redis, &user_id, &text).await
-                            {
-                                tracing::warn!(user_id = %user_id, "Failed to handle message: {e}");
-                            }
-                        }
-                        Ok(tokio_tungstenite::tungstenite::Message::Close(_)) => {
-                            tracing::info!(user_id = %user_id, "WebSocket closed by server");
-                            break;
-                        }
-                        Err(e) => {
-                            let error_msg = sanitize_error(&format!("{e}"));
-                            tracing::warn!(user_id = %user_id, "WebSocket error: {error_msg}");
-                            break;
-                        }
-                        _ => {}
+                let reason = run_ws_session(&mut write, &mut read, &mut handler).await;
+                match &reason {
+                    DisconnectReason::ServerClose => {
+                        tracing::info!(user_id = %user_id, "WebSocket closed by server");
+                    }
+                    DisconnectReason::StreamEnded => {
+                        tracing::info!(user_id = %user_id, "WebSocket stream ended");
+                    }
+                    DisconnectReason::ReadError(error_msg) => {
+                        tracing::warn!(user_id = %user_id, "WebSocket error: {error_msg}");
+                    }
+                    DisconnectReason::IdleTimeout { idle_secs } => {
+                        tracing::warn!(
+                            user_id = %user_id,
+                            timeout_secs = IDLE_TIMEOUT.as_secs(),
+                            idle_secs,
+                            "No WebSocket frames received; transport looks silently dead, reconnecting"
+                        );
+                    }
+                    DisconnectReason::PingFailed(error_msg) => {
+                        tracing::warn!(
+                            user_id = %user_id,
+                            "Failed to send WebSocket ping: {error_msg}"
+                        );
+                    }
+                    DisconnectReason::PingTimedOut => {
+                        tracing::warn!(
+                            user_id = %user_id,
+                            timeout_secs = PING_SEND_TIMEOUT.as_secs(),
+                            "WebSocket ping send timed out, reconnecting"
+                        );
                     }
                 }
 
@@ -238,8 +283,8 @@ pub async fn run_worker(
                     &db,
                     &user_id,
                     revision,
-                    ConnectionState::Pending,
-                    Some("WebSocket disconnected, reconnecting"),
+                    reason.next_state(),
+                    Some(&reason.last_error()),
                 )
                 .await
                 {
@@ -265,6 +310,152 @@ pub async fn run_worker(
         tracing::info!(user_id = %user_id, backoff_secs = backoff.as_secs(), "Reconnecting after backoff");
         tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(max_backoff);
+    }
+}
+
+/// Why a connected WebSocket session ended.
+///
+/// Every variant is recoverable: [`DisconnectReason::next_state`] is
+/// `Pending` for all of them, so a transport failure never flips the row into
+/// the terminal `'error'` state and never asks the user to re-authorize.
+#[derive(Debug, PartialEq, Eq)]
+enum DisconnectReason {
+    /// The server sent a Close frame.
+    ServerClose,
+    /// Reading from the socket failed. Already sanitized.
+    ReadError(String),
+    /// The stream ended without a Close frame (EOF).
+    StreamEnded,
+    /// Nothing at all was received for [`IDLE_TIMEOUT`].
+    IdleTimeout { idle_secs: u64 },
+    /// Sending a keepalive Ping failed. Already sanitized.
+    PingFailed(String),
+    /// Sending a keepalive Ping did not finish within [`PING_SEND_TIMEOUT`].
+    PingTimedOut,
+}
+
+impl DisconnectReason {
+    /// State to persist before reconnecting. Always `Pending`: a dead
+    /// transport is not a credential problem, so it must not become terminal.
+    fn next_state(&self) -> ConnectionState {
+        ConnectionState::Pending
+    }
+
+    /// Text for the `last_error` column. The three pre-existing paths keep
+    /// their original wording; the watchdog paths are distinguishable.
+    fn last_error(&self) -> String {
+        match self {
+            Self::ServerClose | Self::ReadError(_) | Self::StreamEnded => {
+                "WebSocket disconnected, reconnecting".to_string()
+            }
+            Self::IdleTimeout { .. } => format!(
+                "WebSocket idle timeout: no frames for {}s, reconnecting",
+                IDLE_TIMEOUT.as_secs()
+            ),
+            Self::PingFailed(e) => format!("WebSocket ping failed, reconnecting: {e}"),
+            Self::PingTimedOut => format!(
+                "WebSocket ping send timed out after {}s, reconnecting",
+                PING_SEND_TIMEOUT.as_secs()
+            ),
+        }
+    }
+}
+
+/// Handles Pulsoid text frames. Abstracted so [`run_ws_session`] can be
+/// tested without a database, Redis or NATS.
+trait TextHandler {
+    fn handle(&mut self, text: Utf8Bytes) -> impl Future<Output = ()> + Send;
+}
+
+/// Production [`TextHandler`]: forwards to [`handle_message`].
+struct IngestTextHandler {
+    db: PgPool,
+    nats: async_nats::Client,
+    redis: redis::aio::ConnectionManager,
+    user_id: String,
+}
+
+impl TextHandler for IngestTextHandler {
+    async fn handle(&mut self, text: Utf8Bytes) {
+        if let Err(e) =
+            handle_message(&self.db, &self.nats, &mut self.redis, &self.user_id, &text).await
+        {
+            tracing::warn!(user_id = %self.user_id, "Failed to handle message: {e}");
+        }
+    }
+}
+
+/// Drives a connected WebSocket until it dies, keeping a heartbeat on it.
+///
+/// Sends a Ping every [`PING_INTERVAL`] and gives up if *nothing* arrives for
+/// [`IDLE_TIMEOUT`]. Received Pings are answered by tungstenite itself, which
+/// queues the Pong and lets a later read/write/flush push it out — we never
+/// send a Pong by hand; the periodic Ping doubles as that flush.
+///
+/// The caller owns logging and state persistence; this function only reports
+/// why the session ended.
+async fn run_ws_session<Si, St, E, H>(
+    write: &mut Si,
+    read: &mut St,
+    handler: &mut H,
+) -> DisconnectReason
+where
+    Si: Sink<Message> + Unpin,
+    Si::Error: Display,
+    St: Stream<Item = Result<Message, E>> + Unpin,
+    E: Display,
+    H: TextHandler + Send,
+{
+    // First tick one full interval from now, not immediately.
+    let mut ping_timer = interval_at(Instant::now() + PING_INTERVAL, PING_INTERVAL);
+    // A late tick must not be followed by a burst of catch-up Pings.
+    ping_timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut last_frame_at = Instant::now();
+
+    loop {
+        tokio::select! {
+            msg = read.next() => match msg {
+                Some(Ok(Message::Text(text))) => {
+                    handler.handle(text).await;
+                    // Stamped *after* the handler: time spent writing to the
+                    // DB is not transport silence, so a slow handler must not
+                    // make the next iteration look like a dead socket.
+                    last_frame_at = Instant::now();
+                }
+                // Any data or control frame proves the transport is alive —
+                // including a lone Pong while the sensor is offline.
+                Some(Ok(Message::Binary(_) | Message::Ping(_) | Message::Pong(_))) => {
+                    last_frame_at = Instant::now();
+                }
+                Some(Ok(Message::Close(_))) => return DisconnectReason::ServerClose,
+                Some(Ok(Message::Frame(_))) => {}
+                Some(Err(e)) => {
+                    return DisconnectReason::ReadError(sanitize_error(&e.to_string()));
+                }
+                None => return DisconnectReason::StreamEnded,
+            },
+            _ = ping_timer.tick() => {
+                match tokio::time::timeout(
+                    PING_SEND_TIMEOUT,
+                    write.send(Message::Ping(Bytes::new())),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        return DisconnectReason::PingFailed(sanitize_error(&e.to_string()));
+                    }
+                    Err(_) => return DisconnectReason::PingTimedOut,
+                }
+            }
+            // Rebuilt every iteration, so each received frame pushes the
+            // deadline out by a full IDLE_TIMEOUT.
+            _ = tokio::time::sleep_until(last_frame_at + IDLE_TIMEOUT) => {
+                return DisconnectReason::IdleTimeout {
+                    idle_secs: last_frame_at.elapsed().as_secs(),
+                };
+            }
+        }
     }
 }
 
@@ -553,5 +744,435 @@ mod tests {
         let input = "Bearer ";
         let out = sanitize_error(input);
         assert_eq!(out, "Bearer ");
+    }
+}
+
+/// Heartbeat watchdog tests.
+///
+/// These drive [`run_ws_session`] against a scripted stream and a recording
+/// sink under `start_paused = true`, so the tokio clock auto-advances and a
+/// 90-second timeout is verified in milliseconds of real time. No Pulsoid
+/// API, no token, no socket.
+#[cfg(test)]
+mod watchdog_tests {
+    use super::*;
+    use std::collections::VecDeque;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use tokio::time::Sleep;
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum SinkMode {
+        Ok,
+        /// Every send fails immediately.
+        Fail,
+        /// Never becomes ready: models a write blocked on a full send buffer.
+        Stall,
+    }
+
+    /// `Sink<Message>` that records what was sent and when (relative to its
+    /// construction, i.e. to the start of the session).
+    struct RecordingSink {
+        start: Instant,
+        sent: Vec<(Duration, Message)>,
+        mode: SinkMode,
+    }
+
+    impl RecordingSink {
+        fn new(mode: SinkMode) -> Self {
+            Self {
+                start: Instant::now(),
+                sent: Vec::new(),
+                mode,
+            }
+        }
+
+        /// Seconds elapsed at which each Ping was sent.
+        fn ping_offsets_secs(&self) -> Vec<u64> {
+            self.sent
+                .iter()
+                .filter(|(_, m)| matches!(m, Message::Ping(_)))
+                .map(|(at, _)| at.as_secs())
+                .collect()
+        }
+    }
+
+    impl Sink<Message> for RecordingSink {
+        type Error = String;
+
+        fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), String>> {
+            match self.mode {
+                SinkMode::Ok => Poll::Ready(Ok(())),
+                SinkMode::Fail => Poll::Ready(Err("sink is broken".to_string())),
+                SinkMode::Stall => Poll::Pending,
+            }
+        }
+
+        fn start_send(self: Pin<&mut Self>, item: Message) -> Result<(), String> {
+            let this = self.get_mut();
+            let at = this.start.elapsed();
+            this.sent.push((at, item));
+            Ok(())
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), String>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), String>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// What the stream does once its script is exhausted.
+    enum Tail {
+        /// Stays pending forever: a silently dead transport.
+        Silent,
+        /// Yields `None`: EOF.
+        End,
+    }
+
+    /// Replays `(gap, item)` pairs, where `gap` is the delay since the
+    /// previous item.
+    struct ScriptedStream {
+        script: VecDeque<(Duration, Result<Message, String>)>,
+        tail: Tail,
+        sleep: Option<Pin<Box<Sleep>>>,
+    }
+
+    impl ScriptedStream {
+        fn new(script: Vec<(u64, Result<Message, String>)>, tail: Tail) -> Self {
+            Self {
+                script: script
+                    .into_iter()
+                    .map(|(gap, item)| (Duration::from_secs(gap), item))
+                    .collect(),
+                tail,
+                sleep: None,
+            }
+        }
+
+        fn silent() -> Self {
+            Self::new(Vec::new(), Tail::Silent)
+        }
+    }
+
+    impl Stream for ScriptedStream {
+        type Item = Result<Message, String>;
+
+        fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            let this = self.get_mut();
+            let gap = match this.script.front() {
+                Some((gap, _)) => *gap,
+                None => {
+                    return match this.tail {
+                        Tail::Silent => Poll::Pending,
+                        Tail::End => Poll::Ready(None),
+                    };
+                }
+            };
+            let sleep = this
+                .sleep
+                .get_or_insert_with(|| Box::pin(tokio::time::sleep(gap)));
+            match sleep.as_mut().poll(cx) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(()) => {
+                    this.sleep = None;
+                    let (_, item) = this.script.pop_front().expect("front checked above");
+                    Poll::Ready(Some(item))
+                }
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingTextHandler {
+        texts: Vec<String>,
+        /// Time each `handle` call blocks for, modelling a slow DB write.
+        delay: Duration,
+    }
+
+    impl TextHandler for RecordingTextHandler {
+        async fn handle(&mut self, text: Utf8Bytes) {
+            if !self.delay.is_zero() {
+                tokio::time::sleep(self.delay).await;
+            }
+            self.texts.push(text.to_string());
+        }
+    }
+
+    fn text(s: &str) -> Result<Message, String> {
+        Ok(Message::Text(s.to_string().into()))
+    }
+
+    fn close() -> Result<Message, String> {
+        Ok(Message::Close(None))
+    }
+
+    /// Runs a session and returns `(reason, sink, handler, elapsed_secs)`.
+    async fn run(
+        mode: SinkMode,
+        stream: ScriptedStream,
+    ) -> (DisconnectReason, RecordingSink, RecordingTextHandler, u64) {
+        run_with_handler_delay(mode, stream, Duration::ZERO).await
+    }
+
+    async fn run_with_handler_delay(
+        mode: SinkMode,
+        mut stream: ScriptedStream,
+        delay: Duration,
+    ) -> (DisconnectReason, RecordingSink, RecordingTextHandler, u64) {
+        let start = Instant::now();
+        let mut sink = RecordingSink::new(mode);
+        let mut handler = RecordingTextHandler {
+            delay,
+            ..Default::default()
+        };
+        let reason = run_ws_session(&mut sink, &mut stream, &mut handler).await;
+        let elapsed = start.elapsed().as_secs();
+        (reason, sink, handler, elapsed)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pings_at_regular_interval() {
+        // Text at 25/50/75/100s keeps the idle deadline far away (the 75s
+        // frame pushes it to 165s), so the Ping cadence is unambiguous.
+        let stream = ScriptedStream::new(
+            vec![
+                (25, text("hr")),
+                (25, text("hr")),
+                (25, text("hr")),
+                (25, close()),
+            ],
+            Tail::End,
+        );
+        let (reason, sink, _, elapsed) = run(SinkMode::Ok, stream).await;
+
+        assert_eq!(reason, DisconnectReason::ServerClose);
+        // Nothing at t=0: the first tick is one full interval in.
+        assert_eq!(sink.ping_offsets_secs(), vec![30, 60, 90]);
+        assert_eq!(elapsed, 100);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn text_frames_keep_connection_alive() {
+        // 60s < IDLE_TIMEOUT, for five minutes.
+        let mut script: Vec<(u64, Result<Message, String>)> =
+            (0..5).map(|_| (60, text("hr"))).collect();
+        script.push((60, close()));
+        let (reason, _, handler, elapsed) =
+            run(SinkMode::Ok, ScriptedStream::new(script, Tail::End)).await;
+
+        assert_eq!(reason, DisconnectReason::ServerClose);
+        assert_eq!(handler.texts.len(), 5);
+        assert_eq!(elapsed, 360);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pong_frames_keep_connection_alive() {
+        // Sensor offline: no heart-rate Text at all, only Pongs. The socket
+        // is healthy, so the watchdog must not fire.
+        let mut script: Vec<(u64, Result<Message, String>)> = (0..10)
+            .map(|_| (30, Ok(Message::Pong(Bytes::new()))))
+            .collect();
+        script.push((30, close()));
+        let (reason, _, handler, elapsed) =
+            run(SinkMode::Ok, ScriptedStream::new(script, Tail::End)).await;
+
+        assert_eq!(reason, DisconnectReason::ServerClose);
+        assert!(handler.texts.is_empty());
+        assert_eq!(elapsed, 330);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn binary_and_ping_count_as_activity() {
+        let stream = ScriptedStream::new(
+            vec![
+                (60, Ok(Message::Binary(Bytes::new()))),
+                (60, Ok(Message::Ping(Bytes::new()))),
+                (60, close()),
+            ],
+            Tail::End,
+        );
+        let (reason, _, _, elapsed) = run(SinkMode::Ok, stream).await;
+
+        assert_eq!(reason, DisconnectReason::ServerClose);
+        assert_eq!(elapsed, 180);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn silence_triggers_watchdog() {
+        let (reason, _, _, elapsed) = run(SinkMode::Ok, ScriptedStream::silent()).await;
+
+        // Ping count is deliberately not asserted: at t=90s the third Ping
+        // tick and the idle deadline are ready together and `select!` picks
+        // randomly between them.
+        match reason {
+            DisconnectReason::IdleTimeout { idle_secs } => assert_eq!(idle_secs, 90),
+            other => panic!("expected IdleTimeout, got {other:?}"),
+        }
+        assert_eq!(elapsed, 90);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn watchdog_does_not_fire_just_before_timeout() {
+        // A frame one second short of the deadline resets it in full.
+        let stream = ScriptedStream::new(vec![(89, text("hr"))], Tail::Silent);
+        let (reason, _, handler, elapsed) = run(SinkMode::Ok, stream).await;
+
+        assert!(matches!(reason, DisconnectReason::IdleTimeout { .. }));
+        assert_eq!(handler.texts, vec!["hr".to_string()]);
+        assert_eq!(elapsed, 89 + 90);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ping_send_failure_ends_session() {
+        let (reason, _, _, elapsed) = run(SinkMode::Fail, ScriptedStream::silent()).await;
+
+        assert_eq!(
+            reason,
+            DisconnectReason::PingFailed("sink is broken".to_string())
+        );
+        assert_eq!(elapsed, 30);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ping_send_timeout_ends_session() {
+        let (reason, _, _, elapsed) = run(SinkMode::Stall, ScriptedStream::silent()).await;
+
+        assert_eq!(reason, DisconnectReason::PingTimedOut);
+        // 30s to the first Ping + 10s waiting for the write to go through,
+        // i.e. the watchdog does not sit in its own keepalive until 90s.
+        assert_eq!(elapsed, 40);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn close_frame_ends_session() {
+        let stream = ScriptedStream::new(vec![(5, close())], Tail::Silent);
+        let (reason, _, _, elapsed) = run(SinkMode::Ok, stream).await;
+
+        assert_eq!(reason, DisconnectReason::ServerClose);
+        assert_eq!(elapsed, 5);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn read_error_ends_session() {
+        let stream = ScriptedStream::new(
+            vec![(5, Err("connection reset by peer".to_string()))],
+            Tail::Silent,
+        );
+        let (reason, _, _, elapsed) = run(SinkMode::Ok, stream).await;
+
+        assert_eq!(
+            reason,
+            DisconnectReason::ReadError("connection reset by peer".to_string())
+        );
+        assert_eq!(elapsed, 5);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn read_error_is_sanitized() {
+        let stream = ScriptedStream::new(
+            vec![(1, Err("handshake failed: Bearer secret123".to_string()))],
+            Tail::Silent,
+        );
+        let (reason, _, _, _) = run(SinkMode::Ok, stream).await;
+
+        match reason {
+            DisconnectReason::ReadError(msg) => assert!(!msg.contains("secret123"), "{msg}"),
+            other => panic!("expected ReadError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stream_end_ends_session() {
+        let (reason, _, _, elapsed) =
+            run(SinkMode::Ok, ScriptedStream::new(Vec::new(), Tail::End)).await;
+
+        assert_eq!(reason, DisconnectReason::StreamEnded);
+        assert_eq!(elapsed, 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn text_frames_are_dispatched_to_handler() {
+        let stream = ScriptedStream::new(
+            vec![(1, text("first")), (1, text("second")), (1, close())],
+            Tail::End,
+        );
+        let (reason, _, handler, _) = run(SinkMode::Ok, stream).await;
+
+        assert_eq!(reason, DisconnectReason::ServerClose);
+        assert_eq!(
+            handler.texts,
+            vec!["first".to_string(), "second".to_string()]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ping_backlog_does_not_burst_after_a_stall() {
+        // The Text branch body blocks the whole loop for 100s, so three Ping
+        // ticks are missed. MissedTickBehavior::Delay must release one Ping
+        // and then re-space the rest, not fire the backlog back to back.
+        let stream = ScriptedStream::new(vec![(1, text("hr"))], Tail::Silent);
+        let (reason, sink, _, _) =
+            run_with_handler_delay(SinkMode::Ok, stream, Duration::from_secs(100)).await;
+
+        // The slow handler itself must not be mistaken for a dead transport:
+        // the idle deadline restarts when the handler returns (t=101s).
+        match reason {
+            DisconnectReason::IdleTimeout { idle_secs } => assert_eq!(idle_secs, 90),
+            other => panic!("expected IdleTimeout, got {other:?}"),
+        }
+        let offsets = sink.ping_offsets_secs();
+        assert_eq!(offsets[0], 101, "first Ping after the stall: {offsets:?}");
+        for pair in offsets.windows(2) {
+            assert!(
+                pair[1] - pair[0] >= PING_INTERVAL.as_secs(),
+                "pings burst after the stall: {offsets:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn all_disconnect_reasons_are_recoverable() {
+        let reasons = [
+            DisconnectReason::ServerClose,
+            DisconnectReason::ReadError("io".to_string()),
+            DisconnectReason::StreamEnded,
+            DisconnectReason::IdleTimeout { idle_secs: 90 },
+            DisconnectReason::PingFailed("io".to_string()),
+            DisconnectReason::PingTimedOut,
+        ];
+
+        for reason in &reasons {
+            // Never terminal: the row stays spawnable and no re-auth is asked
+            // for, so WorkerManager reconnects on the existing backoff.
+            assert_eq!(
+                reason.next_state(),
+                ConnectionState::Pending,
+                "{reason:?} must stay recoverable"
+            );
+            assert!(!reason.last_error().is_empty());
+        }
+
+        // The pre-existing disconnect paths keep their original wording...
+        let ordinary = DisconnectReason::ServerClose.last_error();
+        assert_eq!(ordinary, "WebSocket disconnected, reconnecting");
+        assert_eq!(DisconnectReason::StreamEnded.last_error(), ordinary);
+        assert_eq!(
+            DisconnectReason::ReadError("io".to_string()).last_error(),
+            ordinary
+        );
+
+        // ...and the watchdog paths are distinguishable in `last_error`.
+        let idle = DisconnectReason::IdleTimeout { idle_secs: 120 }.last_error();
+        assert_ne!(idle, ordinary);
+        assert!(idle.contains("idle timeout"), "{idle}");
+        assert!(idle.contains("90s"), "{idle}");
+        assert_ne!(DisconnectReason::PingTimedOut.last_error(), ordinary);
+        assert_ne!(
+            DisconnectReason::PingFailed("io".to_string()).last_error(),
+            ordinary
+        );
     }
 }
