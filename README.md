@@ -22,7 +22,7 @@ docs/               仕様書 (API, アーキテクチャ, スキーマ)
 ### Backend
 
 - Rust (edition 2024), axum 0.8, tokio, sqlx 0.8 (PostgreSQL)
-- TimescaleDB (PostgreSQL 17) — `heart_rate_records` は hypertable
+- TimescaleDB (PostgreSQL 18) — `heart_rate_records` は hypertable
 - Redis — 最新心拍数キャッシュ + **リフレッシュセッション**
 - NATS (Core NATS) — サービス間通信
 - 認証: Ed25519 (EdDSA) JWT + Redis リフレッシュセッション
@@ -209,7 +209,7 @@ cargo run -p api-backend -- gen-jwt-key --kid k2
 
 | サービス | イメージ | 説明 |
 |----------|---------|------|
-| `timescaledb` | `timescale/timescaledb:2.28.2-pg17` | TimescaleDB (PostgreSQL 17) |
+| `timescaledb` | `timescale/timescaledb:2.29.2-pg18` | TimescaleDB (PostgreSQL 18) |
 | `redis` | `redis:8.8.0-alpine` | 最新心拍キャッシュ + リフレッシュセッション (AOF 有効) |
 | `nats` | `nats:2.14.4-alpine` | サービス間メッセージング |
 | `migration` | ビルド: `./backend` | DB マイグレーション (起動時に一度だけ実行) |

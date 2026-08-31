@@ -1,12 +1,12 @@
 services:
   timescaledb:
-    image: timescale/timescaledb:2.29.2-pg17
+    image: timescale/timescaledb:2.29.2-pg18
     environment:
       - POSTGRES_USER=hrmonitor
       - POSTGRES_PASSWORD=hrmonitor
       - POSTGRES_DB=hrmonitor
     volumes:
-      - ts-data:/var/lib/postgresql/data
+      - ts-data-pg18:/var/lib/postgresql
     expose:
       - "5432"
     healthcheck:
@@ -205,5 +205,5 @@ services:
       - prod
 
 volumes:
-  ts-data:
+  ts-data-pg18:
   redis-data:
