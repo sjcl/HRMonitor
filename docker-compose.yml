@@ -1,6 +1,6 @@
 services:
   timescaledb:
-    image: timescale/timescaledb:2.29.2-pg18
+    image: timescale/timescaledb:2.30.0-pg18
     environment:
       - POSTGRES_USER=hrmonitor
       - POSTGRES_PASSWORD=hrmonitor
